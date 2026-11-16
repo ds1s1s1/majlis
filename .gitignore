@@ -11,3 +11,5 @@ cloud/.wrangler/
 cloud/.turn.env
 .dev.vars
 *.log
+engine/target/
+engine/vendor/

@@ -62,7 +62,7 @@ class VideoTx {
     if (this.skipToKey && !key) { this.skipped = (this.skipped || 0) + 1; return; }
     if (queued > limit) {
       if (key) { this.queue = this.queue.filter((q) => q.i > 0 && q.i < q.length); }
-      else { this.skipped = (this.skipped || 0) + 1; if (this.keyed) this.skipToKey = true; return; }
+      else { this.skipped = (this.skipped || 0) + 1; if (this.keyed) this.skipToKey = true; else this.onSkip?.(id); return; }
     }
     if (key) this.skipToKey = false;
     this.queue.push(pkts);
@@ -140,6 +140,7 @@ class VideoRx {
     this.owdBase = []; this.qd = []; this.gaps = [];
     this.lastArrival = 0;
     this.waitKey = true;
+    this.lostIds = []; // live frames that never arrived whole: the host's engine recovers from these
   }
 
   push(b) {
@@ -186,7 +187,7 @@ class VideoRx {
       if (this.done.size > 3000) { const it = this.done.values(); for (let i = 0; i < 1500; i++) this.done.delete(it.next().value); }
     } else {
       // live: anything older that never finished is lost (waiting for it would add delay)
-      for (const [k2, g] of this.frames) if (g.epoch === f.epoch && ((g.id - f.id) | 0) < 0) { this.frames.delete(k2); this.win.lost++; }
+      for (const [k2, g] of this.frames) if (g.epoch === f.epoch && ((g.id - f.id) | 0) < 0) { this.frames.delete(k2); this.win.lost++; this.lostIds.push(g.id); }
     }
     const gap = this.lastEpoch === f.epoch && this.lastDelivered >= 0 ? ((f.id - this.lastDelivered) | 0) - 1 : 0;
     // a jump in frame numbers isn't loss: the sender may have skipped frames on purpose to stay
@@ -218,7 +219,7 @@ class VideoRx {
     // a frame that started arriving and never finished is lost; films travel ahead of the
     // picture, so a big keyframe on a slow line gets much longer to come in
     const tmo = this.film ? 2000 : 250;
-    for (const [k, g] of this.frames) if (hr() - g.first > tmo) { this.frames.delete(k); w.lost++; }
+    for (const [k, g] of this.frames) if (hr() - g.first > tmo) { this.frames.delete(k); w.lost++; if (!this.film) this.lostIds.push(g.id); }
     const qd = this.qd.length ? this.qd.reduce((a, b) => a + b, 0) / this.qd.length : 0;
     // jitter = how much the gap between frames wobbles around its average
     let jit = 0;
@@ -227,6 +228,7 @@ class VideoRx {
       jit = this.gaps.reduce((a, b) => a + Math.abs(b - mean), 0) / this.gaps.length;
     }
     const r = { kbps: Math.round(w.bytes * 8 / dt), loss: 0, lost: w.lost, recovered: w.recovered, frames: w.frames, qd: Math.round(qd * 10) / 10, jitter: Math.round(jit * 10) / 10, fps: Math.round(w.frames * 1000 / dt) };
+    if (this.lostIds.length) { r.lostIds = this.lostIds.slice(-32); this.lostIds = []; }
     this.win = { bytes: 0, frames: 0, lost: 0, recovered: 0, t };
     this.qd = []; this.gaps = [];
     return r;
@@ -235,8 +237,11 @@ class VideoRx {
 
 // ------------------------------------------------------------------ congestion control
 class RateControl {
-  constructor({ maxKbps, minKbps = 1500, startKbps, stability = false, relaxed = false }) {
+  constructor({ maxKbps, minKbps = 1500, startKbps, stability = false, relaxed = false, burstMs = 400 }) {
     this.max = maxKbps; this.min = minKbps; this.stability = stability; this.relaxed = relaxed;
+    // how long a queue has to last before it counts: ffmpeg streams have keyframe bursts to
+    // look past; the engine never sends keyframes mid-stream, so it can react much sooner
+    this.burstMs = burstMs; this.rxHist = [];
     this.qdHist = [];
     this.target = Math.min(maxKbps, startKbps || maxKbps * 0.5);
     this.lastDrop = 0; this.lastUp = now(); this.lossEw = 0; this.jitEw = 0; this.congestions = 0; this.bad = 0;
@@ -251,11 +256,16 @@ class RateControl {
     // what got through, smoothed over ~1 s: a single 100 ms report swings from 0 to double
     // (a film at 24 fps, a still screen), which made one quiet moment look like a slow line
     this.rxEw = this.rxEw == null ? fb.kbps : this.rxEw * 0.8 + fb.kbps * 0.2;
+    // the most the line carried lately: on a mostly still screen the average says nothing
+    // about capacity, the bursts do
+    this.rxHist.push({ v: this.rxEw, t });
+    while (this.rxHist.length > 1 && t - this.rxHist[0].t > 2000) this.rxHist.shift();
+    let rxPeak = 0; for (const x of this.rxHist) if (x.v > rxPeak) rxPeak = x.v;
     this.jitEw = this.jitEw ? this.jitEw * 0.9 + (fb.jitter || 0) * 0.1 : (fb.jitter || 0);
     // Standing queue, BBR-style: the smallest queuing delay seen over the last 400 ms. A burst
     // (a keyframe) delays a few frames for a moment; real congestion delays every one of them.
     this.qdHist.push({ v: fb.qd, t });
-    while (this.qdHist.length > 1 && t - this.qdHist[0].t > 400) this.qdHist.shift();
+    while (this.qdHist.length > 1 && t - this.qdHist[0].t > this.burstMs) this.qdHist.shift();
     let qd = Infinity; for (const x of this.qdHist) if (x.v < qd) qd = x.v;
     fb = { ...fb, qd };
     // a jittery line (Wi-Fi, 5G) wobbles on its own; only call it congestion above that wobble.
@@ -272,8 +282,8 @@ class RateControl {
     if (this.bad >= 2 && t - this.lastDrop > 500) {
       // If the link actually carried close to the target, aim just under what got through.
       // If the encoder wasn't using the bandwidth (static screen), just step down a bit.
-      const carried = this.rxEw > this.target * 0.6;
-      const next = carried ? Math.min(this.target * 0.85, this.rxEw * 0.95) : this.target * 0.9;
+      const carried = rxPeak > this.target * 0.6;
+      const next = carried ? Math.min(this.target * 0.85, rxPeak * 0.95) : this.target * 0.9;
       this.target = Math.max(this.min, next);
       this.lastDrop = t; this.congestions++; this.bad = 0;
       return 'down';

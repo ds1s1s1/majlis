@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Play with your friends over the internet. No accounts, just numbers.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
@@ -35,6 +35,13 @@
         "to": "helper",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "../engine/target/release",
+        "to": "engine",
+        "filter": [
+          "majlis-engine.exe"
         ]
       }
     ],

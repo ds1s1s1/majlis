@@ -109,6 +109,9 @@ npx wrangler secret put ACCESS_KEY
 cd helper
 dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o dist
 
+cd ../engine
+cargo build --release
+
 cd ../app
 npm install
 npm start

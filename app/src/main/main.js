@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { Store } = require('./store');
 const { Net } = require('./net');
 const { Helper } = require('./helper');
+const { Engine } = require('./engine');
 const { Host } = require('./host');
 const { Guest } = require('./guest');
 const { detectEncoders, hasGfxCapture, findFfmpeg } = require('./encoder');
@@ -32,7 +33,7 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 if (process.defaultApp) app.setAsDefaultProtocolClient('majlis', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('majlis');
 
-let win, store, net, helper, host, guest, replay, port;
+let win, store, net, helper, engine, host, guest, replay, port;
 let encoders = [];
 process.on('uncaughtException', (err) => {
   try {
@@ -433,7 +434,10 @@ app.whenReady().then(async () => {
   net = new Net(store.identity(), store);
   helper = new Helper();
   guest = new Guest({ net, store });
-  host = new Host({ store, net, helper, encoders, ffmpeg: ffmpegPath() });
+  // the Rust engine (NVIDIA): capture + NVENC without ffmpeg; others fall back to ffmpeg
+  engine = new Engine();
+  engine.start();
+  host = new Host({ store, net, helper, encoders, ffmpeg: ffmpegPath(), engine });
   replay = new Replay({ ffmpeg: ffmpegPath(), helper, store, encoders });
   handlers();
   createWindow();
@@ -528,5 +532,5 @@ app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); } catch {}
-  try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
+  try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); engine?.stop(); net?.stop(); store?.flush(); } catch {}
 });

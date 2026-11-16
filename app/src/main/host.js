@@ -9,6 +9,7 @@
 
 const { EventEmitter } = require('events');
 const { Encoder } = require('./encoder');
+const { EngineEncoder } = require('./engine');
 const { VideoTx, RateControl } = require('./media');
 const { Movie } = require('./movie');
 
@@ -33,9 +34,9 @@ const CAN = {
 const now = () => Date.now();
 
 class Host extends EventEmitter {
-  constructor({ store, net, helper, encoders, ffmpeg }) {
+  constructor({ store, net, helper, encoders, ffmpeg, engine }) {
     super();
-    this.store = store; this.net = net; this.helper = helper; this.encoders = encoders; this.ffmpeg = ffmpeg;
+    this.store = store; this.net = net; this.helper = helper; this.encoders = encoders; this.ffmpeg = ffmpeg; this.engine = engine || null;
     this.enabled = false;
     this.guests = new Map();     // sid -> guest
     this.knocks = new Map();     // sid -> knock awaiting decision
@@ -183,6 +184,8 @@ class Host extends EventEmitter {
       muted: false, hand: false, configSent: {},
     };
     this.guests.set(sid, g);
+    // a frame we dropped to stay live: the engine stops referencing it, so nothing smears
+    g.tx.onSkip = (id) => g.tierEnc?.()?.invalidate?.([id]);
     if (CAN.pad(g.role)) g.slot = wantSlot && ![...this.guests.values()].some((x) => x !== g && x.slot === wantSlot) ? wantSlot : this._freeSlot();
     this._wire(g);
     this.emit('joined', { sid, name: g.nick, auto });
@@ -461,6 +464,9 @@ class Host extends EventEmitter {
       }
       if (g.probe?.cool > now()) return;
       g.rc.feedback(fb);
+      // frames this viewer never got: the engine stops referencing them (no keyframe needed)
+      if (fb.lostIds?.length) g.tierEnc?.()?.invalidate?.(fb.lostIds);
+      if (g.tier === 'play' || g.tier === 'watch') this._applyRate(g.tier);
       g.tx.fecRatio = g.rc.fecRatio;
       return;
     }
@@ -662,6 +668,7 @@ class Host extends EventEmitter {
     const maxW = Math.min(capH === Infinity ? Infinity : Math.round(capH * 16 / 9), Math.max(...guests.map((g) => g.screen?.w || 1920)));
     const s = Math.min(1, maxW / srcW, maxH / srcH);
     if (s < 0.999) o.scale = { w: Math.round(srcW * s / 2) * 2, h: Math.round(srcH * s / 2) * 2 };
+    o.size = { w: srcW & ~1, h: srcH & ~1 };
     this.captureRect = win && this.wincap ? this.wincap.rect : { x: d.x, y: d.y, w: d.w, h: d.h };
     return o;
   }
@@ -713,7 +720,7 @@ class Host extends EventEmitter {
         if (!g.rc) {
           const hint = this.store.get('peakLearning') ? this.store.peakHint() : null;
           const start = lan ? cap * 0.6 : Math.min(cap * 0.5, hint ? hint.mbps * 900 : 12000);
-          g.rc = new RateControl({ maxKbps: cap, startKbps: start, stability: this._stability(g) });
+          g.rc = new RateControl({ maxKbps: cap, startKbps: start, stability: this._stability(g), burstMs: this.engine?.ok ? 150 : 400 });
         } else { g.rc.setMax(cap); g.rc.setStability(this._stability(g)); }
         if (g.maxKbps) g.rc.setMax(Math.min(cap, g.maxKbps)); // data saver on that guest's side
       }
@@ -721,7 +728,9 @@ class Host extends EventEmitter {
       const t = this.tiers[tier];
       const want = { enc: this._encFor(codec), kbps, ...src, lan, quality: this.store.get('qualityPreset') || 'balanced' };
       if (!t) {
-        const enc = new Encoder(this.ffmpeg);
+        // NVIDIA: the Rust engine (capture straight into NVENC, live bitrate changes, recovery
+        // without keyframes). Anything else: ffmpeg as before.
+        const enc = this.engine?.ok && want.enc.fam === 'nvenc' && !want.hdr ? new EngineEncoder(this.engine) : new Encoder(this.ffmpeg);
         const nt = { enc, codec, kbps, opts: want, config: null, sig: this._sig(want) };
         enc.on('config', (c) => { nt.config = c; this._sendConfig(tier); });
         enc.on('frame', (f) => { for (const g of this.guests.values()) if (g.tier === tier && g.configSent[tier] === nt.config?.epoch) g.tx.send(f); });
@@ -935,6 +944,7 @@ class Host extends EventEmitter {
       const tt = this.tiers[tier]; if (!tt) continue;
       const list = [...this.guests.values()].filter((g) => g.tier === tier && g.rc);
       if (!list.length) continue;
+      if (tt.enc instanceof EngineEncoder) { this._applyRate(tier); continue; }
       const want = Math.round(Math.min(...list.map((g) => g.rc.target)));
       const ch = (want - tt.kbps) / tt.kbps;
       const since = t - tt.enc.lastSwap;
@@ -944,6 +954,28 @@ class Host extends EventEmitter {
       }
     }
     this.emit('stats', this.stats());
+  }
+
+  // Engine streams take a new bitrate on the very next frame, so follow the rate control
+  // closely (at most every 200 ms). On a line too thin for the resolution, halve the frame
+  // rate before the picture breaks up; bring it back when there's room again.
+  _applyRate(tier) {
+    const tt = this.tiers[tier];
+    if (!tt || !(tt.enc instanceof EngineEncoder)) return;
+    const list = [...this.guests.values()].filter((g) => g.tier === tier && g.rc);
+    if (!list.length) return;
+    const t = now(), want = Math.round(Math.min(...list.map((g) => g.rc.target)));
+    if (t - tt.enc.lastSwap < 200) return;
+    const full = tt.opts.fps, sz = tt.opts.scale || tt.opts.size || { w: 1920, h: 1080 };
+    const bpp = (fps) => (want * 1000) / (sz.w * sz.h * fps);
+    let fps = tt.fpsNow || full;
+    // (only once the line has actually pushed back: at the start the estimate is still climbing)
+    if (fps > 30 && bpp(fps) < 0.025 && list.some((g) => g.rc.congestions > 0)) fps = Math.max(30, Math.round(full / 2));
+    else if (fps < full && bpp(full) > 0.045) fps = full;
+    if (Math.abs(want - tt.kbps) / tt.kbps < 0.05 && fps === (tt.fpsNow || full)) return;
+    tt.kbps = want; tt.fpsNow = fps;
+    tt.enc.swap({ kbps: want, fps });
+    tt.enc.opts.fps = full; // the tier's own frame rate stays what it was asked for
   }
 
   _recordPeak() {
@@ -956,7 +988,7 @@ class Host extends EventEmitter {
   stats() {
     return {
       enabled: this.enabled, code: this.code, hotseat: this.hotseat, mode: this.mode, movie: this.movie.info ? this._movieView() : null,
-      tiers: Object.fromEntries(Object.entries(this.tiers).map(([k, t]) => [k, t && { codec: t.codec, kbps: t.kbps, encoder: t.opts.enc.name, fps: t.opts.fps, scale: t.opts.scale || null, lan: t.opts.lan }])),
+      tiers: Object.fromEntries(Object.entries(this.tiers).map(([k, t]) => [k, t && { codec: t.codec, kbps: t.kbps, encoder: t.enc.config?.encoder || t.opts.enc.name, fpsNow: t.fpsNow || t.opts.fps, fps: t.opts.fps, scale: t.opts.scale || null, lan: t.opts.lan }])),
       upKbps: [...this.guests.values()].reduce((a, g) => a + (g.fb?.kbps || 0), 0),
       guests: [...this.guests.values()].map((g) => ({
         sid: g.sid, id: g.id, name: g.nick, role: g.role, slot: g.slot, tier: g.tier, hand: g.hand, muted: g.muted, safety: g.link.safety,
