@@ -18,22 +18,38 @@ class Guest extends EventEmitter {
     this.state = 'idle';
   }
 
-  async connect(target, caps) {
+  async connect(target, caps, { pin, reconnect } = {}) {
     if (this.link) this.leave();
-    this.state = 'knocking'; this.target = target; this.caps = caps;
-    this.emit('state', { state: 'knocking', target });
+    if (!reconnect) this.retries = 0;
+    this.leaving = false;
+    this.state = 'knocking'; this.target = target; this.caps = caps; this.pin = pin || this.pin;
+    this.emit('state', { state: reconnect ? 'reconnecting' : 'knocking', target });
     try {
-      const link = await this.net.connect(target, { caps: { codecs: caps.codecs } });
+      const link = await this.net.connect(target, { caps: { codecs: caps.codecs, maxKbps: this._maxKbps() }, pin: this.pin });
       this._attach(link);
       return { ok: true };
     } catch (e) {
       this.state = 'idle';
+      if (reconnect) return this._retry();
       this.emit('state', { state: 'failed', reason: e.code || e.message, target });
       return { ok: false, reason: e.code || e.message };
     }
   }
 
-  cancel() { this.net.cancelKnocks(); this.state = 'idle'; this.emit('state', { state: 'idle' }); }
+  cancel() { this.leaving = true; this.net.cancelKnocks(); this.state = 'idle'; this.emit('state', { state: 'idle' }); }
+
+  // Data saver (mobile data plans): ask the host to cap our stream.
+  _maxKbps() { return this.store.get('dataSaver') ? 5000 : 0; }
+  setDataSaver(on) { this.store.set('dataSaver', !!on); this.link?.ctrl({ t: 'limit', kbps: this._maxKbps() }); }
+
+  // The line dropped (5G hiccup, Wi-Fi roam): knock again a few times. The host recognises us
+  // and puts us back in our seat without asking.
+  _retry() {
+    if (this.leaving || (this.retries = (this.retries || 0) + 1) > 4) { this.emit('state', { state: 'ended', reason: 'timeout', summary: this.lastSummary }); return { ok: false }; }
+    this.emit('state', { state: 'reconnecting', attempt: this.retries });
+    setTimeout(() => { if (!this.leaving) this.connect(this.hostId || this.target, this.caps, { reconnect: true }); }, 1500 + this.retries * 1000);
+    return { ok: false, reconnecting: true };
+  }
 
   _attach(link) {
     this.link = link; this.state = 'linked';
@@ -46,7 +62,8 @@ class Guest extends EventEmitter {
       onNeedKey: () => this._needKey(),
     });
     this.emit('state', { state: 'linked', host: link.peer, safety: link.safety, keyChanged: this.keyChanged });
-    link.ctrl({ t: 'hello', caps: { codecs: this.caps.codecs }, screen: this.caps.screen, padType: this.caps.padType, connType: this.store.get('connType') });
+    this.retries = 0;
+    link.ctrl({ t: 'hello', caps: { codecs: this.caps.codecs, maxKbps: this._maxKbps() }, screen: this.caps.screen, padType: this.caps.padType, connType: this.store.get('connType') });
     link.on('ctrl', (m) => this._ctrl(m));
     link.on('raw', (b) => this._raw(b));
     link.on('path', (p) => this.emit('path', p));
@@ -55,8 +72,10 @@ class Guest extends EventEmitter {
       // median ping, ignoring the first seconds while the connection settles
       const rs = this.rtts.slice().sort((a, b) => a - b);
       const summary = { name: link.peer.nick || link.peer.id, ms: now() - this.started, mb: Math.round(link.stats.rx / 1e5) / 10, rtt: rs.length ? Math.round(rs[rs.length >> 1]) : null };
-      this.emit('state', { state: 'ended', reason: r, summary });
       this.link = null; this.state = 'idle'; clearInterval(this.fbTimer); clearInterval(this.pingTimer);
+      this.lastSummary = summary;
+      if (r === 'timeout' && !this.leaving) { this._retry(); return; }
+      this.emit('state', { state: 'ended', reason: r, summary });
     });
     this.fbTimer = setInterval(() => this._feedback(), 100);
     this.pingTimer = setInterval(() => link.ping(), 400);
@@ -105,10 +124,14 @@ class Guest extends EventEmitter {
     const ch = b[0];
     if (ch === 0x01) return this.rx.push(b);
     if (ch === 0x02) {
-      if (b.length < 12) return;
+      if (b.length < 14) return;
+      const seq = b.readUInt16BE(11);
+      if (this.aSeen?.has(seq)) return;
+      (this.aSeen ||= new Set()).add(seq);
+      if (this.aSeen.size > 400) { const it = this.aSeen.values(); for (let i = 0; i < 200; i++) this.aSeen.delete(it.next().value); }
       const sentLocal = b.readUInt32BE(3) - Math.round(this.link?.clockOffset || 0);
       const age = Math.max(0, ((now() >>> 0) - (sentLocal >>> 0)) | 0);
-      return this._post({ t: 'a', data: b.subarray(11), timed: b[1] === 1, epoch: b[2], pts: b.readUInt32BE(7), age: age < 5000 ? age : 0 });
+      return this._post({ t: 'a', data: b.subarray(13), timed: b[1] === 1, epoch: b[2], pts: b.readUInt32BE(7), age: age < 5000 ? age : 0 });
     }
     if (ch === 0x0a) return this._post({ t: 'c', x: b.readFloatLE(1), y: b.readFloatLE(5), v: b[9], s: b.readInt32LE(10) });
     if (ch === 0x0b) return this._post({ t: 'r', large: b[1], small: b[2] });
@@ -141,7 +164,7 @@ class Guest extends EventEmitter {
     const b = Buffer.allocUnsafe(6 + ev.length);
     b[0] = 0x03; b.writeUInt32BE(this.inSeq = (this.inSeq + 1) >>> 0, 1); b[5] = countEvents(ev); ev.copy(b, 6);
     const link = this.link;
-    link.send(b);
+    link.sendBoth(b);
     setTimeout(() => link.send(b), 2);
     setTimeout(() => link.send(b), 6);
   }
@@ -149,6 +172,7 @@ class Guest extends EventEmitter {
   ctrl(m) { this.link?.ctrl(m); }
 
   leave() {
+    this.leaving = true;
     if (!this.link) return;
     try { this.link.ctrl({ t: 'bye' }); } catch {}
     const l = this.link;

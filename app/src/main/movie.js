@@ -106,7 +106,7 @@ class Movie extends EventEmitter {
     if (!info || !info.video) throw new Error('unreadable');
     this.stop(true);
     this.info = info; this.enc = enc; this.kbps = kbps; this.maxW = maxW;
-    this.state = { playing: false, pos: Math.max(0, Math.min(pos, Math.max(0, info.duration - 5))), dur: info.duration, title: info.name, file, audio: pickAudio(info), sub: pickSub(info), night };
+    this.state = { playing: false, pos: Math.max(0, Math.min(pos, Math.max(0, info.duration - 5))), dur: info.duration, title: info.name, file, audio: pickAudio(info), sub: pickSub(info), night, subSize: this.subSize || 'normal', subDelay: 0 };
     this.emit('state', this.publicState());
     return this.publicState();
   }
@@ -154,8 +154,13 @@ class Movie extends EventEmitter {
     if (ss) a.push('-ss', ss.toFixed(3));
     a.push('-re', '-i', st.file);
     const vf = [];
-    const subs = st.sub?.file ? `subtitles=${filterPath(st.sub.file)}` : st.sub && st.sub.i != null ? `subtitles=${filterPath(st.file)}:si=${st.sub.i}` : null;
-    if (subs) vf.push(...(ss ? [`setpts=PTS+${ss.toFixed(3)}/TB`, subs, 'setpts=PTS-STARTPTS'] : [subs]));
+    // Arabic-friendly font at a readable size; libass needs the commas inside quotes
+    const fs = { small: 18, normal: 24, large: 32 }[st.subSize] || 24;
+    const style = `:force_style='FontName=Segoe UI,FontSize=${fs},Outline=1.4,Shadow=0.6,MarginV=28'`;
+    const subs = st.sub?.file ? `subtitles=${filterPath(st.sub.file)}${style}` : st.sub && st.sub.i != null ? `subtitles=${filterPath(st.file)}:si=${st.sub.i}${style}` : null;
+    // shift the clock the subtitle filter sees: seek offset, minus the user's subtitle delay
+    const shift = ss - (st.subDelay || 0);
+    if (subs) vf.push(...(Math.abs(shift) > 0.001 ? [`setpts=PTS+(${shift.toFixed(3)})/TB`, subs, 'setpts=PTS-STARTPTS'] : [subs]));
     if (i.video.w > this.maxW) vf.push(`scale=${this.maxW}:-2:flags=bicubic`);
     if (i.video.hdr) vf.push('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv');
     vf.push('format=nv12');
@@ -231,6 +236,8 @@ class Movie extends EventEmitter {
     return this.restart({ sub });
   }
   setNight(on) { return this.restart({ night: !!on }); }
+  setSubSize(size) { this.subSize = size; return this.restart({ subSize: size }); }
+  setSubDelay(sec) { return this.restart({ subDelay: Math.max(-30, Math.min(30, +sec || 0)) }); }
   setBitrate(kbps) { this.kbps = kbps; return this.restart({}); }
 
   stop(silent) {

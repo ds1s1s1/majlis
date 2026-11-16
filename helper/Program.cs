@@ -83,6 +83,7 @@ static class Program
             case "wincap_stop": WindowCapture.Stop(); break;
             case "focus": Windows.Focus((long)c["hwnd"]); break;
             case "gpu_prio": Event("gpu_prio", new { pid = (int)c["pid"], ok = Native.GpuPriority((int)c["pid"]) }); break;
+            case "ptt": Ptt.Watch((int?)c["vk"] ?? 0); break;
             case "quit": Environment.Exit(0); break;
         }
     }

@@ -48,6 +48,14 @@ const DEFAULTS = {
   autoNext: true,
   autoDuck: true,
   allowChat: true,
+  noVsync: false,
+  dataSaver: false,
+  roomPin: '',
+  mouseSens: 1,
+  padDeadzone: 0.08,
+  padSwapAB: false,
+  avOffset: 0,
+  knockSound: true,
   allowReactions: true,
   cinemaDelay: 180,       // ms of buffer for smooth film playback
   // input & voice

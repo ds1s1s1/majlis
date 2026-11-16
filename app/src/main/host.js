@@ -14,11 +14,13 @@ const { Movie } = require('./movie');
 
 const ROLES = ['watch', 'pad', 'kbm', 'full'];
 
+// [0x02][flags][epoch][hostTs u32][pts u32][seq u16] + opus
+let audioSeq = 0;
 function audioPacket(opus, timed, epoch, pts) {
-  const b = Buffer.allocUnsafe(11 + opus.length);
+  const b = Buffer.allocUnsafe(13 + opus.length);
   b[0] = 0x02; b[1] = timed ? 1 : 0; b[2] = epoch & 0xff;
-  b.writeUInt32BE(Date.now() >>> 0, 3); b.writeUInt32BE(pts >>> 0, 7);
-  opus.copy(b, 11);
+  b.writeUInt32BE(Date.now() >>> 0, 3); b.writeUInt32BE(pts >>> 0, 7); b.writeUInt16BE(audioSeq = (audioSeq + 1) & 0xffff, 11);
+  opus.copy(b, 13);
   return b;
 }
 const CAN = {
@@ -45,7 +47,7 @@ class Host extends EventEmitter {
 
     net.on('knock', (k) => this._onKnock(k));
     net.on('code', (c) => { this.code = c.code ? { code: c.code, exp: c.exp } : null; this.emit('update'); });
-    helper.on('opus', (pkt) => { if (!this.movie.info) this._broadcastRaw(audioPacket(pkt.subarray(4), 0, 0, 0)); });
+    helper.on('opus', (pkt) => { if (!this.movie.info) this._sendAudio(audioPacket(pkt.subarray(4), 0, 0, 0)); });
     helper.on('cursor', (c) => {
       const b = Buffer.allocUnsafe(14); b[0] = 0x0a; b.writeFloatLE(c.x, 1); b.writeFloatLE(c.y, 5); b[9] = c.visible ? 1 : 0; b.writeInt32LE(c.shape, 10);
       this.lastCursor = b;
@@ -72,7 +74,7 @@ class Host extends EventEmitter {
       this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
     });
     this.movie.on('audio', ({ data, pts, epoch }) => {
-      this._broadcastRaw(audioPacket(data, 1, epoch, pts));
+      this._sendAudio(audioPacket(data, 1, epoch, pts));
       this.emit('local', { t: 'a', data, timed: true, epoch, pts, age: 0 });
     });
     this.movie.on('spawn', (pid) => this._gpuPriority(pid));
@@ -114,6 +116,20 @@ class Host extends EventEmitter {
     k.known = !!friend; k.keyChanged = !!keyChanged; k.name = friend?.name && friend.name !== k.from ? friend.name : k.nick || k.from;
     k.at = now();
     // trusted friends and valid room codes skip the prompt (unless the key changed)
+    // Same person, same key, still listed: their old connection died without us noticing yet.
+    // Retire it and treat this as a reconnect.
+    const stale = [...this.guests.values()].find((x) => x.id === k.from && x.link.peer.pk === k.pk);
+    if (stale) { (this.recentDrops ||= new Map()).set(stale.id, { role: stale.role, slot: stale.slot, pk: k.pk, at: now() }); stale.link.close('replaced'); }
+    // came back after a drop: same seat, no questions
+    const rd = this.recentDrops?.get(k.from);
+    if (!keyChanged && rd && now() - rd.at < 180000 && rd.pk === k.pk) { this.recentDrops.delete(k.from); return this.decide(k.sid, { accept: true, role: rd.role, slot: rd.slot, duration: 'session', auto: 'reconnect' }, k); }
+    // room PIN: right PIN gets in without a prompt, no PIN (or wrong) gets told to enter one
+    const pinSet = String(this.store.get('roomPin') || '').trim();
+    if (pinSet && !(friend && friend.trust === 'always')) {
+      const want = require('crypto').createHmac('sha256', pinSet).update(k.sid).digest('hex').slice(0, 32);
+      if (k.pin !== want) return k.decide(false, { reason: 'pin' });
+      if (!keyChanged) return this.decide(k.sid, { accept: true, role: this.store.get('defaultRole') || 'pad', duration: 'session', auto: 'pin' }, k);
+    }
     if (!keyChanged && friend && friend.trust === 'always') return this.decide(k.sid, { accept: true, role: friend.role || this.store.get('defaultRole'), duration: 'session', auto: 'trusted' }, k);
     if (!keyChanged && k.viaCode && this.code && k.viaCode === this.code.code && this.code.exp > now() && this.store.get('acceptCodes')) {
       return this.decide(k.sid, { accept: true, role: 'watch', duration: 'session', auto: 'code' }, k);
@@ -125,7 +141,7 @@ class Host extends EventEmitter {
 
   _knockView(k) { return { sid: k.sid, from: k.from, nick: k.nick, name: k.name, known: k.known, keyChanged: k.keyChanged, viaCode: k.viaCode, at: k.at }; }
 
-  async decide(sid, { accept, role = 'pad', duration = 'session', trust = false, auto = null }, kk) {
+  async decide(sid, { accept, role = 'pad', duration = 'session', trust = false, auto = null, slot: wantSlot = null }, kk) {
     const k = kk || this.knocks.get(sid);
     if (!k) return false;
     this.knocks.delete(sid);
@@ -143,7 +159,7 @@ class Host extends EventEmitter {
       muted: false, hand: false, configSent: {},
     };
     this.guests.set(sid, g);
-    if (CAN.pad(g.role)) g.slot = this._freeSlot();
+    if (CAN.pad(g.role)) g.slot = wantSlot && ![...this.guests.values()].some((x) => x !== g && x.slot === wantSlot) ? wantSlot : this._freeSlot();
     this._wire(g);
     this.emit('joined', { sid, name: g.nick, auto });
     this.net.setPresence({ busy: true });
@@ -177,6 +193,7 @@ class Host extends EventEmitter {
     switch (m.t) {
       case 'hello':
         g.caps = { ...g.caps, ...m.caps };
+        g.maxKbps = +m.caps?.maxKbps || 0;
         g.screen = m.screen; g.padType = m.padType === 'ds4' ? 'ds4' : 'x360';
         g.connType = m.connType;
         if (g.slot) this._attachPad(g);
@@ -187,6 +204,8 @@ class Host extends EventEmitter {
       case 'library': if (CAN.launch(g.role)) this.emit('library-request', g); break;
       case 'launch': if (CAN.launch(g.role)) this.emit('launch', { by: g.nick, id: m.id }); break;
       case 'pass': if (this.hotseat.on && this.hotseat.holder === g.sid) this.passBaton(m.to); break;
+      case 'limit': g.maxKbps = +m.kbps || 0; this._retier(); break;
+      case 'clip': if (CAN.kbm(g.role) && typeof m.text === 'string' && m.text.length <= 10000) this.emit('clip', { from: g.nick, text: m.text }); break;
       case 'bye': g.link.close('bye'); break;
       case 'chat': {
         if (!this._perms(g).chat) return;
@@ -209,6 +228,8 @@ class Host extends EventEmitter {
       case 'movie': if (this._canControl(g)) this.movieCtl(m.op, m.value, g.nick); break;
     }
   }
+
+  sendClip(sid, text) { const g = this.guests.get(sid); if (g && typeof text === 'string') g.link.ctrl({ t: 'clip', text: text.slice(0, 10000), from: this.store.get('nick') || '' }); }
 
   _perms(g) {
     return { chat: this.store.get('allowChat') !== false && !g?.chatMuted, react: this.store.get('allowReactions') !== false && !g?.chatMuted };
@@ -283,6 +304,8 @@ class Host extends EventEmitter {
       case 'audio': await m.setAudio(value == null ? null : +value); break;
       case 'sub': await m.setSub(value || null); break;
       case 'night': this.store.set('nightAudio', !!value); await m.setNight(!!value); break;
+      case 'subsize': await m.setSubSize(['small', 'normal', 'large'].includes(value) ? value : 'normal'); break;
+      case 'subdelay': await m.setSubDelay((m.state.subDelay || 0) + (+value || 0)); break;
       case 'next': { const { nextInFolder } = require('./movie'); const n = nextInFolder(m.state.file); if (n) await this.movieOpen(n, { autoplay: true, fresh: true }); break; }
       case 'stop': this._saveResume(); m.stop(); break;
     }
@@ -300,7 +323,7 @@ class Host extends EventEmitter {
 
   _movieView() {
     const v = this.movie.publicState();
-    return { title: v.title, playing: v.playing, pos: v.pos, dur: v.dur, audio: v.audio, sub: v.sub ? (v.sub.file ? `f${v.sub.file}` : `i${v.sub.i}`) : null, night: v.night, tracks: v.tracks ? { audio: v.tracks.audio, subs: v.tracks.subs.map((x) => ({ ...x, key: x.key, title: x.title })) } : null, next: v.next, at: now() };
+    return { title: v.title, playing: v.playing, pos: v.pos, dur: v.dur, audio: v.audio, sub: v.sub ? (v.sub.file ? `f${v.sub.file}` : `i${v.sub.i}`) : null, night: v.night, subSize: v.subSize, subDelay: v.subDelay, tracks: v.tracks ? { audio: v.tracks.audio, subs: v.tracks.subs.map((x) => ({ ...x, key: x.key, title: x.title })) } : null, next: v.next, at: now() };
   }
 
   _movieState() {
@@ -573,6 +596,7 @@ class Host extends EventEmitter {
           const start = lan ? cap * 0.6 : Math.min(cap * 0.5, hint ? hint.mbps * 900 : 12000);
           g.rc = new RateControl({ maxKbps: cap, startKbps: start, stability: this._stability(g) });
         } else { g.rc.setMax(cap); g.rc.setStability(this._stability(g)); }
+        if (g.maxKbps) g.rc.setMax(Math.min(cap, g.maxKbps)); // data saver on that guest's side
       }
       const kbps = Math.min(...list.map((g) => g.rc.target));
       const t = this.tiers[tier];
@@ -653,6 +677,14 @@ class Host extends EventEmitter {
   // ------------------------------------------------------------------ housekeeping
   _broadcastRaw(b) { for (const g of this.guests.values()) g.link.send(b); }
 
+  // Audio goes out twice: each packet again together with the next one (10 ms later), so a
+  // single lost packet never becomes a click. The guest drops the duplicate by sequence number.
+  _sendAudio(b) {
+    const prev = this.prevAudio;
+    this.prevAudio = b;
+    for (const g of this.guests.values()) { g.link.send(b); if (prev) g.link.send(prev); }
+  }
+
   _roster() {
     const list = [...this.guests.values()].map((g) => ({ name: g.nick, role: g.role, slot: g.slot, hand: g.hand, idx: this._speakerIdx(g), baton: this.hotseat.holder === g.sid }));
     for (const g of this.guests.values()) g.link.ctrl({ t: 'roster', you: this._speakerIdx(g), list, hotseat: this.hotseat.on, host: this.store.get('nick') || '' });
@@ -660,6 +692,8 @@ class Host extends EventEmitter {
 
   _drop(sid, reason) {
     const g = this.guests.get(sid); if (!g) return;
+    // keep their seat for a few minutes in case the line just dropped
+    if (reason === 'timeout') (this.recentDrops ||= new Map()).set(g.id, { role: g.role, slot: g.slot, pk: g.link.peer.pk, at: now() });
     this.guests.delete(sid);
     if (g.slot) this.helper.cmd({ cmd: 'pad_del', slot: g.slot });
     if (CAN.kbm(g.role)) this.helper.cmd({ cmd: 'release_all' });

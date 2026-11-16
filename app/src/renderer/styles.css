@@ -479,3 +479,13 @@ input.seek::-webkit-slider-runnable-track { height: 4px; background: linear-grad
 .pname { display: flex; align-items: center; gap: 7px; font-size: 12.5px; min-width: 0; }
 .pname span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picon { width: 16px; height: 16px; flex: none; }
+
+/* ---------------------------------------------------------------- extras */
+.pinbox { font-size: 26px; text-align: center; letter-spacing: .3em; height: 52px; direction: ltr; }
+.roster .rr .pvol { width: 70px; flex: none; height: 16px; }
+#talkers { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex; gap: 6px; pointer-events: none; }
+.talk { display: inline-flex; align-items: center; gap: 6px; background: rgba(12, 11, 10, .8); color: #ece4d6; border: 1px solid rgba(226, 164, 58, .5); padding: 4px 10px; border-radius: 14px; font-size: 12.5px; }
+.talk .ic { color: #e2a43a; }
+body.mini .hint-pill, body.mini .hud { display: none !important; }
+body.mini .wbar { padding: 14px 10px 8px; }
+body.mini .wbar .reactbar, body.mini .wbar .wtitle, body.mini .wbar #sask { display: none; }

@@ -26,6 +26,7 @@ class Mixer extends AudioWorkletProcessor {
     super();
     this.rings = new Map();
     this.gain = { game: 1, voice: 1 };
+    this.per = {}; // per-speaker volume, keyed like the rings ('v1', 'v2', ...)
     this.target = 48000 * 0.03;
     this.duck = true; this.duckLevel = 1;
     this.port.onmessage = (e) => {
@@ -35,7 +36,7 @@ class Mixer extends AudioWorkletProcessor {
         if (!ring) { ring = new Ring(48000 * 2); this.rings.set(m.k, ring); }
         if (typeof m.want === 'number' && m.want > -300 && m.want < 4000) ring.align(Math.max(0, Math.round(m.want * 48)));
         ring.push(m.l, m.r || m.l, this.target * 4 + 48000 * 0.06, this.target + 48000 * 0.01);
-      } else if (m.t === 'gain') this.gain = { ...this.gain, ...m.g };
+      } else if (m.t === 'gain') { this.gain = { ...this.gain, ...m.g }; if (m.per) this.per = { ...this.per, ...m.per }; }
       else if (m.t === 'target') this.target = Math.round(48000 * m.ms / 1000);
       else if (m.t === 'duck') this.duck = !!m.on;
     };
@@ -50,7 +51,7 @@ class Mixer extends AudioWorkletProcessor {
     for (const [k, ring] of this.rings) {
       const target = k === 'game' ? this.target : 48000 * 0.04;
       if (!ring.started) { if (ring.avail < target) continue; ring.started = true; }
-      const g = k === 'game' ? this.gain.game * this.duckLevel : this.gain.voice;
+      const g = k === 'game' ? this.gain.game * this.duckLevel : this.gain.voice * (this.per[k] ?? 1);
       const n = Math.min(L.length, ring.avail);
       for (let i = 0; i < n; i++) { L[i] += ring.l[ring.rd] * g; R[i] += ring.r[ring.rd] * g; ring.rd = (ring.rd + 1) % ring.size; }
       if (n < L.length) ring.started = false; // underrun: rebuild a small cushion

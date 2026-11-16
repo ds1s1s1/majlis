@@ -172,6 +172,20 @@ class Link extends EventEmitter {
   }
 
   // ---- data
+  // Send on the active path and on the best other live path too. Used for tiny, precious
+  // packets (input): if one path hiccups, the other copy still lands.
+  sendBoth(body) {
+    const ok = this.send(body);
+    let alt = null, as = Infinity;
+    for (const p of this.paths.values()) {
+      if (p === this.active || p.tls || p.kind === 'ws') continue;
+      const s = this._score(p);
+      if (s < as) { as = s; alt = p; }
+    }
+    if (alt && as < Infinity) { const pkt = this.ch.seal(body); this.stats.tx += pkt.length; this._rawSend(alt, pkt); }
+    return ok;
+  }
+
   send(body) {
     if (this.closed || !this.active) return false;
     const pkt = this.ch.seal(body);
@@ -203,8 +217,14 @@ class Link extends EventEmitter {
       const t0 = body.readDoubleBE(1), tp = body.readDoubleBE(9), t1 = now();
       const rtt = t1 - t0;
       this.rtt = this.rtt ? this.rtt * 0.8 + rtt * 0.2 : rtt;
+      // Clock offset the NTP way: the sample with the shortest round trip is the one least
+      // distorted by queuing (or by the other side being busy), so trust that one.
       const off = tp - (t0 + rtt / 2);
-      if (!this._offN) { this.clockOffset = off; this._offN = 1; } else if (rtt <= this.rtt * 1.2) this.clockOffset = this.clockOffset * 0.9 + off * 0.1;
+      (this.offs ||= []).push({ rtt, off });
+      if (this.offs.length > 40) this.offs.shift();
+      let best = this.offs[0];
+      for (const x of this.offs) if (x.rtt < best.rtt) best = x;
+      this.clockOffset = best.off;
       return;
     }
     this.emit('raw', body);
@@ -639,7 +659,7 @@ class Net extends EventEmitter {
   }
 
   // ---- connecting (guest side)
-  async connect(target, { caps, nick } = {}) {
+  async connect(target, { caps, nick, pin } = {}) {
     const sid = crypto.randomBytes(16).toString('hex');
     const eph = newEphemeral();
     const rtts = await this.pingRelays(3).catch(() => ({}));
@@ -647,6 +667,8 @@ class Net extends EventEmitter {
     const knock = this._sign({
       t: 'knock', from: this.id.id, to: target, sid, pk: this.id.pkB64, salt: this.id.salt, nick: nick || this.settings.get('nick') || '',
       eph: eph.pub.toString('base64'), cands, rtts, caps: caps || {}, ts: now(),
+      // room PIN: prove we know it without sending it (the server relays this message)
+      ...(pin ? { pin: crypto.createHmac('sha256', String(pin)).update(sid).digest('hex').slice(0, 32) } : {}),
     });
     return new Promise((resolve, reject) => {
       let tries = 0, state = 'knocking', hostPk = null, relay = null, hostId = null, turnCreds = null, turnP = null;
@@ -667,7 +689,7 @@ class Net extends EventEmitter {
             const srflx = m.srflx || []; m = m.m; m.srflx = srflx;
             const signed = { ...m, srflx: undefined };
             if (!hostPk || !verifyMsg(signed, hostPk) || m.from !== hostId) return;
-            if (!m.accept) { cleanup(); return reject(Object.assign(new Error('declined'), { code: 'declined' })); }
+            if (!m.accept) { cleanup(); const why = m.reason === 'pin' ? 'pin' : 'declined'; return reject(Object.assign(new Error(why), { code: why })); }
             state = 'linked'; cleanup();
             const keys = deriveKeys(eph, Buffer.from(m.eph, 'base64'), sid, this.id.pkB64, hostPk);
             const link = this._makeLink({ sid, role: 'guest', keys, peer: { id: hostId, pk: hostPk, nick: m.nick }, relay, myRtts: rtts, theirRtts: m.rtts || {}, cands: [...(m.cands || []), ...(m.srflx || [])], turn: turnCreds });
@@ -712,7 +734,7 @@ class Net extends EventEmitter {
     if (pk.length !== 32 || deriveId(pk, m.salt | 0) !== m.from || !verifyMsg({ ...m, relay: undefined, srflx: undefined, turn: undefined }, m.pk)) return;
     if (Math.abs(now() - m.ts) > 120000) return;
     this.emit('knock', {
-      sid: m.sid, from: m.from, pk: m.pk, nick: String(m.nick || '').slice(0, 32), viaCode: /^\d{6}$/.test(m.to) ? m.to : null, caps: m.caps || {},
+      sid: m.sid, from: m.from, pk: m.pk, nick: String(m.nick || '').slice(0, 32), viaCode: /^\d{6}$/.test(m.to) ? m.to : null, caps: m.caps || {}, pin: typeof m.pin === 'string' ? m.pin : null,
       decide: (accept, extra = {}) => this._answer(m, accept, extra),
     });
   }

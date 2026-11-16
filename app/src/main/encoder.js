@@ -70,10 +70,13 @@ function buildArgs(o) {
   const gop = String(o.fps);
   if (fam === 'nvenc') {
     a.push('-preset', 'p1', '-tune', 'ull', '-rc', 'cbr', '-b:v', `${kb}k`, '-maxrate', `${kb}k`, '-bufsize', `${buf}k`,
-      '-zerolatency', '1', '-delay', '0', '-bf', '0', '-g', gop, '-intra-refresh', '1', '-no-scenecut', '1');
+      '-zerolatency', '1', '-delay', '0', '-bf', '0', '-g', gop, '-intra-refresh', '1', '-no-scenecut', '1',
+      // spatial AQ spends bits where the eye notices (text, faces) at no latency cost;
+      // split encoding (auto) lets cards with two NVENC engines share 4K / high-fps frames
+      '-spatial-aq', '1', '-aq-strength', '8', '-split_encode_mode', '0');
     if (o.tenBit && o.enc.codec !== 'h264') a.push('-highbitdepth', '1');
   } else if (fam === 'amf') {
-    a.push('-usage', 'ultralowlatency', '-quality', 'speed', '-rc', 'cbr', '-b:v', `${kb}k`, '-maxrate', `${kb}k`, '-bufsize', `${buf}k`, '-bf', '0', '-g', String(o.fps * 4));
+    a.push('-usage', 'ultralowlatency', '-quality', 'speed', '-latency', '1', '-preanalysis', '0', '-rc', 'cbr', '-b:v', `${kb}k`, '-maxrate', `${kb}k`, '-bufsize', `${buf}k`, '-bf', '0', '-g', String(o.fps * 4));
   } else if (fam === 'qsv') {
     a.push('-preset', 'veryfast', '-low_power', '1', '-async_depth', '1', '-look_ahead', '0', '-b:v', `${kb}k`, '-maxrate', `${kb}k`, '-bufsize', `${buf}k`, '-bf', '0', '-g', String(o.fps * 4));
   } else {

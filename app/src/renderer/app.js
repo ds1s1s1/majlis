@@ -1,6 +1,6 @@
 import { t, setLang, ago, getLang } from './i18n.js';
 import { icon, mark } from './icons.js';
-import { Player, decodeCaps, measureHz } from './stream.js';
+import { Player, VoiceHub, decodeCaps, measureHz } from './stream.js';
 import { accelFrom, matchAccel } from './keys.js';
 import { initWatch } from './watch.js';
 
@@ -15,7 +15,7 @@ const S = {
   view: 'home', st: null, host: null, presence: {}, guest: { state: 'idle' }, knockQ: [], check: null, checking: false,
   connect: { state: 'idle', reason: null, target: '' }, upHist: [], player: null, gstats: null, pstats: null, drawer: false,
   ctrl: { roster: null, role: null, slot: null, library: null }, port: null, recKey: null, hz: 60,
-  chat: [], gmovie: null, local: false, summaries: [],
+  chat: [], gmovie: null, local: false, summaries: [], hub: null, voiceGains: {}, latHist: [],
 };
 
 // ------------------------------------------------------------------------- utils
@@ -236,7 +236,18 @@ function wireDigits() {
   $('#go').onclick = () => doConnect(value());
 }
 
-async function doConnect(raw) {
+function askPin(target) {
+  modal(`<div class="dialog" style="width:380px"><div class="dh"><h3>${t('pin_title')}</h3><div class="sub" style="margin-top:4px">${t('pin_sub')}</div></div>
+    <div class="db"><input class="input mono pinbox" id="pinin" inputmode="numeric" maxlength="8" autocomplete="off"></div>
+    <div class="df"><button class="btn ghost" id="x">${t('cancel')}</button><button class="btn primary" id="ok">${t('connect_btn')}</button></div></div>`, (L, close) => {
+    const i = $('#pinin', L); i.focus();
+    const go = () => { const v = toLatin(i.value).replace(/\D/g, ''); if (!v) return i.focus(); close(); doConnect(target, v); };
+    $('#ok', L).onclick = go; i.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+    $('#x', L).onclick = close;
+  });
+}
+
+async function doConnect(raw, pin) {
   const target = toLatin(raw).replace(/\D/g, '');
   if (!(target.length === 9 || target.length === 6)) { $$('#digits input').find((b) => !b.value)?.focus(); return; }
   if (target === S.st.id) return;
@@ -245,7 +256,8 @@ async function doConnect(raw) {
   const caps = await decodeCaps();
   const scr = { w: Math.round(screen.width * devicePixelRatio), h: Math.round(screen.height * devicePixelRatio), hz: S.hz };
   const padType = [...navigator.getGamepads()].find(Boolean)?.id.match(/054c/i) ? 'ds4' : 'x360';
-  const r = await api.invoke('connect', { target, caps: { codecs: caps.codecs, screen: scr, padType } });
+  const r = await api.invoke('connect', { target, caps: { codecs: caps.codecs, screen: scr, padType }, pin });
+  if (!r.ok && r.reason === 'pin') { S.connect = { state: 'idle', target }; renderKnockLine(); return askPin(target); }
   if (!r.ok) { S.connect = { state: 'failed', reason: r.reason, target }; renderKnockLine(); }
 }
 
@@ -358,6 +370,7 @@ function viewRoom() {
               <button class="srcbtn" id="src">${icon(set_.captureWindow ? 'window' : 'monitor', 18)}<span>${set_.captureWindow ? esc(set_.captureWindow.title).slice(0, 48) : t('source_display', { n: (set_.display | 0) + 1 })}</span><span class="sub">${t('change')}</span></button>
               ${set_.captureWindow ? `<div class="sub">${icon('shield', 13)} ${t('privacy_note')}</div>` : ''}
             </div>
+            <div class="field"><label>${t('room_pin')}</label><input class="input mono" id="roompin" maxlength="8" inputmode="numeric" placeholder="${t('room_pin_ph')}" value="${esc(set_.roomPin || '')}"><div class="sub">${t('room_pin_sub')}</div></div>
             <div class="prow"><div class="lbl">${t('allow_chat')}</div><button class="switch ${set_.allowChat !== false ? 'on' : ''}" data-perm="allowChat"></button></div>
             <div class="prow"><div class="lbl">${t('allow_react')}</div><button class="switch ${set_.allowReactions !== false ? 'on' : ''}" data-perm="allowReactions"></button></div>
             <div class="field"><label>${t('codec')}</label>
@@ -430,6 +443,7 @@ function mountRoom() {
     };
   });
   $('#src').onclick = () => pickWindow();
+  $('#roompin') && ($('#roompin').onchange = (e) => set({ roomPin: toLatin(e.target.value).replace(/\D/g, '') }));
   $$('[data-perm]').forEach((b) => (b.onclick = async () => { S.st.settings = await api.invoke('perms', { [b.dataset.perm]: !(set_[b.dataset.perm] !== false) }); render(); }));
   $$('#codec button').forEach((b) => (b.onclick = async () => { if (b.disabled) return; await set({ codec: b.dataset.v }); render(); }));
   $$('#fps button').forEach((b) => (b.onclick = async () => { await set({ fps: +b.dataset.v }); render(); }));
@@ -451,6 +465,10 @@ function guestMenu(e, sid) {
     '-',
     { label: g.muted ? t('unmute') : t('mute'), icon: g.muted ? 'mic' : 'micoff', run: () => api.invoke('host:mute', { sid, on: !g.muted }) },
     { label: g.chatMuted ? t('chat_unmute') : t('chat_mute'), icon: 'chat', run: () => api.invoke('host:chatmute', { sid, on: !g.chatMuted }) },
+    { label: t('clip_send'), icon: 'copy', run: async () => { await api.invoke('clip:send-guest', sid); toast(t('clip_sent')); } },
+    { label: `${t('their_volume')}: ${t('vol_low')}`, run: () => setVoiceGain(S.host.guests.indexOf(g) + 1, 0.5) },
+    { label: `${t('their_volume')}: ${t('vol_normal')}`, run: () => setVoiceGain(S.host.guests.indexOf(g) + 1, 1) },
+    { label: `${t('their_volume')}: ${t('vol_high')}`, run: () => setVoiceGain(S.host.guests.indexOf(g) + 1, 1.8) },
     ...(S.host.hotseat?.on ? [{ label: t('pass_next'), icon: 'swap', run: () => api.invoke('host:pass', sid) }] : []),
     { label: `${t('safety')}: ${g.safety}`, icon: 'shield', run: () => {} },
     '-',
@@ -578,6 +596,7 @@ function viewNet() {
       ${cell(t('ipv6'), c.v6 ? t('yes') : t('no'))}
       ${cell(t('cgnat'), c.cgnat == null ? t('cgnat_unk') : c.cgnat ? t('cgnat_yes') : t('cgnat_no'))}
       ${cell(t('router'), c.router ? esc(c.router.model || c.router.friendly || '—') : '—')}
+      ${cell(t('data_today'), `<span class="mono">${fmtBytes(S.st.usage?.today)}</span><small>${t('data_month')}: ${fmtBytes(S.st.usage?.month)}</small>`)}
       ${cell(t('rec_bitrate'), c.recBitrate ? `<span class="mono">${c.recBitrate}</span><small>${t('mbps')}</small>` : '—')}
     </div>
     <div class="two">
@@ -686,6 +705,10 @@ function viewSettings() {
       ${row(t('encoders'), `<span class="mono sub">${S.st.encoders.length ? esc(S.st.encoders.join('  ')) : t('none_found')}</span>`)}
       <div class="field"><label>${t('ffmpeg')}</label><div style="display:flex;gap:8px"><input class="input mono" style="flex:1" data-s="ffmpeg" value="${esc(s.ffmpeg)}" placeholder="ffmpeg"><button class="btn" id="pickff">${t('browse')}</button></div></div>
       ${row(t('spectator_q'), `<div class="seg" id="sq">${[0.25, 0.35, 0.5].map((v) => `<button data-v="${v}" class="${s.spectatorQuality === v ? 'on' : ''}">${Math.round(v * 100)}%</button>`).join('')}</div>`)}
+      ${row(t('no_vsync'), sw('noVsync'), t('no_vsync_sub'))}
+      ${row(t('mouse_sens'), `<input type="range" min="0.3" max="3" step="0.05" value="${s.mouseSens ?? 1}" data-num="mouseSens" style="width:180px"><span class="mono sub" style="min-width:40px">${(s.mouseSens ?? 1).toFixed(2)}×</span>`)}
+      ${row(t('pad_dz'), `<input type="range" min="0" max="0.3" step="0.01" value="${s.padDeadzone ?? 0.08}" data-num="padDeadzone" style="width:180px"><span class="mono sub" style="min-width:40px">${Math.round((s.padDeadzone ?? 0.08) * 100)}%</span>`)}
+      ${row(t('pad_swap'), sw('padSwapAB'), t('pad_swap_sub'))}
       ${row(t('default_role'), `<select class="input" data-s="defaultRole" style="width:auto">${['watch', 'pad', 'kbm', 'full'].map((r) => `<option value="${r}" ${s.defaultRole === r ? 'selected' : ''}>${t(`role_${r}`)}</option>`).join('')}</select>`)}
     </div></section>
 
@@ -695,7 +718,8 @@ function viewSettings() {
 
     <section class="sgroup"><h2>${t('set_voice')}</h2><div class="rows">
       ${row(t('voice'), `<div class="seg" id="vmode">${['off', 'ptt', 'open'].map((v) => `<button data-v="${v}" class="${s.voice === v ? 'on' : ''}">${t(`voice_${v}`)}</button>`).join('')}</div>`)}
-      ${row(t('ptt_key'), key('pttKey'))}
+      ${row(t('ptt_key'), key('pttKey'), t('ptt_sub'))}
+      ${row(t('knock_sound'), sw('knockSound'))}
     </div></section>
 
     <section class="sgroup"><h2>${t('set_keys')}</h2><div class="rows">
@@ -737,9 +761,18 @@ function mountSettings() {
   $('#vigem') && ($('#vigem').onclick = () => api.invoke('vigem'));
   $('#rl').onclick = () => api.invoke('routerlock');
   $('#openlogs').onclick = () => api.invoke('logs');
+  $$('[data-num]').forEach((r) => {
+    r.oninput = () => { r.nextElementSibling.textContent = r.dataset.num === 'padDeadzone' ? `${Math.round(r.value * 100)}%` : `${(+r.value).toFixed(2)}×`; S.st.settings[r.dataset.num] = +r.value; };
+    r.onchange = () => set({ [r.dataset.num]: +r.value });
+  });
+  $('.switch[data-k="noVsync"]') && $('.switch[data-k="noVsync"]').addEventListener('click', () => toast(t('restart_note')));
   $$('.keycap').forEach((k) => (k.onclick = () => {
     $$('.keycap').forEach((x) => x.classList.remove('rec'));
     k.classList.add('rec'); k.textContent = t('press_key');
+    if (k.dataset.key === 'pttKey') {
+      const onMouse = async (e) => { if (e.button < 1) return; e.preventDefault(); window.removeEventListener('mousedown', onMouse, true); S.recKey = null; await set({ pttKey: `Mouse${e.button + 1}` }); render(); };
+      setTimeout(() => window.addEventListener('mousedown', onMouse, true), 0);
+    }
     S.recKey = async (e) => {
       e.preventDefault();
       const name = k.dataset.key === 'pttKey' ? e.code : accelFrom(e);
@@ -779,6 +812,8 @@ function openStage(info) {
     if (S.drawer && (e.target.closest?.('.drawer'))) return true;
     return false;
   };
+  S.player.onSpeak = (idx) => speaking(idx);
+  hub(false);
   S.player.setMouseMode('abs');
   if (info.local || S.ctrl.mode === 'watch') watchUI().setupWatchStage();
   setupVoice();
@@ -787,6 +822,7 @@ function openStage(info) {
   stage.append(pill);
   setTimeout(() => { pill.style.opacity = '0'; setTimeout(() => pill.remove(), 700); }, 3500);
   renderDrawer();
+  if (new URLSearchParams(location.search).get('drawer')) setTimeout(() => toggleDrawer(true), 1500);
 }
 
 async function setupVoice() {
@@ -799,6 +835,8 @@ async function setupVoice() {
 }
 
 function closeStage(msgKey) {
+  if (document.body.classList.contains('mini')) { api.invoke('mini'); document.body.classList.remove('mini'); }
+  setTimeout(() => hub((S.host?.guests?.length || 0) > 0), 50);
   watchUI().teardownWatchStage();
   if (S.local) { S.local = false; api.invoke('local:view', false); }
   S.player?.destroy(); S.player = null;
@@ -833,7 +871,7 @@ function renderDrawer() {
     </div>
     <div class="dsec">
       <h2>${t('players')} <span class="tag" style="margin-inline-start:6px">${t('your_role', { role: roleName })}</span></h2>
-      <div class="roster">${(c.roster?.list || []).map((r) => `<div class="rr">${avatar(r.name, String(r.idx) + '00')}<span class="nm">${esc(r.name)}${r.idx === c.roster.you ? ` · ${t('you')}` : ''}</span>${r.slot ? `<span class="tag">${t('slot', { n: r.slot })}</span>` : `<span class="tag">${t('role_watch')}</span>`}${r.baton ? `<span class="baton">${icon('pad', 14)}</span>` : ''}${r.hand ? `<span class="baton">${icon('hand', 14)}</span>` : ''}</div>`).join('')}</div>
+      <div class="roster">${(c.roster?.list || []).map((r) => `<div class="rr">${avatar(r.name, String(r.idx) + '00')}<span class="nm">${esc(r.name)}${r.idx === c.roster.you ? ` · ${t('you')}` : ''}</span>${r.slot ? `<span class="tag">${t('slot', { n: r.slot })}</span>` : `<span class="tag">${t('role_watch')}</span>`}${r.baton ? `<span class="baton">${icon('pad', 14)}</span>` : ''}${r.hand ? `<span class="baton">${icon('hand', 14)}</span>` : ''}${r.idx !== c.roster.you ? `<input type="range" class="pvol" min="0" max="2" step="0.1" value="${S.voiceGains[r.idx] ?? 1}" data-idx="${r.idx}" title="${t('their_volume')}">` : ''}</div>`).join('')}${c.roster ? `<div class="rr"><span class="avatar" style="width:24px;height:24px;font-size:11px;background:var(--bg-3)">${icon('star', 12)}</span><span class="nm">${esc(c.roster.host || c.host?.nick || '')}</span><span class="tag">${t('host_tag')}</span><input type="range" class="pvol" min="0" max="2" step="0.1" value="${S.voiceGains[0] ?? 1}" data-idx="0"></div>` : ''}</div>
       ${c.roster?.hotseat ? `<div style="display:flex;gap:6px;margin-top:12px">${isHolder ? `<button class="btn sm" id="dpass">${icon('swap', 15)}<span>${t('pass_next')}</span></button>` : `<button class="btn sm" id="dhand">${icon('hand', 15)}<span>${me?.hand ? t('lower_hand') : t('raise_hand')}</span></button>`}</div>` : (c.role === 'watch' ? `<div style="margin-top:12px"><button class="btn sm" id="dhand">${icon('hand', 15)}<span>${me?.hand ? t('lower_hand') : t('raise_hand')}</span></button></div>` : '')}
     </div>
     <div class="dsec">
@@ -841,6 +879,13 @@ function renderDrawer() {
       <div class="seg" id="dvoice">${['off', 'ptt', 'open'].map((v) => `<button data-v="${v}" class="${s.voice === v ? 'on' : ''}">${t(`voice_${v}`)}</button>`).join('')}</div>
       <div class="field" style="margin-top:12px"><label>${t('game_vol')}</label><input type="range" min="0" max="1" step="0.05" value="${s.gameVol ?? 1}" id="gv"></div>
       <div class="field"><label>${t('voice_vol')}</label><input type="range" min="0" max="1.5" step="0.05" value="${s.voiceVol ?? 1}" id="vv"></div>
+      <div class="field"><label>${t('av_offset')} <span class="mono" id="avv">${s.avOffset || 0} ms</span></label><input type="range" min="-300" max="300" step="10" value="${s.avOffset || 0}" id="avo"><div class="sub">${t('av_offset_sub')}</div></div>
+    </div>
+    <div class="dsec stack">
+      <h2>${t('lat_graph')}</h2>
+      <canvas class="spark" id="dgraph" width="600" height="90"></canvas>
+      <div class="prow tight"><div class="lbl"><div>${t('data_saver')}</div><div class="sub">${t('data_saver_sub')}</div></div><button class="switch ${s.dataSaver ? 'on' : ''}" id="dsaver"></button></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" id="dmini">${icon('window', 15)}<span>${t('mini')}</span></button>${['kbm', 'full'].includes(c.role) ? `<button class="btn sm" id="dclip">${icon('copy', 15)}<span>${t('clip_to_host')}</span></button>` : ''}</div>
     </div>
     ${c.role === 'full' ? `<div class="dsec"><h2>${t('library')}</h2><div class="minicovers" id="dlib">${(c.library || []).map((g) => `<div class="mc" data-id="${esc(g.id)}" title="${esc(g.name)}">${g.cover ? `<img src="data:image/jpeg;base64,${g.cover}" alt="">` : esc(g.name)}</div>`).join('') || `<span class="sub">…</span>`}</div></div>` : ''}
     <div class="dsec stack">
@@ -881,7 +926,13 @@ function renderDrawer() {
   $$('#dvoice button', D).forEach((b) => (b.onclick = async () => { await set({ voice: b.dataset.v }); if (b.dataset.v === 'off') S.player?.stopMic(); else { await setupVoice(); S.player?.setMicOpen(b.dataset.v === 'open'); } renderDrawer(); }));
   $('#gv', D).oninput = (e) => { S.st.settings.gameVol = +e.target.value; S.player?.setVolumes(+e.target.value, S.st.settings.voiceVol ?? 1); };
   $('#vv', D).oninput = (e) => { S.st.settings.voiceVol = +e.target.value; S.player?.setVolumes(S.st.settings.gameVol ?? 1, +e.target.value); };
-  $('#gv', D).onchange = () => set({});
+  $('#gv', D).onchange = () => set({ gameVol: S.st.settings.gameVol });
+  $('#avo', D).oninput = (e) => { S.st.settings.avOffset = +e.target.value; $('#avv', D).textContent = `${e.target.value} ms`; };
+  $('#avo', D).onchange = () => set({ avOffset: S.st.settings.avOffset });
+  $('#dsaver', D).onclick = async () => { const on = !S.st.settings.dataSaver; S.st.settings.dataSaver = on; await api.invoke('datasaver', on); renderDrawer(); };
+  $('#dmini', D).onclick = async () => { const on = await api.invoke('mini'); toggleDrawer(false); document.body.classList.toggle('mini', on); };
+  $('#dclip', D) && ($('#dclip', D).onclick = async () => { await api.invoke('clip:send-host'); toast(t('clip_sent')); });
+  $$('.pvol', D).forEach((r) => (r.oninput = () => setVoiceGain(+r.dataset.idx, +r.value)));
   $$('#dlib .mc', D).forEach((m) => (m.onclick = () => api.invoke('guest:ctrl', { t: 'launch', id: m.dataset.id })));
   if (c.role === 'full' && !c.library) { c.library = []; api.invoke('guest:ctrl', { t: 'library' }); }
   updateDrawerStats();
@@ -894,8 +945,11 @@ function latParts() {
 }
 
 function updateDrawerStats() {
+  const l0 = latParts();
+  if (l0.total) { S.latHist.push(l0.total); if (S.latHist.length > 120) S.latHist.shift(); }
   const D = $('#drawer'); if (!S.drawer || !D) return;
   const l = latParts(), g = S.gstats || {};
+  drawGraph($('#dgraph', D), S.latHist);
   const col = { enc: 'var(--fg-3)', net: 'var(--acc)', dec: 'var(--ok)', disp: 'var(--fg-2)' };
   const tot = $('#dtotal', D); if (!tot) return;
   tot.innerHTML = `${l.total ? l.total.toFixed(1) : '—'}<small>ms</small>`;
@@ -914,6 +968,61 @@ function updateHud() {
   const hud = $('#hud'); if (!hud.classList.contains('on')) return;
   const l = latParts(), g = S.gstats || {}, p = S.pstats || {};
   hud.textContent = `${l.total.toFixed(1)} ms  enc ${l.enc.toFixed(1)}  net ${l.net.toFixed(1)}  dec ${l.dec.toFixed(1)}\n${((g.kbps || 0) / 1000).toFixed(1)} Mbps  ${p.fps || 0} fps  loss ${((g.loss || 0) * 100).toFixed(1)}%  ${pathLabel(g.path)}`;
+}
+
+// ------------------------------------------------------------------------- small helpers
+function fmtBytes(b) { b = b || 0; return b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round(b / 1e6)} MB`; }
+
+// two soft notes, so a knock is noticed even when the window is behind a game
+function chime() {
+  try {
+    const ac = new AudioContext(), t0 = ac.currentTime;
+    [[659, 0], [880, 0.16]].forEach(([f, d]) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = f; o.type = 'sine';
+      g.gain.setValueAtTime(0, t0 + d); g.gain.linearRampToValueAtTime(0.18, t0 + d + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t0 + d + 0.5);
+      o.connect(g).connect(ac.destination); o.start(t0 + d); o.stop(t0 + d + 0.55);
+    });
+    setTimeout(() => ac.close(), 1200);
+  } catch {}
+}
+
+function setVoiceGain(idx, g) { S.voiceGains[idx] = g; S.player?.setVoiceGain(idx, g); S.hub?.setGain(idx, g); }
+
+// The host hears friends and talks to them from the room page too, not only inside a stream.
+async function hub(want) {
+  const s = S.st?.settings || {};
+  want = want && !S.player && s.voice !== 'off';
+  if (!want) { if (S.hub) { S.hub.destroy(); S.hub = null; } return; }
+  if (S.hub) return;
+  S.hub = new VoiceHub({ port: S.port, settings: s, onSpeak: (idx) => speaking(idx) });
+  await S.hub.ready;
+  for (const [i, g] of Object.entries(S.voiceGains)) S.hub.setGain(+i, g);
+  try { await S.hub.startMic((b) => S.port.postMessage({ t: 'hvo', data: b })); S.hub.setMicOpen(s.voice === 'open'); } catch {}
+}
+
+// who's talking: a name chip over the stream
+function speaking(idx) {
+  let name = '';
+  if (S.player && S.ctrl.roster) name = idx === 0 ? (S.ctrl.roster.host || S.ctrl.host?.nick || '') : (S.ctrl.roster.list.find((r) => r.idx === idx)?.name || '');
+  else if (S.host?.guests) name = S.host.guests[idx - 1]?.name || '';
+  if (!name || $('#stage').hidden) return;
+  let el = $(`.talk[data-i="${idx}"]`);
+  if (!el) { el = document.createElement('div'); el.className = 'talk'; el.dataset.i = idx; el.innerHTML = `${icon('mic', 13)}<span>${esc(name)}</span>`; ($('#talkers') || $('#stage').appendChild(Object.assign(document.createElement('div'), { id: 'talkers' }))).append(el); }
+  clearTimeout(el._t); el._t = setTimeout(() => el.remove(), 450);
+}
+
+function drawGraph(c, data) {
+  if (!c) return;
+  const x = c.getContext('2d'), W = c.width, H = c.height;
+  x.clearRect(0, 0, W, H);
+  if (data.length < 2) return;
+  const max = Math.max(40, ...data) * 1.15;
+  x.strokeStyle = 'rgba(236,228,214,.12)'; x.lineWidth = 1;
+  for (const v of [16, 33, 50, 100]) { if (v > max) break; const y = H - (v / max) * H; x.beginPath(); x.moveTo(0, y); x.lineTo(W, y); x.stroke(); }
+  x.beginPath();
+  data.forEach((v, i) => { const px = (i / (data.length - 1)) * W, py = H - (v / max) * H; i ? x.lineTo(px, py) : x.moveTo(px, py); });
+  x.strokeStyle = '#e2a43a'; x.lineWidth = 2; x.stroke();
 }
 
 // ------------------------------------------------------------------------- ffmpeg download
@@ -945,11 +1054,14 @@ function handleEvent(m) {
     case 'id-changed': refresh(); break;
     case 'presence': S.presence = m.on; if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
     case 'knock-progress': if (m.state === 'waiting' && S.connect.state === 'knocking') { S.connect.state = 'waiting'; renderKnockLine(); } break;
-    case 'knock': S.host = S.host || {}; renderRail(); knockDialog(m); if (S.view === 'room') render(); break;
+    case 'knock': S.host = S.host || {}; renderRail(); if (S.st.settings.knockSound !== false) chime(); knockDialog(m); if (S.view === 'room') render(); break;
+    case 'ptt': if (S.st.settings.voice === 'ptt') { S.player?.setMicOpen(m.down); S.hub?.setMicOpen(m.down); } break;
+    case 'clip': toast(t('clip_got', { name: m.from || '' })); break;
     case 'knock-gone': if (S.knockClose?.sid === m.sid) S.knockClose.close(); break;
     case 'host': {
       const prevG = S.host?.guests?.length || 0;
       if (m.movie) m.movie.rx = performance.now();
+      setTimeout(() => hub(m.guests.length > 0), 0);
       S.host = m; if (S.st) S.st.host = m;
       S.upHist.push(m.upKbps || 0); if (S.upHist.length > 120) S.upHist.shift();
       renderRail(); renderStatus();
@@ -983,6 +1095,7 @@ function handleEvent(m) {
     case 'helper': S.st.helper = m; if (S.view === 'set' || S.view === 'room') render(); break;
     case 'deeplink': go('home'); S.connect.target = m.target; render(); doConnect(m.target); break;
     case 'guest':
+      if (m.state === 'reconnecting') { if (S.player) { $('#stageWait').hidden = false; $('#stageWait').innerHTML = `<span class="pulse"></span><span>${t('reconnecting')}</span>`; } break; }
       if (m.state === 'linked') openStage(m);
       else if (m.state === 'failed') { S.connect = { state: 'failed', reason: m.reason, target: m.target }; renderKnockLine(); }
       else if (m.state === 'ended' && S.player && !S.local) { closeStage('ended'); if (m.summary && m.summary.ms > 60000) watchUI().summary([m.summary]); }
@@ -1018,7 +1131,11 @@ function handleEvent(m) {
 window.addEventListener('message', (e) => {
   if (e.data === 'majlis-port' && e.ports[0]) {
     S.port = e.ports[0];
-    S.port.onmessage = (ev) => S.player?.onMessage(ev.data);
+    S.port.onmessage = (ev) => {
+      const d = ev.data;
+      if (S.player) S.player.onMessage(d);
+      else if (d.t === 'vo' && S.hub) S.hub.play(d.idx, d.data);
+    };
     S.port.start();
   }
 });

@@ -19,6 +19,12 @@ const { resolveFfmpeg, downloadFfmpeg } = require('./tools');
 if (process.env.MAJLIS_PROFILE) app.setPath('userData', path.join(app.getPath('appData'), `Majlis-${process.env.MAJLIS_PROFILE}`));
 if (!process.env.MAJLIS_PROFILE && !app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
+// "No VSync" (set in Settings, applies on next start): frames go to the screen the moment
+// they're decoded instead of waiting for the monitor's refresh. Lower latency, may tear.
+try {
+  const pre = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'majlis.json'), 'utf8'));
+  if (pre.settings && pre.settings.noVsync) { app.commandLine.appendSwitch('disable-gpu-vsync'); app.commandLine.appendSwitch('disable-frame-rate-limit'); }
+} catch {}
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
@@ -80,10 +86,30 @@ function ensureFfmpeg() {
 }
 
 const DEBUG = !!process.env.MAJLIS_DEBUG;
+// While a stream runs, ask Windows to schedule our processes ahead of background stuff:
+// the main process (network + encoding pipeline), the page that decodes, and the GPU process.
+let boosted = false;
+function boost(on) {
+  if (on === boosted) return;
+  boosted = on;
+  const pr = on ? os.constants.priority.PRIORITY_ABOVE_NORMAL : os.constants.priority.PRIORITY_NORMAL;
+  const pids = [process.pid];
+  try { if (win && !win.isDestroyed()) pids.push(win.webContents.getOSProcessId()); } catch {}
+  try { for (const m of app.getAppMetrics()) if (m.type === 'GPU') pids.push(m.pid); } catch {}
+  for (const pid of pids) { try { os.setPriority(pid, pr); } catch {} }
+}
+
 function emit(type, data) {
   if (DEBUG && !/^(host|guest-stats)$/.test(type)) console.log('[ev]', type, JSON.stringify(data).slice(0, 300));
   if (win && !win.isDestroyed()) win.webContents.send('ev', { type, ...data });
 }
+
+// key code -> Windows virtual key, for push-to-talk that works inside games
+const VK = { CapsLock: 0x14, Space: 0x20, Tab: 0x09, Backquote: 0xc0, ShiftLeft: 0xa0, ShiftRight: 0xa1, ControlLeft: 0xa2, ControlRight: 0xa3, AltLeft: 0xa4, AltRight: 0xa5, Mouse4: 0x05, Mouse5: 0x06, Mouse3: 0x04 };
+for (let i = 0; i < 26; i++) VK[`Key${String.fromCharCode(65 + i)}`] = 65 + i;
+for (let i = 0; i < 10; i++) VK[`Digit${i}`] = 48 + i;
+for (let i = 1; i <= 12; i++) VK[`F${i}`] = 0x6f + i;
+function watchPtt() { helper.cmd({ cmd: 'ptt', vk: store.get('voice') === 'ptt' ? VK[store.get('pttKey')] || 0 : 0 }); }
 
 function deepLink(argv) {
   const a = (argv || []).find((x) => /^majlis:\/\//i.test(x));
@@ -104,7 +130,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '../renderer/index.html'), process.env.MAJLIS_VIEW ? { query: { view: process.env.MAJLIS_VIEW, pick: process.env.MAJLIS_PICK || '' } } : undefined);
+  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER) ? { query: { view: process.env.MAJLIS_VIEW, pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '' } } : undefined);
   // dev aid: MAJLIS_SHOT=out.png saves a screenshot of the page after a delay
   if (process.env.MAJLIS_SHOT) {
     setTimeout(async () => {
@@ -158,9 +184,15 @@ function snapshot() {
     registered: net.registered, publicAddr: net.publicAddr, relays: net.relays, noServer: !store.hasServer(),
     encoders: encoders.map((e) => e.name), ffmpeg: !!ffmpegExe, helper: helper.info ? { vigem: helper.info.vigem, wgc: helper.info.wgc, displays: helper.info.displays } : null,
     host: host.stats(), guest: guest.link ? { state: 'linked', host: guest.link.peer, safety: guest.link.safety } : { state: guest.state },
-    lastCheck, peaks: store.peaks(), routerLock: findRouterLock(), replay: replay.running,
+    lastCheck, peaks: store.peaks(), usage: usageSummary(), routerLock: findRouterLock(), replay: replay.running,
     version: app.getVersion(), platform: `${os.type()} ${os.release()}`,
   };
+}
+
+function usageSummary() {
+  const u = store.d.usage || {}, today = new Date().toISOString().slice(0, 10), month = today.slice(0, 7);
+  let m = 0; for (const [k, v] of Object.entries(u)) if (k.startsWith(month)) m += v;
+  return { today: u[today] || 0, month: m };
 }
 
 function findRouterLock() {
@@ -192,6 +224,7 @@ function handlers() {
     if (patch.theme && win) win.setTitleBarOverlay(overlayColors());
     if (('server' in patch && patch.server !== before) || 'accessKey' in patch) { setTimeout(() => { app.relaunch(); app.exit(0); }, 400); }
     if ('panicKey' in patch || 'replayKey' in patch) registerShortcuts();
+    if ('pttKey' in patch || 'voice' in patch) watchPtt();
     if (patch.ffmpeg) resolveFfmpeg({ custom: patch.ffmpeg, dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => exe && useFfmpeg(exe));
     if ('replay' in patch) { if (patch.replay && host.guests.size) replay.start(store.get('display')); if (!patch.replay) replay.stop(); }
     if (patch.shareStatus !== undefined || patch.nick !== undefined) pushPresence();
@@ -200,7 +233,22 @@ function handlers() {
   ipcMain.handle('friend', (e, f) => { const r = store.upsertFriend(f); pushPresence(); return r; });
   ipcMain.handle('friend:remove', (e, id) => { store.removeFriend(id); pushPresence(); return true; });
 
-  ipcMain.handle('connect', (e, { target, caps }) => guest.connect(target, caps));
+  ipcMain.handle('connect', (e, { target, caps, pin }) => guest.connect(target, caps, { pin }));
+  ipcMain.handle('datasaver', (e, on) => guest.setDataSaver(on));
+  ipcMain.handle('clip:send-host', () => guest.ctrl({ t: 'clip', text: clipboard.readText().slice(0, 10000) }));
+  ipcMain.handle('clip:send-guest', (e, sid) => host.sendClip(sid, clipboard.readText()));
+  // mini player: small, always on top, for keeping an eye on the stream while doing something else
+  let normalBounds = null;
+  ipcMain.handle('mini', () => {
+    if (win.isFullScreen()) win.setFullScreen(false);
+    if (normalBounds) { win.setAlwaysOnTop(false); win.setMinimumSize(980, 640); win.setBounds(normalBounds); normalBounds = null; return false; }
+    normalBounds = win.getBounds();
+    const wa = screen.getDisplayMatching(normalBounds).workArea;
+    win.setMinimumSize(320, 200);
+    win.setBounds({ width: 520, height: 330, x: wa.x + wa.width - 540, y: wa.y + wa.height - 350 });
+    win.setAlwaysOnTop(true, 'floating');
+    return true;
+  });
   ipcMain.handle('cancel', () => guest.cancel());
   ipcMain.handle('leave', () => guest.leave());
   ipcMain.handle('guest:ctrl', (e, m) => guest.ctrl(m));
@@ -396,7 +444,7 @@ app.whenReady().then(async () => {
   host.on('knock-gone', (k) => emit('knock-gone', k));
   host.on('joined', (g) => { emit('joined', g); if (store.get('replay')) replay.start(store.get('display')); });
   host.on('left', (g) => { emit('left', g); if (!host.guests.size) replay.stop(); });
-  host.on('update', () => emit('host', host.stats()));
+  host.on('update', () => { emit('host', host.stats()); boost(host.guests.size > 0 || !!guest.link); });
   host.on('stats', (s) => { emit('host', s); if (s.guests.length) logStats('host', { tiers: s.tiers, guests: s.guests.map((g) => ({ rtt: g.rtt, kbps: g.kbps, target: g.target, loss: g.loss, qd: g.qd, jitter: g.jitter, fps: g.fps, path: g.path?.kind, fec: g.fec, stab: g.stability })) }); });
   host.on('hand', (h) => emit('hand', h));
   host.on('baton', (b) => emit('baton', b));
@@ -412,13 +460,25 @@ app.whenReady().then(async () => {
   host.on('movie-by', (a) => emit('movie-by', a));
   host.on('launch', ({ by, id }) => launchGame(id, by));
 
-  guest.on('state', (s) => emit('guest', s));
+  guest.on('state', (s) => { emit('guest', s); boost(s.state === 'linked' || host.guests.size > 0); });
   guest.on('ctrl', (m) => emit('guest-ctrl', m));
   guest.on('stats', (s) => { emit('guest-stats', s); logStats('guest', { rtt: s.rtt, kbps: s.kbps, loss: s.loss, lost: s.lost, fps: s.fps, qd: s.qd, jitter: s.jitter, path: s.path?.kind, label: s.path?.label, dec: s.dec }); });
   guest.on('path', (p) => emit('guest-path', p));
   guest.on('kicked', (k) => { emit('kicked', k); guest.leave(); });
 
-  helper.on('hello', (h) => emit('helper', { vigem: h.vigem, wgc: h.wgc, displays: h.displays }));
+  helper.on('hello', (h) => { emit('helper', { vigem: h.vigem, wgc: h.wgc, displays: h.displays }); watchPtt(); });
+  helper.on('ptt', (p) => emit('ptt', { down: p.down }));
+  host.on('clip', (c) => { clipboard.writeText(c.text); emit('clip', { from: c.from }); });
+  guest.on('ctrl', (m) => { if (m.t === 'clip' && typeof m.text === 'string') { clipboard.writeText(m.text); emit('clip', { from: m.from }); } });
+  // data used, per day (for people on mobile data plans)
+  let lastBytes = 0;
+  setInterval(() => {
+    let total = 0;
+    for (const l of net.links.values()) total += l.stats.tx + l.stats.rx;
+    const delta = total >= lastBytes ? total - lastBytes : total;
+    lastBytes = total;
+    if (delta > 0) { const k = new Date().toISOString().slice(0, 10); store.d.usage = store.d.usage || {}; store.d.usage[k] = (store.d.usage[k] || 0) + delta; store.save(); }
+  }, 5000);
 
   try { await net.start(); } catch (e) { emit('notice', { key: 'net_failed', detail: e.message }); }
 

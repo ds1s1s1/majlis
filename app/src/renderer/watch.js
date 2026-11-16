@@ -47,6 +47,8 @@ export function initWatch(d) {
               <div class="sc-tracks">
                 <div class="field"><label>${t('audio_track')}</label><select class="input" id="waudio">${(tracks?.audio || []).map((a) => `<option value="${a.i}" ${mv.audio === a.i ? 'selected' : ''}>${esc(langName(a.lang))}${a.title ? ` · ${esc(a.title)}` : ''}${a.ch ? ` · ${a.ch}ch` : ''}</option>`).join('')}</select></div>
                 <div class="field"><label>${t('sub_track')}</label><select class="input" id="wsub"><option value="">${t('sub_off')}</option>${(tracks?.subs || []).map((x) => `<option value="${esc(x.key)}" ${mv.sub === x.key ? 'selected' : ''}>${esc(langName(x.lang))}${x.title ? ` · ${esc(x.title)}` : ''}</option>`).join('')}<option value="@file">${t('sub_file')}</option></select></div>
+                <div class="field"><label>${t('sub_size')}</label><div class="seg" id="wsubsize">${['small', 'normal', 'large'].map((z) => `<button data-v="${z}" class="${(mv.subSize || 'normal') === z ? 'on' : ''}">${t(`sub_${z}`)}</button>`).join('')}</div></div>
+                <div class="field"><label>${t('sub_delay')} <span class="mono">${(mv.subDelay || 0) > 0 ? '+' : ''}${(mv.subDelay || 0).toFixed(1)}s</span></label><div class="seg" dir="ltr"><button data-op="subdelay" data-v="-0.5">−0.5</button><button data-op="subdelay" data-v="${-(mv.subDelay || 0)}">0</button><button data-op="subdelay" data-v="0.5">+0.5</button></div></div>
                 <div class="prow" style="align-self:end;padding-bottom:6px"><div class="lbl"><div>${t('night_mode')}</div><div class="sub">${t('night_sub')}</div></div><button class="switch ${mv.night ? 'on' : ''}" id="wnight"></button></div>
               </div>
             </section>`
@@ -69,6 +71,7 @@ export function initWatch(d) {
           <div class="panel"><div class="pb">
             <div class="field"><label>${t('control_who')}</label><div class="seg" id="wctl"><button data-v="host" class="${s.watchControl !== 'all' ? 'on' : ''}">${t('control_host')}</button><button data-v="all" class="${s.watchControl === 'all' ? 'on' : ''}">${t('control_all')}</button></div></div>
             <div class="field"><label>${t('watch_quality')} <span class="mono" id="wqv">${s.watchMbps} Mbps</span></label><input type="range" min="4" max="40" step="1" value="${s.watchMbps}" id="wq"></div>
+            <div class="field"><label>${t('room_pin')}</label><input class="input mono" id="wpin" maxlength="8" inputmode="numeric" placeholder="${t('room_pin_ph')}" value="${esc(s.roomPin || '')}"></div>
             <div class="prow"><div class="lbl">${t('allow_chat')}</div><button class="switch ${s.allowChat !== false ? 'on' : ''}" data-perm="allowChat"></button></div>
             <div class="prow"><div class="lbl">${t('allow_react')}</div><button class="switch ${s.allowReactions !== false ? 'on' : ''}" data-perm="allowReactions"></button></div>
             <div class="prow"><div class="lbl">${t('auto_next')}</div><button class="switch ${s.autoNext ? 'on' : ''}" data-k="autoNext"></button></div>
@@ -90,6 +93,7 @@ export function initWatch(d) {
     if (seek) { seek.oninput = () => { S.seeking = true; $('#wpos').textContent = fmtTime(+seek.value); }; seek.onchange = () => { S.seeking = false; api.invoke('movie:ctl', { op: 'seek', value: +seek.value }); }; }
     $('#waudio') && ($('#waudio').onchange = (e) => api.invoke('movie:ctl', { op: 'audio', value: e.target.value }));
     $('#wsub') && ($('#wsub').onchange = (e) => (e.target.value === '@file' ? api.invoke('movie:sub-file') : api.invoke('movie:ctl', { op: 'sub', value: e.target.value })));
+    $$('#wsubsize button').forEach((b) => (b.onclick = () => api.invoke('movie:ctl', { op: 'subsize', value: b.dataset.v })));
     $('#wnight') && ($('#wnight').onclick = () => api.invoke('movie:ctl', { op: 'night', value: !S.host.movie.night }));
     $('#readyq') && ($('#readyq').onclick = () => api.invoke('ready:check'));
     $('#readygo') && ($('#readygo').onclick = () => api.invoke('ready:go'));
@@ -99,6 +103,7 @@ export function initWatch(d) {
     $('#wq').onchange = (e) => set({ watchMbps: +e.target.value });
     $$('.switch[data-k]').forEach((b) => (b.onclick = async () => { await set({ [b.dataset.k]: !(s[b.dataset.k] ?? true) }); d.render(); }));
     wireChat('hchat', (text) => api.invoke('chat', text));
+    $('#wpin') && ($('#wpin').onchange = (e) => set({ roomPin: String(e.target.value).replace(/\D/g, '') }));
     $$('[data-perm]').forEach((b) => (b.onclick = async () => { S.st.settings = await api.invoke('perms', { [b.dataset.perm]: !(s[b.dataset.perm] !== false) }); d.render(); }));
   }
 
@@ -176,6 +181,7 @@ export function initWatch(d) {
         ${S.local || S.ctrl.perms?.react !== false ? `<div class="reactbar">${REACTIONS.map((r, i) => `<button class="rb" data-r="${r}" title="${i + 1}">${r}</button>`).join('')}</div>` : ''}
         <button class="iconbtn" id="schat" title="${t('chat')}">${icon('chat', 20)}</button>
         <button class="iconbtn" id="sshot" title="${t('shot')}">${icon('camera', 20)}</button>
+        <button class="iconbtn" id="smini" title="${t('mini')}">${icon('window', 20)}</button>
         <button class="iconbtn" id="sfull" title="${t('fullscreen')}">${icon('full', 20)}</button>
         <button class="iconbtn" id="sleave" title="${S.local ? t('back_room') : t('leave')}">${icon('door', 20)}</button>
       </div>`;
@@ -188,6 +194,7 @@ export function initWatch(d) {
     $('#sask') && ($('#sask').onclick = () => api.invoke('guest:ctrl', { t: 'askpause' }));
     $('#schat').onclick = () => toggleChat();
     $('#sshot').onclick = () => shot();
+    $('#smini').onclick = async () => { const on = await api.invoke('mini'); document.body.classList.toggle('mini', on); };
     $('#sfull').onclick = () => api.invoke('fullscreen');
     $('#sleave').onclick = () => (S.local ? closeLocalStage() : d.leave());
   }

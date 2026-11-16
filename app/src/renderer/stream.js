@@ -203,7 +203,7 @@ export class Player {
 
   // How long this chunk should wait before it's heard (ms), so it lines up with the picture.
   _audioWant(meta) {
-    const outLat = (this.ac?.outputLatency || 0) * 1000 + 5;
+    const outLat = (this.ac?.outputLatency || 0) * 1000 + 5 - (this.settings.avOffset || 0);
     if (meta.timed && this.cinema && this.anchor && this.anchor.epoch === meta.epoch) return this.anchor.base + meta.pts - performance.now() - outLat;
     if (this.cinema) return null;
     // game mode: match the picture's delay, but never below what the line's jitter needs
@@ -222,7 +222,10 @@ export class Player {
     try { this.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (this.aTs += 10000), data: m.data })); } catch { this.ameta.pop(); }
   }
 
+  setVoiceGain(idx, g) { this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } }); }
+
   _voiceIn(idx, data) {
+    this.onSpeak?.(idx);
     let d = this.voiceDec.get(idx);
     if (!d) {
       d = new AudioDecoder({ output: (a) => this._pcm(`v${idx}`, a), error: () => {} });
@@ -279,7 +282,10 @@ export class Player {
         this.onActivity?.();
         if (!this.active || !this.inputEnabled) return;
         if (this.locked) {
-          const [b, v] = dv(5); b[0] = 2; v.setInt16(1, Math.max(-32767, Math.min(32767, e.movementX))); v.setInt16(3, Math.max(-32767, Math.min(32767, e.movementY))); push(b);
+          const k = this.settings.mouseSens || 1;
+          this.mx = (this.mx || 0) + e.movementX * k; this.my = (this.my || 0) + e.movementY * k;
+          const ix = Math.trunc(this.mx), iy = Math.trunc(this.my); this.mx -= ix; this.my -= iy; // keep the fractions
+          const [b, v] = dv(5); b[0] = 2; v.setInt16(1, Math.max(-32767, Math.min(32767, ix))); v.setInt16(3, Math.max(-32767, Math.min(32767, iy))); push(b);
           return;
         }
         const r = this.canvas.getBoundingClientRect(), sr = this.stage.getBoundingClientRect();
@@ -339,7 +345,10 @@ export class Player {
     if (!p) return;
     let bits = 0;
     p.buttons.forEach((b, i) => { if (b.pressed && i < 32) bits |= 1 << i; });
-    const ax = (v) => Math.max(-32767, Math.min(32767, Math.round((Math.abs(v) < 0.06 ? 0 : v) * 32767)));
+    if (this.settings.padSwapAB) { const sw = (a, c) => { const x = (bits >> a) & 1, y = (bits >> c) & 1; bits = (bits & ~((1 << a) | (1 << c))) | (y << a) | (x << c); }; sw(0, 1); sw(2, 3); }
+    const dz = this.settings.padDeadzone ?? 0.08;
+    // radial dead zone, rescaled so the stick still reaches full range
+    const ax = (v) => { const a = Math.abs(v); const r = a < dz ? 0 : Math.sign(v) * (a - dz) / (1 - dz); return Math.max(-32767, Math.min(32767, Math.round(r * 32767))); };
     const lt = Math.round((p.buttons[6]?.value || 0) * 255), rt = Math.round((p.buttons[7]?.value || 0) * 255);
     const st = [bits >>> 0, ax(p.axes[0] || 0), ax(p.axes[1] || 0), ax(p.axes[2] || 0), ax(p.axes[3] || 0), lt, rt];
     const key = st.join(',');
@@ -431,5 +440,62 @@ export class Player {
     this.stopMic();
     try { this.hid?.close(); } catch {}
     this.ctx.fillStyle = '#000'; this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+}
+
+export class VoiceHub {
+  constructor({ port, settings, onSpeak }) {
+    this.port = port; this.settings = settings; this.onSpeak = onSpeak;
+    this.dec = new Map();
+    this.ready = (async () => {
+      this.ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      await this.ac.audioWorklet.addModule('worklet.js');
+      this.mixer = new AudioWorkletNode(this.ac, 'majlis-mixer', { outputChannelCount: [2] });
+      this.mixer.connect(this.ac.destination);
+      this.mixer.port.postMessage({ t: 'gain', g: { game: 1, voice: settings.voiceVol ?? 1 } });
+    })();
+  }
+
+  play(idx, data) {
+    this.onSpeak?.(idx);
+    let d = this.dec.get(idx);
+    if (!d) {
+      d = new AudioDecoder({ output: (a) => this._pcm(`v${idx}`, a), error: () => {} });
+      d.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
+      d.ts = 0; this.dec.set(idx, d);
+    }
+    if (this.ac?.state === 'suspended') this.ac.resume();
+    try { d.decode(new EncodedAudioChunk({ type: 'key', timestamp: (d.ts += 20000), data })); } catch {}
+  }
+
+  _pcm(key, d) {
+    const l = new Float32Array(d.numberOfFrames); d.copyTo(l, { planeIndex: 0, format: 'f32-planar' }); d.close();
+    this.mixer?.port.postMessage({ t: 'pcm', k: key, l, r: l }, [l.buffer]);
+  }
+
+  setGain(idx, g) { this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } }); }
+
+  async startMic(onPacket) {
+    if (this.mic) return;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    const enc = new AudioEncoder({ output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); onPacket(b); }, error: () => {} });
+    enc.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 32000, opus: { frameDuration: 20000 } });
+    const reader = new MediaStreamTrackProcessor({ track: stream.getAudioTracks()[0] }).readable.getReader();
+    this.mic = { stream, enc, open: false };
+    (async () => {
+      while (this.mic) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (this.mic?.open && enc.state === 'configured') enc.encode(value);
+        value.close();
+      }
+    })();
+  }
+  setMicOpen(on) { if (this.mic) this.mic.open = !!on; }
+
+  destroy() {
+    if (this.mic) { this.mic.stream.getTracks().forEach((t) => t.stop()); try { this.mic.enc.close(); } catch {} this.mic = null; }
+    for (const d of this.dec.values()) try { d.close(); } catch {}
+    try { this.ac?.close(); } catch {}
   }
 }
