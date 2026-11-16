@@ -143,14 +143,16 @@ class Movie extends EventEmitter {
     return s.address().port;
   }
 
-  _args(aport) {
+  _args(aport, ov = {}) {
     const st = this.state, i = this.info;
+    const kbps = ov.kbps ?? this.kbps, maxW = ov.maxW ?? this.maxW;
     const a = ['-hide_banner', '-loglevel', 'error', '-nostdin'];
     // Seek to the keyframe before the target (play() looks it up), so -re has no pre-roll to
     // sit through in real time. A hair past it because -ss counts from the file's start time.
     // Timestamps restart at 0 after -ss, so subtitles get shifted back onto the film's clock.
-    const ss = st.pos > 0.5 ? st.pos + 0.08 : 0;
-    this.startPos = ss;
+    const pos = ov.pos ?? st.pos;
+    const ss = pos > 0.5 ? pos + 0.08 : 0;
+    if (ov.low) this.low.startPos = ss; else this.startPos = ss;
     if (ss) a.push('-ss', ss.toFixed(3));
     a.push('-re', '-i', st.file);
     const vf = [];
@@ -161,16 +163,17 @@ class Movie extends EventEmitter {
     // shift the clock the subtitle filter sees: seek offset, minus the user's subtitle delay
     const shift = ss - (st.subDelay || 0);
     if (subs) vf.push(...(Math.abs(shift) > 0.001 ? [`setpts=PTS+(${shift.toFixed(3)})/TB`, subs, 'setpts=PTS-STARTPTS'] : [subs]));
-    if (i.video.w > this.maxW) vf.push(`scale=${this.maxW}:-2:flags=bicubic`);
+    if (i.video.w > maxW) vf.push(`scale=${maxW}:-2:flags=bicubic`);
     if (i.video.hdr) vf.push('zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv');
     vf.push('format=nv12');
-    const kb = Math.round(this.kbps), fps = Math.round(i.video.fps) || 24;
+    const kb = Math.round(kbps), fps = Math.round(i.video.fps) || 24;
     a.push('-map', '0:v:0', '-vf', vf.join(','), '-c:v', this.enc.name);
-    if (this.enc.fam === 'nvenc') a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '22', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2), '-forced-idr', '1');
+    // keyframes every 3 s and a 1 s VBV: smaller, rarer spikes that don't look like congestion
+    if (this.enc.fam === 'nvenc') a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '22', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.3)}k`, '-bufsize', `${kb}k`, '-bf', '0', '-g', String(fps * 3), '-forced-idr', '1', '-spatial-aq', '1');
     else if (this.enc.fam === 'sw') a.push('-preset', 'veryfast', '-tune', 'film', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2));
     else a.push('-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2));
     a.push('-an', '-flush_packets', '1', '-f', 'flv', 'pipe:1');
-    if (st.audio != null) {
+    if (st.audio != null && aport) {
       // night mode: lift dialogue, tame explosions
       const af = st.night ? 'dynaudnorm=f=200:g=11:p=0.9:m=8,acompressor=threshold=-20dB:ratio=4:attack=5:release=120' : 'anull';
       a.push('-map', `0:a:${st.audio}`, '-af', af, '-ac', '2', '-ar', '48000', '-c:a', 'libopus', '-b:a', '160k', '-frame_duration', '20', '-application', 'audio', '-vn', '-f', 'rtp', `rtp://127.0.0.1:${aport}?pkt_size=1400`);
@@ -190,15 +193,16 @@ class Movie extends EventEmitter {
     p.on('spawn', (pid) => this.emit('spawn', pid));
     this.state.playing = true;
     p.on('config', (c) => {
-      this.epoch = (this.epoch + 1) & 0xff;
-      this.config = { ...c, epoch: this.epoch, fps: Math.round(this.info.video.fps), encoder: this.enc.name, kbps: this.kbps };
+      this.epoch = (this.epoch + 1) & 0x7f;
+      this.config = { ...c, epoch: this.epoch, fps: Math.round(this.info.video.fps), encoder: this.enc.name, kbps: this.kbps, rendition: 'high' };
       this.emit('config', this.config);
     });
     p.on('frame', (f) => {
       if (p !== this.proc) return;
       this.state.pos = (this.startPos || 0) + f.ts / 1000;
-      this.emit('frame', { ...f, pts: Math.round(this.state.pos * 1000), epoch: this.epoch, id: this.frameId = (this.frameId + 1) >>> 0 });
+      this.emit('frame', { ...f, pts: Math.round(this.state.pos * 1000), epoch: this.epoch, rendition: 'high', id: this.frameId = (this.frameId + 1) >>> 0 });
     });
+    if (this.lowWanted) this._startLow(this.state.pos);
     p.on('exit', ({ code, err }) => {
       if (p !== this.proc) return;
       this.proc = null; this.state.playing = false;
@@ -210,7 +214,72 @@ class Movie extends EventEmitter {
     this.emit('state', this.publicState());
   }
 
+  // ---- the light rendition, for guests whose line can't carry the full one. It runs only
+  // while someone needs it, starts at the current position, and guests hop over to it at
+  // its first keyframe, so nobody sees the film stop.
+  kbpsFor(r) { return r === 'low' ? this.lowKbps : this.kbps; }
+
+  ensureLow(kbps) {
+    this.lowWanted = true;
+    if (!this.lowKbps) this.lowKbps = kbps;
+    if (this.state.playing && !this.low) this._startLow(this.state.pos);
+  }
+
+  // new bitrate for the light rendition, swapped in without a gap: the replacement runs next to
+  // the current one and takes over at its first keyframe
+  retuneLow(kbps) {
+    if (!this.low || this.lowNext || Math.abs(kbps - this.lowKbps) < this.lowKbps * 0.25) return false;
+    this.lowKbps = kbps;
+    this._startLow(this.state.pos, true);
+    return true;
+  }
+
+  dropLow() { this.lowWanted = false; this._stopLow(); }
+
+  async _startLow(pos, swap = false) {
+    if (!this.info || (this.low && !swap)) return;
+    const slot = { startPos: 0, epoch: null, cfg: null };
+    if (swap) this.lowNext = slot; else this.low = slot;
+    const kpos = pos > 0.5 ? await keyframeBefore(this.ffmpeg, this.state.file, pos) : 0;
+    if ((swap && this.lowNext !== slot) || (!swap && this.low !== slot)) return;
+    const kb = this.lowKbps || 3000;
+    // fewer pixels when there are few bits to spend
+    const maxW = Math.min(kb < 2500 ? 854 : 1280, this.maxW);
+    const args = this._args(null, { kbps: kb, maxW, pos: kpos, low: true });
+    slot.startPos = kpos > 0.5 ? kpos + 0.08 : 0;
+    const p = new EncoderProc(this.ffmpeg, { enc: this.enc, args });
+    slot.proc = p;
+    p.on('spawn', (pid) => this.emit('spawn', pid));
+    p.on('config', (c) => { slot.cfg = c; });
+    p.on('frame', (f) => {
+      if (this.lowNext === slot) {
+        if (!f.key || !slot.cfg) return;
+        const old = this.low; this.low = slot; this.lowNext = null; // replacement takes over
+        setTimeout(() => { try { old?.proc?.stop(); } catch {} }, 50);
+      }
+      if (this.low !== slot) return;
+      if (slot.epoch === null) {
+        this.lowEpoch = (((this.lowEpoch ?? 127) + 1) & 0x7f) | 0x80;
+        slot.epoch = this.lowEpoch;
+        this.lowConfig = { ...slot.cfg, epoch: slot.epoch, fps: Math.round(this.info.video.fps), encoder: this.enc.name, kbps: kb, rendition: 'low' };
+        this.emit('config', this.lowConfig);
+      }
+      const pts = Math.round(((slot.startPos || 0) + f.ts / 1000) * 1000);
+      this.emit('frame', { ...f, pts, epoch: slot.epoch, rendition: 'low', id: this.lowId = ((this.lowId || 0) + 1) >>> 0 });
+    });
+    p.on('exit', () => {
+      if (this.low === slot) { this.low = null; this.lowConfig = null; }
+      if (this.lowNext === slot) this.lowNext = null;
+    });
+  }
+
+  _stopLow() {
+    for (const s of [this.low, this.lowNext]) try { s?.proc?.stop(); } catch {}
+    this.low = null; this.lowNext = null; this.lowConfig = null;
+  }
+
   pause() {
+    this._stopLow();
     if (!this.proc) return;
     this.stopping = true;
     const p = this.proc; this.proc = null; this.state.playing = false;

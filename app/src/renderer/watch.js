@@ -70,6 +70,7 @@ export function initWatch(d) {
           </div></div>
           <div class="panel"><div class="pb">
             <div class="field"><label>${t('control_who')}</label><div class="seg" id="wctl"><button data-v="host" class="${s.watchControl !== 'all' ? 'on' : ''}">${t('control_host')}</button><button data-v="all" class="${s.watchControl === 'all' ? 'on' : ''}">${t('control_all')}</button></div></div>
+            <div class="field"><label>${t('resolution')}</label><div class="seg" id="wres">${['source', '1080', '720'].map((r) => `<button data-v="${r}" class="${(s.maxRes || 'source') === r ? 'on' : ''}">${r === 'source' ? t('res_source') : `${r}p`}</button>`).join('')}</div></div>
             <div class="field"><label>${t('watch_quality')} <span class="mono" id="wqv">${s.watchMbps} Mbps</span></label><input type="range" min="4" max="40" step="1" value="${s.watchMbps}" id="wq"></div>
             <div class="field"><label>${t('room_pin')}</label><input class="input mono" id="wpin" maxlength="8" inputmode="numeric" placeholder="${t('room_pin_ph')}" value="${esc(s.roomPin || '')}"></div>
             <div class="prow"><div class="lbl">${t('allow_chat')}</div><button class="switch ${s.allowChat !== false ? 'on' : ''}" data-perm="allowChat"></button></div>
@@ -101,6 +102,7 @@ export function initWatch(d) {
     $$('#wctl button').forEach((b) => (b.onclick = async () => { await set({ watchControl: b.dataset.v }); d.render(); }));
     $('#wq').oninput = (e) => { $('#wqv').textContent = `${e.target.value} Mbps`; };
     $('#wq').onchange = (e) => set({ watchMbps: +e.target.value });
+    $$('#wres button').forEach((b) => (b.onclick = async () => { await set({ maxRes: b.dataset.v }); d.render(); }));
     $$('.switch[data-k]').forEach((b) => (b.onclick = async () => { await set({ [b.dataset.k]: !(s[b.dataset.k] ?? true) }); d.render(); }));
     wireChat('hchat', (text) => api.invoke('chat', text));
     $('#wpin') && ($('#wpin').onchange = (e) => set({ roomPin: String(e.target.value).replace(/\D/g, '') }));

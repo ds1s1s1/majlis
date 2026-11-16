@@ -377,6 +377,9 @@ function viewRoom() {
               <div class="seg" id="codec">${['auto', 'av1', 'hevc', 'h264'].map((c) => `<button data-v="${c}" class="${set_.codec === c ? 'on' : ''}" ${c !== 'auto' && !S.st.encoders.some((e) => e.startsWith(c)) ? 'disabled style="opacity:.4"' : ''}>${c === 'auto' ? t('auto') : c.toUpperCase()}</button>`).join('')}<button disabled style="opacity:.35" title="${t('pyrowave_soon')}">Pyro</button></div>
             </div>
             <div class="field"><label>${t('max_bitrate')} <span class="mono" id="mbv">${set_.maxMbps} Mbps</span></label><input type="range" min="5" max="150" step="5" value="${set_.maxMbps}" id="mbps"></div>
+            <div class="field"><label>${t('resolution')}</label><div class="seg" id="res">${['source', '1440', '1080', '720'].map((r) => `<button data-v="${r}" class="${(set_.maxRes || 'source') === r ? 'on' : ''}">${r === 'source' ? t('res_source') : `${r}p`}</button>`).join('')}</div></div>
+            <div class="field"><label>${t('quality')}</label><div class="seg" id="qp">${['speed', 'balanced', 'quality'].map((q) => `<button data-v="${q}" class="${(set_.qualityPreset || 'balanced') === q ? 'on' : ''}">${t(`q_${q}`)}</button>`).join('')}</div><div class="sub">${t(`q_${set_.qualityPreset || 'balanced'}_sub`)}</div></div>
+            <div class="prow"><div class="lbl"><div>${t('light_spect')}</div><div class="sub">${t('light_spect_sub')}</div></div><button class="switch ${set_.lightSpectators ? 'on' : ''}" data-k="lightSpectators"></button></div>
             <div class="prow"><div class="lbl">${t('fps')}</div><div class="seg" id="fps">${[30, 60, 90, 120].map((f) => `<button data-v="${f}" class="${set_.fps === f ? 'on' : ''}">${f}</button>`).join('')}</div></div>
             <div class="prow"><div class="lbl"><div>${t('stability')}</div><div class="sub">${t('stability_sub')}</div></div>
               <div class="seg" id="stab">${['auto', 'on', 'off'].map((v) => `<button data-v="${v}" class="${set_.stability === v ? 'on' : ''}">${t(v === 'auto' ? 'auto' : v)}</button>`).join('')}</div></div>
@@ -447,6 +450,8 @@ function mountRoom() {
   $$('[data-perm]').forEach((b) => (b.onclick = async () => { S.st.settings = await api.invoke('perms', { [b.dataset.perm]: !(set_[b.dataset.perm] !== false) }); render(); }));
   $$('#codec button').forEach((b) => (b.onclick = async () => { if (b.disabled) return; await set({ codec: b.dataset.v }); render(); }));
   $$('#fps button').forEach((b) => (b.onclick = async () => { await set({ fps: +b.dataset.v }); render(); }));
+  $$('#res button').forEach((b) => (b.onclick = async () => { await set({ maxRes: b.dataset.v }); render(); }));
+  $$('#qp button').forEach((b) => (b.onclick = async () => { await set({ qualityPreset: b.dataset.v }); render(); }));
   $$('#stab button').forEach((b) => (b.onclick = async () => { await set({ stability: b.dataset.v }); render(); }));
   $('#mbps').oninput = (e) => { $('#mbv').textContent = `${e.target.value} Mbps`; };
   $('#mbps').onchange = (e) => set({ maxMbps: +e.target.value });

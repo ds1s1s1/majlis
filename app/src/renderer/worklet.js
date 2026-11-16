@@ -8,10 +8,13 @@ class Ring {
   silence(n) { for (let i = 0; i < n; i++) { this.l[this.w] = 0; this.r[this.w] = 0; this.w = (this.w + 1) % this.size; } }
   // Keep the queued audio at `want` samples (±25 ms) so this chunk plays when the picture
   // that goes with it is on screen: drop the oldest audio if we're behind, pad silence if ahead.
+  // Nudge gently: a late chunk must never wipe out what's queued (that was the audio
+  // cutting out on shaky lines). Drift is corrected a few ms at a time instead.
   align(want) {
-    const avail = this.avail, tol = 1200;
-    if (avail > want + tol) this.rd = (this.rd + (avail - want)) % this.size;
-    else if (avail + tol < want) this.silence(Math.min(48000, want - avail));
+    const avail = this.avail, tol = 3840; // 80 ms of slack before doing anything
+    if (avail > want + tol) this.rd = (this.rd + Math.min(avail - want - tol / 2, 480)) % this.size;
+    else if (avail + tol < want && !this.started) this.silence(Math.min(24000, want - avail));
+    else if (avail + tol < want) this.silence(Math.min(480, want - avail));
     this.started = true;
   }
   push(l, r, max, keep) {

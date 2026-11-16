@@ -67,11 +67,12 @@ class Host extends EventEmitter {
     this.movie = new Movie(ffmpeg);
     this.movie.on('config', (c) => {
       for (const g of this.guests.values()) this._sendMovieConfig(g);
+      if (c.rendition === 'low') return;
       this.emit('local', { t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie' });
     });
     this.movie.on('frame', (f) => {
-      for (const g of this.guests.values()) if (g.tier === 'movie' && g.configSent.movie === this.movie.config?.epoch) g.tx.send(f);
-      this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
+      for (const g of this.guests.values()) if (g.tier === 'movie' && (g.rendition || 'high') === f.rendition && g.configSent.movie === f.epoch) g.tx.send(f);
+      if (f.rendition === 'high') this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
     });
     this.movie.on('audio', ({ data, pts, epoch }) => {
       this._sendAudio(audioPacket(data, 1, epoch, pts));
@@ -237,6 +238,14 @@ class Host extends EventEmitter {
   pushPerms() { for (const g of this.guests.values()) g.link.ctrl({ t: 'perms', ...this._perms(g) }); this.emit('update'); }
   muteChat(sid, on) { const g = this.guests.get(sid); if (!g) return; g.chatMuted = !!on; g.link.ctrl({ t: 'perms', ...this._perms(g) }); this.emit('update'); }
 
+  // Desktop audio capture on/off, without restarting it when it's already in the right state
+  // (a restart is an audible gap).
+  _gameAudio(on) {
+    if (on === this.gameAudioOn) return;
+    this.gameAudioOn = on;
+    this.helper.cmd(on ? { cmd: 'audio', on: true, kbps: 128, keep: this.store.get('replaySeconds') + 5 } : { cmd: 'audio', on: false });
+  }
+
   // Ask Windows to schedule the encoder's GPU work ahead of the game's, so a game pinning the
   // GPU at 100% doesn't starve capture and encoding (that's where most host-side stutter comes from).
   _gpuPriority(pid) { if (pid) this.helper.cmd({ cmd: 'gpu_prio', pid }); }
@@ -271,10 +280,19 @@ class Host extends EventEmitter {
   setMode(mode) {
     this.mode = mode === 'watch' ? 'watch' : 'play';
     this.store.set('mode', this.mode);
-    if (this.mode === 'play') { this._saveResume(); this.movie.stop(); this.helper.cmd({ cmd: 'audio', on: true, kbps: 128, keep: this.store.get('replaySeconds') + 5 }); }
+    if (this.mode === 'play') { this._saveResume(); this.movie.stop(); this._gameAudio(true); }
     for (const g of this.guests.values()) { g.configSent = {}; g.link.ctrl({ t: 'mode', mode: this.mode, canControl: this._canControl(g) }); }
     if (this.guests.size) this._retier();
     this.emit('update');
+  }
+
+  _movieMaxW() { return { 720: 1280, 1080: 1920, 1440: 2560 }[this.store.get('maxRes')] || 3840; }
+
+  // quality changed while a film is on: carry on from the same spot with the new settings
+  applyMovieQuality() {
+    this.movie.kbps = (this.store.get('watchMbps') || 15) * 1000;
+    this.movie.maxW = this._movieMaxW();
+    this.movie.restart({});
   }
 
   _canControl(g) { return this.store.get('watchControl') === 'all' || g.role === 'full'; }
@@ -284,8 +302,8 @@ class Host extends EventEmitter {
     this._saveResume();
     const enc = this._encFor(this._pickCodec([...this.guests.values()]));
     const resume = fresh ? 0 : pos ?? this.store.d.resume?.[file]?.pos ?? 0;
-    const st = await this.movie.open(file, { enc, kbps: (this.store.get('watchMbps') || 15) * 1000, night: this.store.get('nightAudio'), pos: resume });
-    this.helper.cmd({ cmd: 'audio', on: false }); // the film's own audio replaces the desktop's
+    const st = await this.movie.open(file, { enc, kbps: (this.store.get('watchMbps') || 15) * 1000, maxW: this._movieMaxW(), night: this.store.get('nightAudio'), pos: resume });
+    this._gameAudio(false); // the film's own audio replaces the desktop's
     for (const g of this.guests.values()) g.configSent = {};
     this._retier();
     if (autoplay) this.movie.play();
@@ -307,7 +325,7 @@ class Host extends EventEmitter {
       case 'subsize': await m.setSubSize(['small', 'normal', 'large'].includes(value) ? value : 'normal'); break;
       case 'subdelay': await m.setSubDelay((m.state.subDelay || 0) + (+value || 0)); break;
       case 'next': { const { nextInFolder } = require('./movie'); const n = nextInFolder(m.state.file); if (n) await this.movieOpen(n, { autoplay: true, fresh: true }); break; }
-      case 'stop': this._saveResume(); m.stop(); break;
+      case 'stop': this._saveResume(); m.stop(); this._gameAudio(true); this._retier(); break;
     }
     if (by && (op === 'play' || op === 'pause' || op === 'toggle' || op === 'seek' || op === 'skip')) this.emit('movie-by', { by, op });
   }
@@ -332,9 +350,28 @@ class Host extends EventEmitter {
     this.emit('movie', v);
   }
 
+  // padding packets (channel 0x0c, ignored by the guest) at `kbps`, to test the line's headroom
+  _startProbe(g, kbps) {
+    this._stopProbe(g);
+    const pkt = Buffer.alloc(1100); pkt[0] = 0x0c;
+    const perTick = Math.max(1, Math.round((kbps * 1000 / 8 / 1100) / 100)); // 10 ms ticks
+    g.probe.start = now(); g.probe.until = now() + 2500;
+    g.probe.saved = g.rc.target; g.probe.savedDrop = g.rc.lastDrop;
+    g.probe.iv = setInterval(() => { for (let i = 0; i < perTick; i++) g.link.send(pkt); }, 10);
+  }
+  _stopProbe(g) { if (g.probe?.iv) clearInterval(g.probe.iv); if (g.probe) { g.probe.iv = null; g.probe.until = 0; } }
+
   _sendMovieConfig(g) {
-    const c = this.movie.config; if (!c || g.configSent.movie === c.epoch) return;
+    // over the internet, start on the light film and earn the full one (no rough start)
+    if (!g.rendition) {
+      g.rendition = g.link.pathInfo()?.lan ? 'high' : 'low';
+      if (g.rendition === 'low' && g.rc) g.rc.target = Math.min(g.rc.target, 4500); // start from what the light film needs
+    }
+    if (g.rendition === 'low' && !this.movie.lowWanted && this.movie.state.playing) this.movie.ensureLow(Math.min(this.movie.kbps * 0.3, 3000));
+    const c = g.rendition === 'low' ? this.movie.lowConfig : this.movie.config;
+    if (!c || g.configSent.movie === c.epoch) return;
     g.tier = 'movie';
+    g.tx.skipToKey = false;
     g.link.ctrl({ t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie', hdr: false });
     g.configSent = { movie: c.epoch };
   }
@@ -345,6 +382,19 @@ class Host extends EventEmitter {
       let fb; try { fb = JSON.parse(b.subarray(1)); } catch { return; }
       g.fb = fb; g.lastFb = now();
       if (!g.rc) return;
+      // ping rising above its quiet level = queues filling somewhere (bufferbloat)
+      const rtt = g.link.rtt || 0;
+      (g.rtts ||= []).push({ v: rtt, t: now() });
+      while (g.rtts.length && now() - g.rtts[0].t > 30000) g.rtts.shift();
+      if (rtt > 0) { let mn = Infinity; for (const x of g.rtts) if (x.v > 0 && x.v < mn) mn = x.v; fb.rttInc = rtt - mn; }
+      if (g.probe?.until && (fb.qd > 30 || (fb.rttInc || 0) > 40 || fb.loss > 0.02)) {
+        this._stopProbe(g);
+        g.rc.target = g.probe.saved; g.rc.lastDrop = g.probe.savedDrop; g.rc.bad = 0;
+        g.probe.next = now() + g.probe.backoff; g.probe.backoff = Math.min(g.probe.backoff * 2, 300000);
+        g.probe.cool = now() + 1500; // let the queue the probe built drain before judging again
+        return;
+      }
+      if (g.probe?.cool > now()) return;
       g.rc.feedback(fb);
       g.tx.fecRatio = g.rc.fecRatio;
       return;
@@ -510,7 +560,7 @@ class Host extends EventEmitter {
     this.displays = this.helper.info.displays || [];
     if (!this._helperOn) {
       this._helperOn = true;
-      this.helper.cmd({ cmd: 'audio', on: true, kbps: 128, keep: this.store.get('replaySeconds') + 5 });
+      this._gameAudio(true);
       this.helper.cmd({ cmd: 'cursor', on: true });
     }
     for (const g of this.guests.values()) if (g.slot) this._attachPad(g);
@@ -535,13 +585,16 @@ class Host extends EventEmitter {
     const fpsCap = this.store.get('fps') || 60;
     const d = this.displays.find((x) => x.index === (this.store.get('display') | 0)) || this.displays[0] || { w: 1920, h: 1080, x: 0, y: 0, hz: 60 };
     let fps = Math.min(fpsCap, ...guests.map((g) => g.screen?.hz || 60), d.hz || 60);
-    if (tier === 'watch') fps = Math.min(fps, 30);
+    const light = tier === 'watch' && this.store.get('lightSpectators');
+    if (light) fps = Math.min(fps, 30);
     const o = { display: d.index | 0, fps, tenBit: this.store.get('tenBit'), hdr: this.store.get('hdr') && d.hdr };
     let srcW = d.w, srcH = d.h;
     if (win && this.wincap) { o.window = this.wincap; srcW = this.wincap.w; srcH = this.wincap.h; }
     // scale down to what the viewer can show (spectators get at most 720p)
-    const maxW = tier === 'watch' ? 1280 : Math.max(...guests.map((g) => g.screen?.w || 1920));
-    const maxH = tier === 'watch' ? 720 : Math.max(...guests.map((g) => g.screen?.h || 1080));
+    // resolution: the viewers' screens, capped by the host's choice (720p / 1080p / 1440p / source)
+    const capH = light ? 720 : { 720: 720, 1080: 1080, 1440: 1440 }[this.store.get('maxRes')] || Infinity;
+    const maxH = Math.min(capH, Math.max(...guests.map((g) => g.screen?.h || 1080)));
+    const maxW = Math.min(capH === Infinity ? Infinity : Math.round(capH * 16 / 9), Math.max(...guests.map((g) => g.screen?.w || 1920)));
     const s = Math.min(1, maxW / srcW, maxH / srcH);
     if (s < 0.999) o.scale = { w: Math.round(srcW * s / 2) * 2, h: Math.round(srcH * s / 2) * 2 };
     this.captureRect = win && this.wincap ? this.wincap.rect : { x: d.x, y: d.y, w: d.w, h: d.h };
@@ -559,7 +612,8 @@ class Host extends EventEmitter {
       this._stopEncoders();
       for (const g of this.guests.values()) {
         g.tier = 'movie'; g.tierEnc = () => null;
-        if (!g.rc) g.rc = new RateControl({ maxKbps: (this.store.get('watchMbps') || 15) * 1000, startKbps: (this.store.get('watchMbps') || 15) * 1000 });
+        if (!g.rc) g.rc = new RateControl({ maxKbps: (this.store.get('watchMbps') || 15) * 1000, startKbps: (this.store.get('watchMbps') || 15) * 1000, relaxed: true });
+        g.rc.relaxed = true;
         this._sendMovieConfig(g);
       }
       this.emit('update');
@@ -589,7 +643,7 @@ class Host extends EventEmitter {
       const codec = this._pickCodec(list);
       const lan = list.every((g) => g.path?.lan);
       const src = this._sourceOpts(tier, list);
-      const cap = (lan ? 150000 : (this.store.get('maxMbps') || 40) * 1000) * (tier === 'watch' ? this.store.get('spectatorQuality') || 0.35 : 1);
+      const cap = (lan ? 150000 : (this.store.get('maxMbps') || 40) * 1000) * (tier === 'watch' && this.store.get('lightSpectators') ? 0.35 : 1);
       for (const g of list) {
         if (!g.rc) {
           const hint = this.store.get('peakLearning') ? this.store.peakHint() : null;
@@ -600,7 +654,7 @@ class Host extends EventEmitter {
       }
       const kbps = Math.min(...list.map((g) => g.rc.target));
       const t = this.tiers[tier];
-      const want = { enc: this._encFor(codec), kbps, ...src, lan };
+      const want = { enc: this._encFor(codec), kbps, ...src, lan, quality: this.store.get('qualityPreset') || 'balanced' };
       if (!t) {
         const enc = new Encoder(this.ffmpeg);
         const nt = { enc, codec, kbps, opts: want, config: null, sig: this._sig(want) };
@@ -626,7 +680,7 @@ class Host extends EventEmitter {
     this.emit('update');
   }
 
-  _sig(o) { return JSON.stringify([o.enc.name, o.display, o.fps, o.scale, o.window?.pipe, o.tenBit, o.hdr]); }
+  _sig(o) { return JSON.stringify([o.enc.name, o.display, o.fps, o.scale, o.window?.pipe, o.tenBit, o.hdr, o.quality]); }
 
   _stability(g) {
     const s = this.store.get('stability');
@@ -692,6 +746,7 @@ class Host extends EventEmitter {
 
   _drop(sid, reason) {
     const g = this.guests.get(sid); if (!g) return;
+    this._stopProbe(g);
     // keep their seat for a few minutes in case the line just dropped
     if (reason === 'timeout') (this.recentDrops ||= new Map()).set(g.id, { role: g.role, slot: g.slot, pk: g.link.peer.pk, at: now() });
     this.guests.delete(sid);
@@ -718,6 +773,49 @@ class Host extends EventEmitter {
       g.link.ping();
     }
     // bitrate: follow the slowest guest in each tier, swap encoders only on real changes
+    if (this.movie.info && this.movie.state.playing) {
+      const hi = this.movie.kbps;
+      const movieGuests = [...this.guests.values()].filter((g) => g.tier === 'movie' && g.rc);
+      // Anyone watching over the internet: keep the light film running so a switch is instant.
+      const remote = movieGuests.some((g) => !g.link.pathInfo()?.lan || g.rc.target < hi * 0.85);
+      if (remote || movieGuests.some((g) => g.rendition === 'low')) this.movie.ensureLow(Math.min(hi * 0.3, 3000));
+      else if (this.movie.lowWanted) this.movie.dropLow();
+      let lowMin = Infinity;
+      for (const g of movieGuests) {
+        const r = g.rendition || 'high';
+        if (r === 'high') {
+          g.lowSince = g.rc.target < hi * 0.75 ? g.lowSince || t : 0;
+          if (g.lowSince && t - g.lowSince > 1500 && this.movie.lowConfig) { g.rendition = 'low'; g.configSent = {}; this._sendMovieConfig(g); }
+        } else {
+          // ~10 s average, quicker on the way down
+          g.tEw = g.tEw ? g.tEw * (g.rc.target < g.tEw ? 0.8 : 0.95) + g.rc.target * (g.rc.target < g.tEw ? 0.2 : 0.05) : Math.min(g.rc.target, (this.movie.lowKbps || 3000) * 1.5);
+          lowMin = Math.min(lowMin, g.tEw);
+          // Earn the full film with a probe: pad the link up to the full film's rate for 2.5 s.
+          // No congestion -> upgrade. Congestion -> stay, and wait longer before trying again.
+          const p = (g.probe ||= { next: t + 8000, backoff: 30000 });
+          if (p.until) {
+            if (g.rc.lastDrop > p.start) { this._stopProbe(g); p.half = undefined; p.next = t + p.backoff; p.backoff = Math.min(p.backoff * 2, 300000); }
+            else if (t >= p.until && p.half) { this._stopProbe(g); p.half = false; p.next = t + 1500; } // half passed: try the full step
+            else if (t >= p.until) { this._stopProbe(g); p.half = undefined; p.backoff = 30000; p.next = t + 60000; g.rc.target = Math.max(g.rc.target, hi); g.rendition = 'high'; g.configSent = {}; this._sendMovieConfig(g); }
+          } else if (t >= p.next && t - g.rc.lastDrop > 8000) {
+            this._startProbe(g, Math.max(500, hi * 1.15 - (g.fb?.kbps || 0)) * (p.half === false ? 1 : 0.5));
+            p.half = p.half === undefined ? true : p.half;
+          }
+        }
+      }
+      // the light film itself follows the weakest guest on it, downward only (at most every 6 s)
+      if (lowMin < Infinity && this.movie.lowKbps && t - (this.lowTuned || 0) > 6000) {
+        const want = Math.max(1000, Math.min(hi * 0.3, 3000, lowMin * 0.8));
+        if (this.movie.retuneLow(want)) this.lowTuned = t;
+      }
+    }
+    // pace at what the line takes (rate control's estimate), never faster than the encoder needs
+    for (const g of this.guests.values()) {
+      const k = g.tier === 'movie' ? this.movie.kbpsFor?.(g.rendition) || this.movie.kbps : this.tiers[g.tier]?.kbps;
+      if (!k) continue;
+      g.tx.rateKbps = g.rc ? Math.max(800, Math.min(k * 1.35, g.rc.target * 1.15)) : k * 1.35;
+      g.tx.keyed = g.tier === 'movie';
+    }
     for (const tier of ['play', 'watch']) {
       const tt = this.tiers[tier]; if (!tt) continue;
       const list = [...this.guests.values()].filter((g) => g.tier === tier && g.rc);
@@ -749,7 +847,7 @@ class Host extends EventEmitter {
         sid: g.sid, id: g.id, name: g.nick, role: g.role, slot: g.slot, tier: g.tier, hand: g.hand, muted: g.muted, safety: g.link.safety,
         expiresAt: g.expiresAt, path: g.link.pathInfo(), rtt: Math.round(g.link.rtt), kbps: g.fb?.kbps || 0, loss: g.fb?.loss || 0, fps: g.fb?.fps || 0,
         qd: g.fb?.qd || 0, target: g.rc ? Math.round(g.rc.target) : 0, fec: g.rc ? Math.round(g.rc.fecRatio * 100) : 0, stability: g.rc?.stability || false,
-        speaking: g.speakingAt && now() - g.speakingAt < 400, chatMuted: !!g.chatMuted, jitter: g.fb?.jitter || 0, baton: this.hotseat.holder === g.sid, connType: g.connType || null, ready: !!g.ready, joined: g.joined,
+        speaking: g.speakingAt && now() - g.speakingAt < 400, chatMuted: !!g.chatMuted, rendition: g.tier === 'movie' ? g.rendition || 'high' : null, jitter: g.fb?.jitter || 0, baton: this.hotseat.holder === g.sid, connType: g.connType || null, ready: !!g.ready, joined: g.joined,
       })),
       knocks: [...this.knocks.values()].map((k) => this._knockView(k)),
     };

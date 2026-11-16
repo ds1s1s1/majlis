@@ -226,6 +226,8 @@ function handlers() {
     if ('panicKey' in patch || 'replayKey' in patch) registerShortcuts();
     if ('pttKey' in patch || 'voice' in patch) watchPtt();
     if (patch.ffmpeg) resolveFfmpeg({ custom: patch.ffmpeg, dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => exe && useFfmpeg(exe));
+    if (['fps', 'maxRes', 'qualityPreset', 'maxMbps', 'codec', 'tenBit', 'hdr', 'lightSpectators'].some((k) => k in patch) && host.guests.size) host._retier(true);
+    if (('watchMbps' in patch || 'maxRes' in patch) && host.movie.info) host.applyMovieQuality();
     if ('replay' in patch) { if (patch.replay && host.guests.size) replay.start(store.get('display')); if (!patch.replay) replay.stop(); }
     if (patch.shareStatus !== undefined || patch.nick !== undefined) pushPresence();
     return store.all();
@@ -445,7 +447,7 @@ app.whenReady().then(async () => {
   host.on('joined', (g) => { emit('joined', g); if (store.get('replay')) replay.start(store.get('display')); });
   host.on('left', (g) => { emit('left', g); if (!host.guests.size) replay.stop(); });
   host.on('update', () => { emit('host', host.stats()); boost(host.guests.size > 0 || !!guest.link); });
-  host.on('stats', (s) => { emit('host', s); if (s.guests.length) logStats('host', { tiers: s.tiers, guests: s.guests.map((g) => ({ rtt: g.rtt, kbps: g.kbps, target: g.target, loss: g.loss, qd: g.qd, jitter: g.jitter, fps: g.fps, path: g.path?.kind, fec: g.fec, stab: g.stability })) }); });
+  host.on('stats', (s) => { emit('host', s); if (s.guests.length) logStats('host', { tiers: s.tiers, guests: s.guests.map((g) => ({ rtt: g.rtt, kbps: g.kbps, target: g.target, loss: g.loss, qd: g.qd, jitter: g.jitter, fps: g.fps, path: g.path?.kind, label: g.path?.label, fec: g.fec, stab: g.stability, r: g.rendition, role: g.role })), movie: s.movie ? { playing: s.movie.playing, pos: Math.round(s.movie.pos) } : null }); });
   host.on('hand', (h) => emit('hand', h));
   host.on('baton', (b) => emit('baton', b));
   host.on('panic', () => { emit('panic', {}); replay.stop(); });

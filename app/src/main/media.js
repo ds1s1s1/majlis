@@ -18,7 +18,7 @@ const hr = () => Number(process.hrtime.bigint() / 1000n) / 1000;
 
 // ------------------------------------------------------------------ sender
 class VideoTx {
-  constructor(link) { this.link = link; this.fecRatio = 0.1; this.sentFrames = 0; this.queue = []; this.busy = false; }
+  constructor(link) { this.link = link; this.fecRatio = 0.1; this.sentFrames = 0; this.queue = []; this.busy = false; this.rateKbps = 20000; }
 
   send(frame) {
     const { data, key, epoch, id, encMs } = frame;
@@ -51,24 +51,50 @@ class VideoTx {
       }
     }
     this.sentFrames++;
+    // Never let more than ~400 ms pile up on our side: past that the picture is late anyway.
+    // Films (regular keyframes) skip ahead to the next keyframe; games drop the frame and the
+    // encoder's rolling intra refresh cleans it up within a second.
+    // what's waiting behind the frame currently going out (that one is allowed to be big)
+    const queued = this.queue.slice(1).reduce((a, q) => a + (q.length - (q.i || 0)), 0) * 1150;
+    // films ride a cinema buffer, so they can be late by a second rather than skip and freeze
+    const limit = Math.max(200000, (Math.max(800, this.rateKbps) / 8) * (this.keyed ? 1500 : 500));
+    if (this.skipToKey && !key) { this.skipped = (this.skipped || 0) + 1; return; }
+    if (queued > limit) {
+      if (key) { this.queue = this.queue.filter((q) => q.i > 0 && q.i < q.length); }
+      else { this.skipped = (this.skipped || 0) + 1; if (this.keyed) this.skipToKey = true; return; }
+    }
+    if (key) this.skipToKey = false;
     this.queue.push(pkts);
     if (!this.busy) this._drain();
   }
 
-  // Pacing: small frames go out at once; big ones (keyframes, scene cuts) are spread over a few
-  // milliseconds so a 5G modem's buffer doesn't overflow and drop the tail of the frame.
+  // Pacing (token bucket): packets leave at a steady ~1.5x the target bitrate instead of in
+  // bursts. Cell networks (Zain/STC/Mobily 4G-5G) drop or queue bursts, which is where most
+  // loss and ping spikes came from. A small burst allowance keeps small frames instant.
   _drain() {
-    const pkts = this.queue.shift();
-    if (!pkts) { this.busy = false; return; }
-    if (pkts.length <= 24) { for (const p of pkts) this.link.send(p); return this._drain(); }
+    if (this.busy) return;
     this.busy = true;
-    const spread = Math.min(10, Math.max(2, pkts.length * 0.05));
-    const t0 = hr();
-    let i = 0;
     const step = () => {
-      const allowed = Math.min(pkts.length, 12 + Math.floor(((hr() - t0) / spread) * pkts.length));
-      for (; i < allowed; i++) this.link.send(pkts[i]);
-      if (i < pkts.length) setImmediate(step); else this._drain();
+      const t = hr();
+      const rate = Math.max(1000, this.rateKbps * 1.1) / 8; // bytes per ms (headroom is in rateKbps)
+      // bucket holds ~25 ms worth, so a coarse timer still keeps the line busy
+      const cap = Math.max(16 * 1150, rate * 25);
+      this.tokens = Math.min(cap, (this.tokens ?? cap) + (t - (this.tLast ?? t)) * rate);
+      this.tLast = t;
+      while (this.queue.length) {
+        const pkts = this.queue[0];
+        while (pkts.i === undefined || pkts.i < pkts.length) {
+          pkts.i ??= 0;
+          if (this.tokens < 1150) break;
+          // stamp the real departure time: waiting in our own queue isn't network congestion
+          const p = pkts[pkts.i++]; p.writeUInt32BE(Date.now() >>> 0, 7);
+          this.link.send(p); this.tokens -= 1150;
+        }
+        if (pkts.i < pkts.length) break;
+        this.queue.shift();
+      }
+      // wait on a timer, not a spin: a spinning loop starves everything else (pings included)
+      if (this.queue.length) setTimeout(step, Math.max(1, Math.ceil((1150 - this.tokens) / rate))); else this.busy = false;
     };
     step();
   }
@@ -122,7 +148,8 @@ class VideoRx {
     // anything older that never finished is lost
     for (const [k2, g] of this.frames) if (g.epoch === f.epoch && ((g.id - f.id) | 0) < 0) { this.frames.delete(k2); this.win.lost++; }
     const gap = this.lastEpoch === f.epoch && this.lastDelivered >= 0 ? ((f.id - this.lastDelivered) | 0) - 1 : 0;
-    if (gap > 0) this.win.lost += gap;
+    // a jump in frame numbers isn't loss: the sender may have skipped frames on purpose to stay
+    // live. Only frames that started arriving and never completed count as lost.
     this.win.frames++;
     if (f.key) this.waitKey = false;
     if (f.epoch !== this.lastEpoch && !f.key) { this.waitKey = true; this.onNeedKey?.(); return; }
@@ -133,7 +160,7 @@ class VideoRx {
     this.owdBase.push({ v: owd, t: now() });
     while (this.owdBase.length && now() - this.owdBase[0].t > 10000) this.owdBase.shift();
     let base = Infinity; for (const x of this.owdBase) if (x.v < base) base = x.v;
-    if (!f.key && f.blocks.length === 1) this.qd.push(owd - base);
+    if (!f.key) this.qd.push(owd - base); // first shard of the frame: its own size doesn't delay it
     if (this.lastArrival) this.gaps.push(t - this.lastArrival);
     this.lastArrival = t;
     this.onFrame({ epoch: f.epoch, id: f.id, key: !!f.key, data, hostTs: f.hostTs, encMs: f.encMs, pts: f.pts, owd, assembleMs: t - f.first, gap });
@@ -159,8 +186,9 @@ class VideoRx {
 
 // ------------------------------------------------------------------ congestion control
 class RateControl {
-  constructor({ maxKbps, minKbps = 1500, startKbps, stability = false }) {
-    this.max = maxKbps; this.min = minKbps; this.stability = stability;
+  constructor({ maxKbps, minKbps = 1500, startKbps, stability = false, relaxed = false }) {
+    this.max = maxKbps; this.min = minKbps; this.stability = stability; this.relaxed = relaxed;
+    this.qdHist = [];
     this.target = Math.min(maxKbps, startKbps || maxKbps * 0.5);
     this.lastDrop = 0; this.lastUp = now(); this.lossEw = 0; this.jitEw = 0; this.congestions = 0; this.bad = 0;
   }
@@ -172,10 +200,18 @@ class RateControl {
     const t = now();
     this.lossEw = this.lossEw * 0.85 + fb.loss * 0.15;
     this.jitEw = this.jitEw ? this.jitEw * 0.9 + (fb.jitter || 0) * 0.1 : (fb.jitter || 0);
-    // a jittery line (Wi-Fi, 5G) wobbles on its own; only call it congestion above that wobble
-    const qThr = Math.max(this.stability ? 14 : 25, this.jitEw * 3);
+    // Standing queue, BBR-style: the smallest queuing delay seen over the last 400 ms. A burst
+    // (a keyframe) delays a few frames for a moment; real congestion delays every one of them.
+    this.qdHist.push({ v: fb.qd, t });
+    while (this.qdHist.length > 1 && t - this.qdHist[0].t > 400) this.qdHist.shift();
+    let qd = Infinity; for (const x of this.qdHist) if (x.v < qd) qd = x.v;
+    fb = { ...fb, qd };
+    // a jittery line (Wi-Fi, 5G) wobbles on its own; only call it congestion above that wobble.
+    // Films (relaxed) can sit on a bit more queue than a game can.
+    const qThr = Math.max(this.relaxed ? 60 : this.stability ? 14 : 25, this.jitEw * 3);
     const lThr = this.stability ? 0.04 : 0.08;
-    const congested = fb.qd > qThr || fb.loss > lThr || fb.lost > 2;
+    const rttUp = fb.rttInc != null && fb.rttInc > Math.max(this.relaxed ? 100 : 55, this.jitEw * 4);
+    const congested = fb.qd > qThr || fb.loss > lThr || fb.lost > 2 || rttUp;
     // one bad report is noise; two in a row is a trend
     this.bad = congested ? this.bad + 1 : 0;
     if (this.bad >= 2 && t - this.lastDrop > 500) {
@@ -188,7 +224,8 @@ class RateControl {
       return 'down';
     }
     const hold = this.stability ? 5000 : 2500;
-    if (!congested && fb.qd < qThr / 2 && t - this.lastDrop > hold && t - this.lastUp > 700) {
+    const appLimited = fb.kbps > 0 && fb.kbps < this.target * 0.6;
+    if (!congested && !appLimited && fb.qd < qThr / 2 && t - this.lastDrop > hold && t - this.lastUp > 700) {
       this.lastUp = t;
       const before = this.target;
       this.target = Math.min(this.max, this.target * (this.stability ? 1.03 : 1.05));

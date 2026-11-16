@@ -139,13 +139,20 @@ export class Player {
   // The first frames of each run (each seek restarts the run) pick the anchor: the earliest
   // arrival + buffer. Later frames sit on that clock; if they keep arriving late (clock drift,
   // a slower path) the anchor slides back so we don't stutter.
+  // Film clock -> local clock. `raw` is how late (vs. the film's own timestamps) a frame
+  // arrived. The earliest arrival in the last 5 s is the line's best case; frames go on screen
+  // at that + the cinema buffer + a margin that grows with the line's jitter. Works across the
+  // full and the light rendition (same film timestamps); a seek shows up as a jump and resets.
   _present_at(s) {
-    const cand = s.t + this.cinemaDelay - s.pts;
-    const a = this.anchor;
-    if (!a || a.epoch !== s.epoch) { this.anchor = { epoch: s.epoch, base: cand, lateSince: 0 }; return cand + s.pts; }
-    if (cand < a.base) a.base = cand;
-    else if (cand > a.base + 60) { a.lateSince ||= s.t; if (s.t - a.lateSince > 1500) { a.base = cand; a.lateSince = 0; } }
-    else a.lateSince = 0;
+    const raw = s.t - s.pts;
+    const a = (this.anchor ||= { win: [], jit: 0, last: raw });
+    if (Math.abs(raw - a.last) > 1500) { a.win = []; a.jit = 0; }
+    a.last = raw;
+    a.win.push({ raw, t: s.t });
+    while (a.win.length > 1 && s.t - a.win[0].t > 5000) a.win.shift();
+    let mn = Infinity; for (const x of a.win) if (x.raw < mn) mn = x.raw;
+    a.jit = a.jit * 0.97 + (raw - mn) * 0.03;
+    a.base = mn + this.cinemaDelay + Math.min(800, a.jit * 2.5);
     return a.base + s.pts;
   }
 
@@ -204,7 +211,7 @@ export class Player {
   // How long this chunk should wait before it's heard (ms), so it lines up with the picture.
   _audioWant(meta) {
     const outLat = (this.ac?.outputLatency || 0) * 1000 + 5 - (this.settings.avOffset || 0);
-    if (meta.timed && this.cinema && this.anchor && this.anchor.epoch === meta.epoch) return this.anchor.base + meta.pts - performance.now() - outLat;
+    if (meta.timed && this.cinema && this.anchor?.base != null) return this.anchor.base + meta.pts - performance.now() - outLat;
     if (this.cinema) return null;
     // game mode: match the picture's delay, but never below what the line's jitter needs
     const floor = Math.min(80, 22 + this.aJit * 2);

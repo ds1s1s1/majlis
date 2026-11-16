@@ -11,13 +11,14 @@ test('frames survive 5% packet loss, keep their timestamps, and big frames are p
   const link = { send: (p) => { sent++; const t = performance.now(); if (!first) first = t; last = t; if (Math.random() > 0.05) rx.push(p); } };
   const tx = new VideoTx(link);
   tx.fecRatio = 0.2;
+  tx.rateKbps = 100000;
   const frames = [];
   for (let i = 1; i <= 30; i++) {
     const size = i === 1 ? 300000 : 8000 + (i % 5) * 3000; // first one is a big keyframe
     const f = { data: crypto.randomBytes(size), key: i === 1, epoch: 1, id: i, encMs: 3, pts: i * 16 };
     frames.push(f); tx.send(f);
   }
-  await new Promise((r) => setTimeout(r, 200));
+  await new Promise((r) => setTimeout(r, 400));
   assert.ok(got.length >= 27, `delivered ${got.length}/30`);
   for (const f of got) {
     const src = frames.find((x) => x.id === f.id);

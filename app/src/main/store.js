@@ -49,6 +49,9 @@ const DEFAULTS = {
   autoDuck: true,
   allowChat: true,
   noVsync: false,
+  maxRes: 'source',        // source | 720 | 1080 | 1440
+  qualityPreset: 'balanced', // speed | balanced | quality
+  lightSpectators: false,
   dataSaver: false,
   roomPin: '',
   mouseSens: 1,
