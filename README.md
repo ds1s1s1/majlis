@@ -30,6 +30,7 @@
 
 نزّل `Majlis-portable.exe` من [صفحة الإصدارات](https://github.com/ds1s1s1/majlis/releases/latest) وشغّله، ما يحتاج تثبيت.
 
+- البرنامج ما يجي معه سيرفر. تحتاج سيرفر يربط الأرقام، وتقدر تسويه مجانًا على Cloudflare (شوف [السيرفر](#السيرفر))، وبعدها تحط عنوانه في الإعدادات. وتقدر تقفله بمفتاح عشان ما يستخدمه إلا أصحابك.
 - اللي يدخل على غيره ما يحتاج أي شي ثاني.
 - اللي يستضيف، البرنامج ينزّل له أدوات البث (ffmpeg) أول مرة لحاله.
 - عشان أصحابك يلعبون بيد على جهازك لازم تثبّت [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases).
@@ -87,7 +88,16 @@ npm install
 npx wrangler deploy
 npx wrangler secret put TURN_KEY_ID
 npx wrangler secret put TURN_KEY_API_TOKEN
+npx wrangler secret put ACCESS_KEY
 ```
+
+`ACCESS_KEY` اختياري: إذا حطيته، السيرفر ما يقبل إلا اللي عنده نفس المفتاح في الإعدادات (خانة "مفتاح السيرفر"). وإذا تبي توزع نسخة جاهزة لأصحابك فيها سيرفرك ومفتاحك، حط ملف `app/src/main/build-config.json` قبل البناء:
+
+```json
+{ "server": "https://your-worker.workers.dev", "accessKey": "..." }
+```
+
+الملف هذا ما ينرفع للمستودع.
 
 ولو تبي تستضيف السيرفر بنفسك على VPS، فيه نسخة Node كاملة في مجلد `server`، معها Docker وسكربت تجهيز.
 
