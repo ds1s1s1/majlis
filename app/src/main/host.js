@@ -16,6 +16,8 @@ const ROLES = ['watch', 'pad', 'kbm', 'full'];
 
 // [0x02][flags][epoch][hostTs u32][pts u32][seq u16] + opus
 let audioSeq = 0;
+const movieConfigMsg = (c) => ({ t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie', hdr: false });
+
 function audioPacket(opus, timed, epoch, pts) {
   const b = Buffer.allocUnsafe(13 + opus.length);
   b[0] = 0x02; b[1] = timed ? 1 : 0; b[2] = epoch & 0xff;
@@ -68,15 +70,36 @@ class Host extends EventEmitter {
     this.movie.on('config', (c) => {
       for (const g of this.guests.values()) this._sendMovieConfig(g);
       if (c.rendition === 'low') return;
-      this.emit('local', { t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie' });
+      this.emit('local', movieConfigMsg(c));
     });
     this.movie.on('frame', (f) => {
       for (const g of this.guests.values()) if (g.tier === 'movie' && (g.rendition || 'high') === f.rendition && g.configSent.movie === f.epoch) g.tx.send(f);
       if (f.rendition === 'high') this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
     });
     this.movie.on('audio', ({ data, pts, epoch }) => {
-      this._sendAudio(audioPacket(data, 1, epoch, pts));
+      // film audio rides the paced queue with the picture; on a line that loses packets each
+      // one also goes again a packet later, so a single loss is never heard
+      const b = audioPacket(data, 1, epoch, pts);
+      for (const g of this.guests.values()) {
+        if (g.tier !== 'movie') continue;
+        g.tx.sendRaw(b);
+        if (g.prevA && (g.rc?.lossEw || 0) > 0.003) g.tx.sendRaw(g.prevA);
+        g.prevA = b;
+      }
       this.emit('local', { t: 'a', data, timed: true, epoch, pts, age: 0 });
+    });
+    // the film is ready to go: start its clock once everyone watching has a bit of it in hand
+    this.movie.on('ready', () => this._waitBuffers());
+    // The film clock: everyone shows the same frame at the same moment. A new run (start, seek,
+    // new settings) makes what's queued for sending stale.
+    this.movie.on('clock', (c) => {
+      const fresh = c.run !== this.clockRun;
+      this.clockRun = c.run;
+      for (const g of this.guests.values()) {
+        if (fresh && g.tier === 'movie') { g.tx.flush(); g.audioRun = c.run; }
+        if (g.tier === 'movie' || this.mode === 'watch') g.link.ctrl({ t: 'fclock', ...c });
+      }
+      this.emit('local', { t: 'clock', ...c });
     });
     this.movie.on('spawn', (pid) => this._gpuPriority(pid));
     this.movie.on('state', (st) => this._movieState(st));
@@ -365,15 +388,57 @@ class Host extends EventEmitter {
     // over the internet, start on the light film and earn the full one (no rough start)
     if (!g.rendition) {
       g.rendition = g.link.pathInfo()?.lan ? 'high' : 'low';
-      if (g.rendition === 'low' && g.rc) g.rc.target = Math.min(g.rc.target, 4500); // start from what the light film needs
+      if (g.rendition === 'low' && g.rc) g.rc.target = Math.min(g.rc.target, 2500); // start low and let it climb: overshooting a weak line costs seconds
     }
-    if (g.rendition === 'low' && !this.movie.lowWanted && this.movie.state.playing) this.movie.ensureLow(Math.min(this.movie.kbps * 0.3, 3000));
+    if (g.rendition === 'low' && !this.movie.lowWanted && this.movie.state.playing) this.movie.ensureLow(Math.min(this.movie.kbps * 0.4, 1200));
     const c = g.rendition === 'low' ? this.movie.lowConfig : this.movie.config;
     if (!c || g.configSent.movie === c.epoch) return;
     g.tier = 'movie';
     g.tx.skipToKey = false;
-    g.link.ctrl({ t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie', hdr: false });
+    g.tx.dueOf = (pts) => this.movie.dueOf(pts);
+    // What's already been encoded ahead never comes round again: send it now, from the last
+    // keyframe before the picture, so a newcomer (or a switch to the other rendition) starts
+    // straight away instead of waiting for what's being encoded seconds from now.
+    // (only when this guest is new to this rendition: a replaced light film carries on from
+    // exactly where the old one stopped, so there's nothing to resend)
+    const run = this.movie.clock.run;
+    const fresh = g.feed?.run !== run || g.feed?.rendition !== g.rendition;
+    g.feed = { run, rendition: g.rendition };
+    const catchUp = fresh ? this.movie.replay(g.rendition) : [];
+    const epochs = new Set([...catchUp.map((f) => f.epoch), c.epoch]);
+    for (const e of epochs) { const cc = this.movie.configs.get(e); if (cc) g.link.ctrl(movieConfigMsg(cc)); }
     g.configSent = { movie: c.epoch };
+    g.link.ctrl({ t: 'fclock', ...this.movie.clockMsg() });
+    for (const f of catchUp) g.tx.send(f);
+    // the film's audio for what's buffered ahead (audio is the same whichever rendition)
+    if (g.audioRun !== this.movie.clock.run) {
+      g.audioRun = this.movie.clock.run;
+      for (const a of this.movie.replayAudio()) g.tx.sendRaw(audioPacket(a.data, 1, a.epoch, a.pts));
+    }
+  }
+
+  // Start (or after a seek, restart) the film once every viewer has ~1.5 s of it delivered, so
+  // nobody begins on an empty buffer; never wait more than a few seconds for a slow line.
+  _waitBuffers() {
+    clearInterval(this.bufTimer);
+    this.bufTimer = setInterval(() => {
+      const m = this.movie;
+      if (!m.clock.playing || m.clock.at || m.firstPts == null) { clearInterval(this.bufTimer); return; }
+      const film = [...this.guests.values()].filter((g) => g.tier === 'movie');
+      const ready = film.every((g) => g.tx.sentPts != null && g.tx.sentPts - m.firstPts >= 1500);
+      if (ready || Date.now() - m.firstAt > 6000) { clearInterval(this.bufTimer); m.startClock(); }
+    }, 50);
+  }
+
+  // The host's own view of the film opened mid-way: same catch-up as a guest gets.
+  localSync() {
+    const m = this.movie;
+    if (!m.info) return;
+    const catchUp = m.replay('high');
+    for (const e of new Set([...catchUp.map((f) => f.epoch), m.config?.epoch])) { const cc = m.configs.get(e); if (cc) this.emit('local', movieConfigMsg(cc)); }
+    this.emit('local', { t: 'clock', ...m.clockMsg() });
+    for (const f of catchUp) this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
+    for (const a of m.replayAudio()) this.emit('local', { t: 'a', data: a.data, timed: true, epoch: a.epoch, pts: a.pts, age: 0 });
   }
 
   _onRaw(g, b) {
@@ -387,7 +452,7 @@ class Host extends EventEmitter {
       (g.rtts ||= []).push({ v: rtt, t: now() });
       while (g.rtts.length && now() - g.rtts[0].t > 30000) g.rtts.shift();
       if (rtt > 0) { let mn = Infinity; for (const x of g.rtts) if (x.v > 0 && x.v < mn) mn = x.v; fb.rttInc = rtt - mn; }
-      if (g.probe?.until && (fb.qd > 30 || (fb.rttInc || 0) > 40 || fb.loss > 0.02)) {
+      if (g.probe?.until && (fb.qd > 30 || ((fb.rttInc || 0) > 40 && fb.qd > 10) || fb.loss > 0.02)) {
         this._stopProbe(g);
         g.rc.target = g.probe.saved; g.rc.lastDrop = g.probe.savedDrop; g.rc.bad = 0;
         g.probe.next = now() + g.probe.backoff; g.probe.backoff = Math.min(g.probe.backoff * 2, 300000);
@@ -680,7 +745,7 @@ class Host extends EventEmitter {
     this.emit('update');
   }
 
-  _sig(o) { return JSON.stringify([o.enc.name, o.display, o.fps, o.scale, o.window?.pipe, o.tenBit, o.hdr, o.quality]); }
+  _sig(o) { return JSON.stringify([o.enc.name, o.display, o.fps, o.scale, o.window?.pipe || o.window?.hwnd, o.tenBit, o.hdr, o.quality]); }
 
   _stability(g) {
     const s = this.store.get('stability');
@@ -703,7 +768,24 @@ class Host extends EventEmitter {
   async _ensureWindowCapture() {
     const win = this.store.get('captureWindow');
     if (!win) { if (this.wincap) { this.helper.cmd({ cmd: 'wincap_stop' }); this.wincap = null; } return; }
-    if (this.wincap && this.wincap.hwnd === win.hwnd) return;
+    const gfx = !!this.gfx && this.encoders.some((e) => e.fam === 'nvenc') && !this.store.get('hdr');
+    if (this.wincap && this.wincap.hwnd === win.hwnd && !!this.wincap.gfx === gfx) return;
+    if (gfx) {
+      // ffmpeg captures the window on the GPU itself; the helper only checks it and brings a
+      // minimised one back (a minimised window has no picture to capture)
+      if (this.wincap && !this.wincap.gfx) this.helper.cmd({ cmd: 'wincap_stop' });
+      const r = await this.helper.request({ cmd: 'winprep', hwnd: win.hwnd }, 'winprep', 3000);
+      if (!r?.ok) {
+        this.emit('notice', { key: 'wincap_failed', detail: r?.msg || this.helper.lastError });
+        this.store.set('captureWindow', null);
+        this.wincap = null;
+        this.emit('update');
+        return;
+      }
+      this.wincap = { hwnd: win.hwnd, gfx: true, w: r.w & ~1, h: r.h & ~1, rect: { x: r.x, y: r.y, w: r.w, h: r.h } };
+      return;
+    }
+    if (this.wincap?.gfx) this.wincap = null;
     const pipe = `majlis-win-${process.pid}-${Date.now() % 100000}`;
     const r = await this.helper.request({ cmd: 'wincap', hwnd: win.hwnd, fps: this.store.get('fps') || 60, pipe }, 'wincap', 5000);
     if (!r?.ok) {
@@ -774,13 +856,16 @@ class Host extends EventEmitter {
     }
     // bitrate: follow the slowest guest in each tier, swap encoders only on real changes
     if (this.movie.info && this.movie.state.playing) {
-      const hi = this.movie.kbps;
+      const hi = this.movie.kbps, lowCap = Math.min(hi * 0.4, 5000);
       const movieGuests = [...this.guests.values()].filter((g) => g.tier === 'movie' && g.rc);
       // Anyone watching over the internet: keep the light film running so a switch is instant.
+      // It starts modest and follows the line both ways (a retune is seamless).
       const remote = movieGuests.some((g) => !g.link.pathInfo()?.lan || g.rc.target < hi * 0.85);
-      if (remote || movieGuests.some((g) => g.rendition === 'low')) this.movie.ensureLow(Math.min(hi * 0.3, 3000));
+      if (remote || movieGuests.some((g) => g.rendition === 'low')) this.movie.ensureLow(Math.min(lowCap, 1200));
       else if (this.movie.lowWanted) this.movie.dropLow();
-      let lowMin = Infinity;
+      let lowMin = Infinity, lowBuf = Infinity, lowSlope = Infinity;
+      const clockOn = !!this.movie.clock.at;
+      if (!this.movie.low) this.lowTuned = t; // a fresh light film gets time to settle
       for (const g of movieGuests) {
         const r = g.rendition || 'high';
         if (r === 'high') {
@@ -788,33 +873,63 @@ class Host extends EventEmitter {
           if (g.lowSince && t - g.lowSince > 1500 && this.movie.lowConfig) { g.rendition = 'low'; g.configSent = {}; this._sendMovieConfig(g); }
         } else {
           // ~10 s average, quicker on the way down
-          g.tEw = g.tEw ? g.tEw * (g.rc.target < g.tEw ? 0.8 : 0.95) + g.rc.target * (g.rc.target < g.tEw ? 0.2 : 0.05) : Math.min(g.rc.target, (this.movie.lowKbps || 3000) * 1.5);
+          g.tEw = g.tEw ? g.tEw * (g.rc.target < g.tEw ? 0.8 : 0.95) + g.rc.target * (g.rc.target < g.tEw ? 0.2 : 0.05) : g.rc.target;
           lowMin = Math.min(lowMin, g.tEw);
-          // Earn the full film with a probe: pad the link up to the full film's rate for 2.5 s.
-          // No congestion -> upgrade. Congestion -> stay, and wait longer before trying again.
-          const p = (g.probe ||= { next: t + 8000, backoff: 30000 });
+          // how much film this viewer has beyond the picture (what's been sent; a bit of it is
+          // still on the way)
+          g.buffered = clockOn && g.tx.sentPts != null ? g.tx.sentPts - this.movie.curMs() : null;
+          if (g.buffered != null) {
+            lowBuf = Math.min(lowBuf, g.buffered);
+            // which way it's going over the last few seconds (ms of film per second)
+            (g.bufHist ||= []).push({ t, b: g.buffered });
+            while (g.bufHist.length > 1 && t - g.bufHist[0].t > 4000) g.bufHist.shift();
+            const h0 = g.bufHist[0];
+            if (t - h0.t >= 2500) lowSlope = Math.min(lowSlope, (g.buffered - h0.b) / ((t - h0.t) / 1000));
+          }
+          // Climb in steps: pad the line to 1.5x what it carries for 2.5 s, only while the viewer
+          // is well buffered. No congestion -> rate control may count on that much, and the full
+          // film once it covers it. Congestion -> stay, and wait longer before trying again.
+          // (Padding a weak line with the full film's rate in one go drowned 3 Mbps lines.)
+          const p = (g.probe ||= { next: t + 10000, backoff: 30000 });
           if (p.until) {
-            if (g.rc.lastDrop > p.start) { this._stopProbe(g); p.half = undefined; p.next = t + p.backoff; p.backoff = Math.min(p.backoff * 2, 300000); }
-            else if (t >= p.until && p.half) { this._stopProbe(g); p.half = false; p.next = t + 1500; } // half passed: try the full step
-            else if (t >= p.until) { this._stopProbe(g); p.half = undefined; p.backoff = 30000; p.next = t + 60000; g.rc.target = Math.max(g.rc.target, hi); g.rendition = 'high'; g.configSent = {}; this._sendMovieConfig(g); }
-          } else if (t >= p.next && t - g.rc.lastDrop > 8000) {
-            this._startProbe(g, Math.max(500, hi * 1.15 - (g.fb?.kbps || 0)) * (p.half === false ? 1 : 0.5));
-            p.half = p.half === undefined ? true : p.half;
+            if (g.rc.lastDrop > p.start) { this._stopProbe(g); p.next = t + p.backoff; p.backoff = Math.min(p.backoff * 2, 300000); }
+            else if (t >= p.until) {
+              this._stopProbe(g); p.backoff = 30000; p.next = t + 12000;
+              g.rc.target = Math.min(g.rc.max, Math.max(g.rc.target, p.goal * 0.9));
+              if (g.rc.target >= hi * 0.9) { p.next = t + 60000; g.rendition = 'high'; g.configSent = {}; this._sendMovieConfig(g); }
+            }
+          } else if (t >= p.next && t - g.rc.lastDrop > 8000 && (g.buffered ?? 0) > 5000) {
+            p.goal = Math.min(hi * 1.15, Math.max(g.rc.target, g.fb?.kbps || 0) * 1.5);
+            this._startProbe(g, Math.max(300, p.goal - (g.fb?.kbps || 0)));
           }
         }
       }
-      // the light film itself follows the weakest guest on it, downward only (at most every 6 s)
-      if (lowMin < Infinity && this.movie.lowKbps && t - (this.lowTuned || 0) > 6000) {
-        const want = Math.max(1000, Math.min(hi * 0.3, 3000, lowMin * 0.8));
-        if (this.movie.retuneLow(want)) this.lowTuned = t;
+      // The light film follows the weakest viewer on it, with real room to spare: FEC, the
+      // audio, packet headers and the film's own peaks all ride on top of its bitrate. A viewer
+      // whose buffer is draining gets a step down right away, whatever the estimate says.
+      if (lowMin < Infinity && this.movie.lowKbps) {
+        // (audio ~0.3 Mbps sent twice, FEC + headers ~15%, peaks ~15%)
+        let want = Math.max(700, Math.min(lowCap, (lowMin - 350) / 1.35));
+        const since = t - (this.lowTuned || 0);
+        // The surest sign: a viewer's buffer running low and still shrinking means the line
+        // isn't keeping up with this bitrate, whatever the estimate says. Step down now.
+        const settled = clockOn && t - (this.movie.clock.at || t) > 3000;
+        if (settled && since > 3000 && lowBuf < 1500) want = Math.min(want, this.movie.lowKbps * 0.65);
+        else if (settled && since > 3000 && lowBuf < 4000 && lowSlope < -150) want = Math.min(want, this.movie.lowKbps * 0.75);
+        if ((want < this.movie.lowKbps * 0.85 && since > 3000) || (want > this.movie.lowKbps * 1.3 && since > 20000 && lowBuf > 6000 && lowSlope > -50)) {
+          if (this.movie.retuneLow(want)) this.lowTuned = t;
+        }
       }
     }
-    // pace at what the line takes (rate control's estimate), never faster than the encoder needs
+    // Pace at what the line takes (rate control's estimate). Live video never needs more than a
+    // bit over the encoder's rate; a film may go well over it while the line allows, which is
+    // how the viewer's buffer fills up ahead of the picture.
     for (const g of this.guests.values()) {
-      const k = g.tier === 'movie' ? this.movie.kbpsFor?.(g.rendition) || this.movie.kbps : this.tiers[g.tier]?.kbps;
+      const film = g.tier === 'movie';
+      const k = film ? this.movie.kbpsFor?.(g.rendition) || this.movie.kbps : this.tiers[g.tier]?.kbps;
       if (!k) continue;
-      g.tx.rateKbps = g.rc ? Math.max(800, Math.min(k * 1.35, g.rc.target * 1.15)) : k * 1.35;
-      g.tx.keyed = g.tier === 'movie';
+      g.tx.rateKbps = !g.rc ? k * 1.35 : film ? Math.max(800, g.rc.target) : Math.max(800, Math.min(k * 1.35, g.rc.target * 1.15));
+      g.tx.keyed = film;
     }
     for (const tier of ['play', 'watch']) {
       const tt = this.tiers[tier]; if (!tt) continue;

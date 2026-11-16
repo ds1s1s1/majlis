@@ -10,7 +10,7 @@ const { Net } = require('./net');
 const { Helper } = require('./helper');
 const { Host } = require('./host');
 const { Guest } = require('./guest');
-const { detectEncoders, findFfmpeg } = require('./encoder');
+const { detectEncoders, hasGfxCapture, findFfmpeg } = require('./encoder');
 const { Replay } = require('./replay');
 const netcheck = require('./netcheck');
 const { steamGames } = require('./library');
@@ -65,11 +65,25 @@ const ffmpegPath = () => ffmpegExe || findFfmpeg(store.get('ffmpeg'));
 function useFfmpeg(exe) {
   ffmpegExe = exe;
   host.ffmpeg = exe; host.movie.ffmpeg = exe; replay.ffmpeg = exe;
+  hasGfxCapture(exe).then((ok) => {
+    host.gfx = ok;
+    // an older ffmpeg (one on PATH, say) can't capture a window on the GPU: fetch a current build once
+    if (!ok && !upgradeTried) { upgradeTried = true; upgradeFfmpeg(); }
+  });
   return detectEncoders(exe).then((list) => {
     encoders.splice(0, encoders.length, ...list);
     emit('encoders', { list: list.map((e) => e.name) });
     return list;
   });
+}
+
+let upgradeTried = false;
+function upgradeFfmpeg() {
+  if (ffmpegJob) return;
+  ffmpegJob = downloadFfmpeg(app.getPath('userData'), () => {})
+    .then(async (exe) => { if (await hasGfxCapture(exe)) await useFfmpeg(exe); return exe; })
+    .catch(() => null)
+    .finally(() => { ffmpegJob = null; });
 }
 
 // Hosting needs ffmpeg; fetch it the first time instead of shipping it with every copy.
@@ -346,7 +360,7 @@ function handlers() {
   });
   ipcMain.handle('local:view', (e, on) => {
     localView = !!on;
-    if (on && host.movie.config) { const c = host.movie.config; port.postMessage({ t: 'config', codec: c.codec, family: c.family, description: c.description.toString('base64'), epoch: c.epoch, fps: c.fps, encoder: c.encoder, tier: 'movie' }); }
+    if (on) host.localSync();
     return true;
   });
   ipcMain.handle('chat', (e, text) => host.hostChat(text));

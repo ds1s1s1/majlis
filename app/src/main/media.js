@@ -51,13 +51,14 @@ class VideoTx {
       }
     }
     this.sentFrames++;
-    // Never let more than ~400 ms pile up on our side: past that the picture is late anyway.
-    // Films (regular keyframes) skip ahead to the next keyframe; games drop the frame and the
-    // encoder's rolling intra refresh cleans it up within a second.
-    // what's waiting behind the frame currently going out (that one is allowed to be big)
+    pkts.pts = pts; pkts.key = !!key;
+    // Live video: never let more than ~500 ms pile up on our side, past that the picture is late
+    // anyway; drop the frame and the encoder's rolling intra refresh cleans it up within a second.
+    // Films are sent seconds ahead of the picture on purpose, so the queue may hold all of that;
+    // a film frame is only given up on when it would land after its moment on screen (_drain).
+    // (what's waiting behind the frame currently going out; that one is allowed to be big)
     const queued = this.queue.slice(1).reduce((a, q) => a + (q.length - (q.i || 0)), 0) * 1150;
-    // films ride a cinema buffer, so they can be late by a second rather than skip and freeze
-    const limit = Math.max(200000, (Math.max(800, this.rateKbps) / 8) * (this.keyed ? 1500 : 500));
+    const limit = this.keyed ? 64e6 : Math.max(200000, (Math.max(800, this.rateKbps) / 8) * 500);
     if (this.skipToKey && !key) { this.skipped = (this.skipped || 0) + 1; return; }
     if (queued > limit) {
       if (key) { this.queue = this.queue.filter((q) => q.i > 0 && q.i < q.length); }
@@ -68,6 +69,30 @@ class VideoTx {
     if (!this.busy) this._drain();
   }
 
+  // a new film run (seek, restart): nothing queued from the old one is wanted any more
+  flush() {
+    this.queue = this.queue.filter((q) => q.i > 0 && q.i < q.length);
+    this.skipToKey = false; this.sentPts = null;
+  }
+
+  // A packet that should ride the same paced queue as the film (its audio): in order with the
+  // picture and never bursting past the line's rate.
+  sendRaw(buf) {
+    const pkts = [buf]; pkts.raw = true;
+    this.queue.push(pkts);
+    if (!this.busy) this._drain();
+  }
+
+  // Film frame about to go out: if the line is so far behind that it would arrive well after
+  // its moment on screen, skip to the next keyframe and catch up instead of sending dead frames.
+  _late(pkts) {
+    if (!this.keyed || !this.dueOf || pkts.i || pkts.raw) return false;
+    if (this.skipToKey && !pkts.key) return true;
+    if (pkts.key) { this.skipToKey = false; return false; }
+    if (Date.now() - this.dueOf(pkts.pts) > 1200) { this.skipToKey = true; this.skipped = (this.skipped || 0) + 1; return true; }
+    return false;
+  }
+
   // Pacing (token bucket): packets leave at a steady ~1.5x the target bitrate instead of in
   // bursts. Cell networks (Zain/STC/Mobily 4G-5G) drop or queue bursts, which is where most
   // loss and ping spikes came from. A small burst allowance keeps small frames instant.
@@ -76,21 +101,26 @@ class VideoTx {
     this.busy = true;
     const step = () => {
       const t = hr();
-      const rate = Math.max(1000, this.rateKbps * 1.1) / 8; // bytes per ms (headroom is in rateKbps)
+      // bytes per ms; live video gets a little headroom over its rate, a film goes at the rate
+      // control's estimate and no faster (nothing to gain from queueing in the network)
+      const rate = Math.max(1000, this.rateKbps * (this.keyed ? 1 : 1.1)) / 8;
       // bucket holds ~25 ms worth, so a coarse timer still keeps the line busy
       const cap = Math.max(16 * 1150, rate * 25);
       this.tokens = Math.min(cap, (this.tokens ?? cap) + (t - (this.tLast ?? t)) * rate);
       this.tLast = t;
       while (this.queue.length) {
         const pkts = this.queue[0];
+        if (this._late(pkts)) { this.queue.shift(); continue; }
         while (pkts.i === undefined || pkts.i < pkts.length) {
           pkts.i ??= 0;
-          if (this.tokens < 1150) break;
+          const cost = pkts[pkts.i ?? 0].length + 60; // what it really takes on the wire (seal + UDP/IP)
+          if (this.tokens < cost) break;
           // stamp the real departure time: waiting in our own queue isn't network congestion
-          const p = pkts[pkts.i++]; p.writeUInt32BE(Date.now() >>> 0, 7);
-          this.link.send(p); this.tokens -= 1150;
+          const p = pkts[pkts.i++]; if (!pkts.raw) p.writeUInt32BE(Date.now() >>> 0, 7);
+          this.link.send(p); this.tokens -= cost;
         }
         if (pkts.i < pkts.length) break;
+        if (!pkts.raw && pkts.pts != null) this.sentPts = pkts.pts;
         this.queue.shift();
       }
       // wait on a timer, not a spin: a spinning loop starves everything else (pings included)
@@ -115,9 +145,15 @@ class VideoRx {
   push(b) {
     if (b.length < VHDR + SHARD) return;
     const epoch = b[1], id = b.readUInt32BE(2), key = b[6] & 1;
-    if (epoch !== this.lastEpoch && this.lastEpoch !== -1 && !key && this.waitKey) return;
-    if (this.lastDelivered >= 0 && epoch === this.lastEpoch && ((id - this.lastDelivered) | 0) <= 0) return;
     const fkey = `${epoch}:${id}`;
+    if (this.film) {
+      // a film has seconds of slack: frames may finish out of order (jitter reorders packets),
+      // the player puts them back in order; only an exact repeat is ignored
+      if (this.done?.has(fkey)) return;
+    } else {
+      if (epoch !== this.lastEpoch && this.lastEpoch !== -1 && !key && this.waitKey) return;
+      if (this.lastDelivered >= 0 && epoch === this.lastEpoch && ((id - this.lastDelivered) | 0) <= 0) return;
+    }
     let f = this.frames.get(fkey);
     if (!f) {
       f = { epoch, id, key, hostTs: b.readUInt32BE(7), encMs: b[11], len: b.readUInt32BE(12), pts: b.readUInt32BE(21), blocks: new Array(b[17]).fill(null), done: 0, first: hr(), firstWall: now(), shards: 0 };
@@ -145,20 +181,27 @@ class VideoRx {
     let o = 0;
     for (const blk of f.blocks) for (const s of blk.data) { const n = Math.min(SHARD, f.len - o); if (n <= 0) break; Buffer.from(s.buffer, s.byteOffset, n).copy(data, o); o += n; }
     this.frames.delete(fkey);
-    // anything older that never finished is lost
-    for (const [k2, g] of this.frames) if (g.epoch === f.epoch && ((g.id - f.id) | 0) < 0) { this.frames.delete(k2); this.win.lost++; }
+    if (this.film) {
+      (this.done ||= new Set()).add(fkey);
+      if (this.done.size > 3000) { const it = this.done.values(); for (let i = 0; i < 1500; i++) this.done.delete(it.next().value); }
+    } else {
+      // live: anything older that never finished is lost (waiting for it would add delay)
+      for (const [k2, g] of this.frames) if (g.epoch === f.epoch && ((g.id - f.id) | 0) < 0) { this.frames.delete(k2); this.win.lost++; }
+    }
     const gap = this.lastEpoch === f.epoch && this.lastDelivered >= 0 ? ((f.id - this.lastDelivered) | 0) - 1 : 0;
     // a jump in frame numbers isn't loss: the sender may have skipped frames on purpose to stay
     // live. Only frames that started arriving and never completed count as lost.
     this.win.frames++;
     if (f.key) this.waitKey = false;
-    if (f.epoch !== this.lastEpoch && !f.key) { this.waitKey = true; this.onNeedKey?.(); return; }
-    this.lastEpoch = f.epoch; this.lastDelivered = f.id;
+    if (!this.film && f.epoch !== this.lastEpoch && !f.key) { this.waitKey = true; this.onNeedKey?.(); return; }
+    this.lastEpoch = f.epoch; this.lastDelivered = this.film ? Math.max(this.lastDelivered, f.id) : f.id;
     // Queuing delay from the first shard's arrival (not the last), and only for normal-sized
     // frames: a big keyframe takes longer to transmit, which isn't congestion.
     const owd = ((f.firstWall >>> 0) - f.hostTs) | 0;
     this.owdBase.push({ v: owd, t: now() });
-    while (this.owdBase.length && now() - this.owdBase[0].t > 10000) this.owdBase.shift();
+    // base = the quietest the line has been over 30 s, so a queue that builds and just sits
+    // there still shows (a short window would slowly take it as the new normal)
+    while (this.owdBase.length && now() - this.owdBase[0].t > 30000) this.owdBase.shift();
     let base = Infinity; for (const x of this.owdBase) if (x.v < base) base = x.v;
     if (!f.key) this.qd.push(owd - base); // first shard of the frame: its own size doesn't delay it
     if (this.lastArrival) this.gaps.push(t - this.lastArrival);
@@ -166,10 +209,16 @@ class VideoRx {
     this.onFrame({ epoch: f.epoch, id: f.id, key: !!f.key, data, hostTs: f.hostTs, encMs: f.encMs, pts: f.pts, owd, assembleMs: t - f.first, gap });
   }
 
+  // other traffic the sender paces along with the video (film audio) counts toward what got through
+  count(bytes) { this.win.bytes += bytes; }
+
   // Called every ~100 ms; returns feedback for the sender.
   report() {
     const w = this.win, t = now(), dt = Math.max(1, t - w.t);
-    for (const [k, g] of this.frames) if (hr() - g.first > 250) { this.frames.delete(k); w.lost++; }
+    // a frame that started arriving and never finished is lost; films travel ahead of the
+    // picture, so a big keyframe on a slow line gets much longer to come in
+    const tmo = this.film ? 2000 : 250;
+    for (const [k, g] of this.frames) if (hr() - g.first > tmo) { this.frames.delete(k); w.lost++; }
     const qd = this.qd.length ? this.qd.reduce((a, b) => a + b, 0) / this.qd.length : 0;
     // jitter = how much the gap between frames wobbles around its average
     let jit = 0;
@@ -199,6 +248,9 @@ class RateControl {
   feedback(fb) {
     const t = now();
     this.lossEw = this.lossEw * 0.85 + fb.loss * 0.15;
+    // what got through, smoothed over ~1 s: a single 100 ms report swings from 0 to double
+    // (a film at 24 fps, a still screen), which made one quiet moment look like a slow line
+    this.rxEw = this.rxEw == null ? fb.kbps : this.rxEw * 0.8 + fb.kbps * 0.2;
     this.jitEw = this.jitEw ? this.jitEw * 0.9 + (fb.jitter || 0) * 0.1 : (fb.jitter || 0);
     // Standing queue, BBR-style: the smallest queuing delay seen over the last 400 ms. A burst
     // (a keyframe) delays a few frames for a moment; real congestion delays every one of them.
@@ -210,21 +262,24 @@ class RateControl {
     // Films (relaxed) can sit on a bit more queue than a game can.
     const qThr = Math.max(this.relaxed ? 60 : this.stability ? 14 : 25, this.jitEw * 3);
     const lThr = this.stability ? 0.04 : 0.08;
-    const rttUp = fb.rttInc != null && fb.rttInc > Math.max(this.relaxed ? 100 : 55, this.jitEw * 4);
+    // Ping rising counts only when our own packets also show some queue: the ping goes both
+    // ways and through whatever the relay is doing, so on its own it's mostly noise (that's
+    // what pinned films to 1.5 Mbps over a relay that was carrying 14 Mbps fine).
+    const rttUp = fb.rttInc != null && fb.rttInc > Math.max(this.relaxed ? 100 : 55, this.jitEw * 4) && fb.qd > Math.max(6, qThr * 0.35);
     const congested = fb.qd > qThr || fb.loss > lThr || fb.lost > 2 || rttUp;
     // one bad report is noise; two in a row is a trend
     this.bad = congested ? this.bad + 1 : 0;
     if (this.bad >= 2 && t - this.lastDrop > 500) {
       // If the link actually carried close to the target, aim just under what got through.
       // If the encoder wasn't using the bandwidth (static screen), just step down a bit.
-      const carried = fb.kbps > this.target * 0.6;
-      const next = carried ? Math.min(this.target * 0.85, fb.kbps * 0.95) : this.target * 0.9;
+      const carried = this.rxEw > this.target * 0.6;
+      const next = carried ? Math.min(this.target * 0.85, this.rxEw * 0.95) : this.target * 0.9;
       this.target = Math.max(this.min, next);
       this.lastDrop = t; this.congestions++; this.bad = 0;
       return 'down';
     }
     const hold = this.stability ? 5000 : 2500;
-    const appLimited = fb.kbps > 0 && fb.kbps < this.target * 0.6;
+    const appLimited = this.rxEw > 0 && this.rxEw < this.target * 0.6;
     if (!congested && !appLimited && fb.qd < qThr / 2 && t - this.lastDrop > hold && t - this.lastUp > 700) {
       this.lastUp = t;
       const before = this.target;

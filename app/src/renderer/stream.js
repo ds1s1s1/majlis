@@ -59,9 +59,10 @@ export class Player {
   // ------------------------------------------------------------------ video
   onMessage(m) {
     switch (m.t) {
-      case 'config': this.configs.set(m.epoch, m); break;
-      case 'v': this._video(m); break;
-      case 'a': this._gameAudio(m); break;
+      case 'config': this.configs.set(m.epoch, m); this.film?.dead.delete(m.epoch); break;
+      case 'v': if (this.film?.clock && this.configs.get(m.epoch)?.tier === 'movie') this._filmVideo(m); else this._video(m); break;
+      case 'a': if (m.timed && this.film?.clock) this._filmAudioIn(m); else this._gameAudio(m); break;
+      case 'clock': this._filmClock(m); break;
       case 'vo': this._voiceIn(m.idx, m.data); break;
       case 'c': this.hostCursor = { x: m.x, y: m.y, v: !!m.v, s: m.s }; this._drawCursor(); break;
       case 'shape': this._shape(m); break;
@@ -76,7 +77,12 @@ export class Player {
     const description = c.description ? Uint8Array.from(atob(c.description), (ch) => ch.charCodeAt(0)) : undefined;
     this.dec = new VideoDecoder({
       output: (frame) => this._output(frame),
-      error: () => { this.waitKey = true; this.epoch = -1; this.port.postMessage({ t: 'needkey' }); },
+      error: () => {
+        this.waitKey = true; this.epoch = -1;
+        // film: pick up again at the next keyframe in the buffer (the host can't make one)
+        const ep = this.film?.eps.get(this.film.cur); if (ep) { ep.broken = true; return; }
+        this.port.postMessage({ t: 'needkey' });
+      },
     });
     this.dec.configure({ codec: c.codec, description, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true });
     this.epoch = epoch;
@@ -113,11 +119,25 @@ export class Player {
     this.cinema = !!on; this.cinemaDelay = delayMs; this.anchor = null;
     this.mixer?.port.postMessage({ t: 'target', ms: on ? delayMs : 30 });
     if (on && !this.rafOn) { this.rafOn = true; const loop = () => { if (!this.rafOn) return; this._present(); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
-    if (!on) { this.rafOn = false; for (const q of this.queue) q.frame.close(); this.queue = []; }
+    // the film keeps going (decode + sound) even while the window is minimised and rAF stops
+    if (on && !this.filmTimer) this.filmTimer = setInterval(() => this._filmPump(), 10);
+    if (!on) {
+      this.rafOn = false; for (const q of this.queue) q.frame.close(); this.queue = [];
+      clearInterval(this.filmTimer); this.filmTimer = null; this.film = null;
+    }
   }
 
   _present() {
     const now = performance.now();
+    if (this.film?.clock) {
+      // film: the newest decoded frame whose moment on the shared clock has come
+      const disp = this._filmPos(now) + this.refreshMs / 2;
+      let pick = null;
+      while (this.queue.length && this.queue[0].pts <= disp) { if (pick) pick.frame.close(); pick = this.queue.shift(); }
+      if (this.queue.length > 40) { while (this.queue.length > 8) this.queue.shift().frame.close(); }
+      if (pick) this._draw(pick.frame);
+      return;
+    }
     let pick = null;
     while (this.queue.length && this.queue[0].at <= now) { if (pick) pick.frame.close(); pick = this.queue.shift(); }
     if (this.queue.length > 30) { while (this.queue.length > 2) this.queue.shift().frame.close(); }
@@ -127,6 +147,7 @@ export class Player {
   _output(frame) {
     const s = this.submit.get(frame.timestamp);
     if (s) { this.submit.delete(frame.timestamp); this.stats.dec.push(performance.now() - s.t); this.stats.enc.push(s.enc); this.stats.net.push(s.net); }
+    if (this.film?.clock && s?.film) { this.queue.push({ frame, pts: s.pts }); return; }
     if (this.cinema) {
       const at = s && s.pts != null ? this._present_at(s) : performance.now() + this.cinemaDelay;
       this.queue.push({ frame, at });
@@ -134,6 +155,155 @@ export class Player {
     }
     if (s) this.latEw = this.latEw * 0.9 + ((s.net || 0) + (performance.now() - s.t) + this.refreshMs / 2) * 0.1;
     this._draw(frame);
+  }
+
+  // ------------------------------------------------------------------ film (watch party)
+  // The host encodes the film seconds ahead of a shared film clock and everyone keeps it in
+  // hand: frames and audio wait here, keyed by their place in the film, and go to the decoder
+  // just before the clock reaches them. A slow patch on the line eats into this buffer instead
+  // of freezing the picture, and every screen shows the same frame at the same moment.
+  _filmClock(m) {
+    const f = (this.film ||= { eps: new Map(), order: 0, cur: null, audio: [], fed: [], dead: new Set(), known: new Set(), aSeen: new Set(), run: null, clock: null });
+    if (f.run !== null && m.run !== f.run) this._filmFlush(); // seek / restart: all of it is stale
+    f.run = m.run;
+    const was = f.clock;
+    f.clock = { pos: m.pos, at: m.at ? m.at - (Date.now() - performance.now()) : 0, playing: !!m.playing };
+    if (was?.playing && !f.clock.playing) this._filmHush();
+  }
+
+  _filmFlush() {
+    const f = this.film;
+    f.dead = new Set(f.known); f.known = new Set();
+    f.eps.clear(); f.cur = null; f.audio = []; f.fed = []; f.aSeen.clear();
+    this._dropDecoded();
+    this.mixer?.port.postMessage({ t: 'flush', k: 'game' });
+  }
+
+  // paused: stop the sound now, and keep what was already handed to it for when play resumes
+  _filmHush() {
+    const f = this.film;
+    this.mixer?.port.postMessage({ t: 'flush', k: 'game' });
+    for (const a of f.fed) if (a.pts >= f.clock.pos - 20) this._filmAudioIn({ ...a, again: true });
+    f.fed = [];
+  }
+
+  _dropDecoded() {
+    for (const q of this.queue) q.frame.close();
+    this.queue = [];
+    try { this.dec?.close(); } catch {}
+    this.dec = null; this.epoch = -1;
+  }
+
+  _filmPos(now) { const c = this.film.clock; return c.playing && c.at ? c.pos + (now - c.at) : c.pos; }
+
+  _filmVideo(m) {
+    const f = this.film;
+    if (f.dead.has(m.epoch)) return;
+    f.known.add(m.epoch);
+    let ep = f.eps.get(m.epoch);
+    if (!ep) { ep = { order: f.order++, frames: [], next: 0, firstKey: null, maxPts: -Infinity, ids: new Set(), broken: false }; f.eps.set(m.epoch, ep); }
+    if (ep.ids.has(m.id)) return; // sent again (catch-up after a switch)
+    ep.ids.add(m.id);
+    if (ep.ids.size > 6000) ep.ids = new Set([...ep.ids].slice(-3000));
+    const fr = { id: m.id, key: !!m.key, data: m.data, pts: m.pts, gap: m.gap | 0 };
+    let i = ep.frames.length;
+    while (i > ep.next && ep.frames[i - 1].pts > fr.pts) i--;
+    if (i < ep.next) return; // its moment is gone
+    ep.frames.splice(i, 0, fr);
+    if (fr.key && (ep.firstKey == null || fr.pts < ep.firstKey)) ep.firstKey = fr.pts;
+    if (fr.pts > ep.maxPts) ep.maxPts = fr.pts;
+  }
+
+  _filmAudioIn(m) {
+    const f = this.film;
+    if (f.dead.has(m.epoch)) return;
+    f.known.add(m.epoch);
+    if (!m.again) {
+      if (f.aSeen.has(m.pts)) return;
+      f.aSeen.add(m.pts);
+      if (f.aSeen.size > 4000) { const it = f.aSeen.values(); for (let i = 0; i < 2000; i++) f.aSeen.delete(it.next().value); }
+    }
+    let i = f.audio.length;
+    while (i > 0 && f.audio[i - 1].pts > m.pts) i--;
+    f.audio.splice(i, 0, { data: m.data, pts: m.pts, epoch: m.epoch });
+    if (f.audio.length > 4000) f.audio.splice(0, f.audio.length - 4000);
+  }
+
+  _filmDecode(epoch, fr) {
+    if (epoch !== this.epoch || !this.dec || this.dec.state !== 'configured') {
+      if (!fr.key || !this._configure(epoch)) return false;
+    }
+    const ts = Math.round(fr.pts * 1000);
+    this.submit.set(ts, { t: performance.now(), enc: 0, net: 0, pts: fr.pts, epoch, film: true });
+    if (this.submit.size > 240) this.submit.delete(this.submit.keys().next().value);
+    try { this.dec.decode(new EncodedVideoChunk({ type: fr.key ? 'key' : 'delta', timestamp: ts, data: fr.data })); return true; }
+    catch { this.epoch = -1; return false; }
+  }
+
+  _filmPump() {
+    const f = this.film;
+    if (!f?.clock) return;
+    const now = performance.now(), disp = this._filmPos(now), AHEAD = 100;
+    let cur = f.eps.get(f.cur);
+    // Which copy to decode: stay on the current one until it runs dry, or until a newer one
+    // (the other rendition, a replaced light film) already reaches past the picture, then
+    // move over at a keyframe.
+    for (const [e, ep] of f.eps) {
+      if (e === f.cur || ep.firstKey == null || (cur && ep.order < cur.order)) continue;
+      const dry = !cur || (cur.next >= cur.frames.length && cur.maxPts < disp + AHEAD);
+      const ahead = ep.maxPts >= disp + 600 && ep.firstKey <= disp + AHEAD;
+      if (!dry && !ahead) continue;
+      const upto = Math.max(disp + AHEAD, ep.firstKey);
+      let k = -1;
+      for (let i = 0; i < ep.frames.length && ep.frames[i].pts <= upto; i++) if (ep.frames[i].key) k = i;
+      if (k < 0) continue;
+      ep.frames.splice(0, k); ep.next = 0; ep.broken = false; ep.lastId = null;
+      for (const [e2, ep2] of f.eps) if (ep2.order < ep.order) f.eps.delete(e2);
+      f.cur = e; cur = ep;
+      this._dropDecoded();
+      break;
+    }
+    if (cur) {
+      // far behind (the line stalled for a while): jump to a later keyframe that's already here
+      const nx = cur.frames[cur.next];
+      if (nx && nx.pts < disp - 1000) {
+        let k = -1;
+        for (let i = cur.next + 1; i < cur.frames.length && cur.frames[i].pts <= disp + AHEAD; i++) if (cur.frames[i].key) k = i;
+        if (k > 0) { cur.next = k; cur.broken = false; cur.lastId = null; }
+      }
+      let n = 0;
+      while (cur.next < cur.frames.length && cur.frames[cur.next].pts <= disp + AHEAD && n < 40 && (!this.dec || this.dec.decodeQueueSize < 16)) {
+        const fr = cur.frames[cur.next];
+        // The frame before this one hasn't come in (frames can finish out of order): wait for
+        // it while there's still time, it slots in ahead of this one when it lands. Past that,
+        // nothing decodes cleanly again until a keyframe.
+        if (!fr.key && !cur.broken && cur.lastId != null && fr.id !== ((cur.lastId + 1) >>> 0)) {
+          if (fr.pts > disp - 60) break;
+          cur.broken = true;
+        }
+        cur.next++;
+        if (!fr.key && cur.broken) { this.stats.drops++; continue; }
+        cur.broken = !this._filmDecode(f.cur, fr);
+        cur.lastId = fr.id;
+        n++;
+      }
+      if (cur.next > 200) { cur.frames.splice(0, cur.next); cur.next = 0; }
+    }
+    this._filmAudio(now, disp);
+  }
+
+  _filmAudio(now, disp) {
+    const f = this.film, c = f.clock;
+    if (!c.playing || !c.at || !this.adec || this.adec.state !== 'configured') return;
+    if (this.ac.state === 'suspended') this.ac.resume();
+    const outLat = (this.ac?.outputLatency || 0) * 1000 + 5 - (this.settings.avOffset || 0);
+    while (f.audio.length && f.audio[0].pts <= disp + 200) {
+      const a = f.audio.shift();
+      if (a.pts < disp - 40) continue; // its moment has passed
+      f.fed.push(a); if (f.fed.length > 30) f.fed.shift();
+      this.ameta.push({ film: true, want: c.at + (a.pts - c.pos) - now - outLat, at: now });
+      try { this.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (this.aTs += 10000), data: a.data })); } catch { this.ameta.pop(); }
+    }
   }
 
   // The first frames of each run (each seek restarts the run) pick the anchor: the earliest
@@ -210,6 +380,7 @@ export class Player {
 
   // How long this chunk should wait before it's heard (ms), so it lines up with the picture.
   _audioWant(meta) {
+    if (meta.film) return meta.want - (performance.now() - meta.at);
     const outLat = (this.ac?.outputLatency || 0) * 1000 + 5 - (this.settings.avOffset || 0);
     if (meta.timed && this.cinema && this.anchor?.base != null) return this.anchor.base + meta.pts - performance.now() - outLat;
     if (this.cinema) return null;

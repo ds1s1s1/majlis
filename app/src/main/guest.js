@@ -94,15 +94,28 @@ class Guest extends EventEmitter {
     switch (m.t) {
       case 'config': {
         this.configs.set(m.epoch, m);
+        if (this.rx) this.rx.film = m.tier === 'movie';
         this._post({ t: 'config', ...m });
         // a keyframe for this epoch may have beaten the config here
         const pk = this.pendingKey; if (pk && pk.epoch === m.epoch) { this.pendingKey = null; this._frame(pk); }
         break;
       }
+      case 'fclock': this.fclock = m; this._postClock(); break;
+      case 'mode': if (m.mode !== 'watch') this.fclock = null; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;
       case 'kick': this.emit('kicked', { panic: !!m.panic }); break;
       default: this.emit('ctrl', m);
     }
+  }
+
+  // The film clock in our own time: host time minus how far its clock is ahead of ours. The
+  // offset gets sharper as pings come in, so it's sent again when it moves.
+  _postClock() {
+    const m = this.fclock, link = this.link;
+    if (!m || !link) return;
+    const off = Math.round(link.clockOffset || 0);
+    this.clockOff = off;
+    this._post({ t: 'clock', pos: m.pos, at: m.at ? m.at - off : 0, playing: !!m.playing, run: m.run });
   }
 
   _frame(fr) {
@@ -125,6 +138,7 @@ class Guest extends EventEmitter {
     if (ch === 0x01) return this.rx.push(b);
     if (ch === 0x02) {
       if (b.length < 14) return;
+      if (b[1] === 1) this.rx.count(b.length + 29); // film audio is paced with the picture
       const seq = b.readUInt16BE(11);
       if (this.aSeen?.has(seq)) return;
       (this.aSeen ||= new Set()).add(seq);
@@ -142,6 +156,7 @@ class Guest extends EventEmitter {
     if (!this.link) return;
     const r = this.rx.report();
     r.loss = this.link.takeLoss();
+    if (this.fclock && Math.abs(Math.round(this.link.clockOffset || 0) - (this.clockOff ?? 0)) > 4) this._postClock();
     r.dec = this.decodeStats || null;
     this.last = r;
     const body = Buffer.from(JSON.stringify(r));

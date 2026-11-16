@@ -84,29 +84,31 @@ static class WindowCapture
                 var s = new NamedPipeServerStream(pipeName, PipeDirection.Out, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.None, 0, W * H * 4);
                 try { s.WaitForConnection(); } catch { s.Dispose(); break; }
                 if (!running) { s.Dispose(); break; }
-                lock (clients) clients.Add(s);
+                var c = new Client { S = s, Buf = new byte[W * H * 4] };
+                lock (clients) clients.Add(c);
+                c.T = new Thread(() => Serve(c)) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
+                c.T.Start();
             }
         }) { IsBackground = true };
         acceptor.Start();
         Program.Event("wincap", new { ok = true, w = W, h = H, pipe = @"\\.\pipe\" + pipeName });
 
+        // The clock: a snapshot of the latest frame every 1/fps (the last one again if nothing
+        // changed, so the encoder sees a constant frame rate). Each reader has its own thread and
+        // takes the newest snapshot when it's ready for one: a replacement ffmpeg that's still
+        // starting up (seconds) no longer stalls the one everybody is watching.
+        snap = new byte[W * H * 4];
         writer = new Thread(() =>
         {
-            var local = new byte[frameBuf.Length];
             long interval = TimeSpan.TicksPerSecond / fps, next = DateTime.UtcNow.Ticks;
             while (running)
             {
-                NamedPipeServerStream[] list;
+                Client[] list;
                 lock (clients) list = clients.ToArray();
                 if (list.Length > 0)
                 {
-                    // constant frame rate for the encoder: repeat the last frame if nothing changed
-                    lock (frameLock) Buffer.BlockCopy(frameBuf, 0, local, 0, local.Length);
-                    foreach (var c in list)
-                    {
-                        try { c.Write(local, 0, local.Length); }
-                        catch { lock (clients) clients.Remove(c); try { c.Dispose(); } catch { } } // that ffmpeg went away
-                    }
+                    lock (frameLock) lock (snapLock) { Buffer.BlockCopy(frameBuf, 0, snap, 0, snap.Length); snapSeq++; }
+                    foreach (var c in list) c.Go.Set();
                 }
                 next += interval;
                 long wait = next - DateTime.UtcNow.Ticks;
@@ -116,9 +118,48 @@ static class WindowCapture
         writer.Start();
     }
 
-    static readonly List<NamedPipeServerStream> clients = new();
+    sealed class Client
+    {
+        public NamedPipeServerStream S; public byte[] Buf; public Thread T;
+        public readonly AutoResetEvent Go = new(false);
+    }
+    static readonly List<Client> clients = new();
     static Thread acceptor;
     static string PipeName;
+    static byte[] snap; static long snapSeq; static readonly object snapLock = new();
+
+    static void Serve(Client c)
+    {
+        long seen = 0;
+        while (running)
+        {
+            c.Go.WaitOne(500);
+            if (!running) break;
+            lock (snapLock)
+            {
+                if (snapSeq == seen) continue;
+                Buffer.BlockCopy(snap, 0, c.Buf, 0, c.Buf.Length);
+                seen = snapSeq;
+            }
+            try { c.S.Write(c.Buf, 0, c.Buf.Length); }
+            catch { break; } // that ffmpeg went away
+        }
+        lock (clients) clients.Remove(c);
+        try { c.S.Dispose(); } catch { }
+    }
+
+    // For ffmpeg's own GPU window capture: the window must still be there, visible, and not
+    // minimised (a minimised window has no picture).
+    public static object Prep(long hwnd)
+    {
+        var h = new IntPtr(hwnd);
+        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) return new { ok = false, msg = "window is closed or hidden" };
+        if (Native.IsIconic(h)) { Native.ShowWindow(h, 9); Thread.Sleep(300); }
+        Native.DwmGetWindowAttribute(h, 9, out Native.RECT r, 16);
+        int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+        if (w < 64 || ht < 64) return new { ok = false, msg = "window too small" };
+        return new { ok = true, x = r.Left, y = r.Top, w, h = ht };
+    }
 
     static void OnFrame(Direct3D11CaptureFramePool p, object _)
     {
@@ -151,7 +192,7 @@ static class WindowCapture
         try { session?.Dispose(); } catch { }
         try { pool?.Dispose(); } catch { }
         try { pipe?.Dispose(); } catch { }
-        lock (clients) { foreach (var c in clients) try { c.Dispose(); } catch { } clients.Clear(); }
+        lock (clients) { foreach (var c in clients) { try { c.S.Dispose(); } catch { } c.Go.Set(); } clients.Clear(); }
         // wake the acceptor out of WaitForConnection
         if (was && PipeName != null) try { using var poke = new NamedPipeClientStream(".", PipeName, PipeDirection.In); poke.Connect(200); } catch { }
         try { staging?.Dispose(); ctx?.Dispose(); dev?.Dispose(); } catch { }

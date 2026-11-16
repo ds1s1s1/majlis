@@ -81,6 +81,7 @@ static class Program
             case "cursor": if ((bool)c["on"]) Cursor.Start(); else Cursor.Stop(); break;
             case "wincap": WindowCapture.Start((long)c["hwnd"], (int?)c["fps"] ?? 60, (string)c["pipe"]); break;
             case "wincap_stop": WindowCapture.Stop(); break;
+            case "winprep": Program.Event("winprep", WindowCapture.Prep((long)c["hwnd"])); break;
             case "focus": Windows.Focus((long)c["hwnd"]); break;
             case "gpu_prio": Event("gpu_prio", new { pid = (int)c["pid"], ok = Native.GpuPriority((int)c["pid"]) }); break;
             case "ptt": Ptt.Watch((int?)c["vk"] ?? 0); break;

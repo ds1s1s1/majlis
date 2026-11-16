@@ -42,6 +42,7 @@ class Mixer extends AudioWorkletProcessor {
       } else if (m.t === 'gain') { this.gain = { ...this.gain, ...m.g }; if (m.per) this.per = { ...this.per, ...m.per }; }
       else if (m.t === 'target') this.target = Math.round(48000 * m.ms / 1000);
       else if (m.t === 'duck') this.duck = !!m.on;
+      else if (m.t === 'flush') { const r = this.rings.get(m.k); if (r) { r.rd = r.w; r.started = false; } }
     };
   }
   process(_, outputs) {

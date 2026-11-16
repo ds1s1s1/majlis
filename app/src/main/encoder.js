@@ -43,12 +43,25 @@ async function detectEncoders(ffmpeg) {
   return CANDIDATES.filter((c) => ok.includes(c));
 }
 
+// ffmpeg 8.1 added a Windows Graphics Capture source: window capture without leaving the GPU.
+function hasGfxCapture(ffmpeg) {
+  return new Promise((res) => execFile(ffmpeg, ['-hide_banner', '-h', 'filter=gfxcapture'], { timeout: 8000, windowsHide: true }, (e, out) => res(!e && /gfxcapture AVOptions/.test(String(out)))));
+}
+
 function buildArgs(o) {
   const a = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-fflags', 'nobuffer', '-flags', 'low_delay'];
   const fam = o.enc.fam;
   const kb = Math.round(o.kbps);
   let vf = [];
-  if (o.window) {
+  if (o.window?.gfx) {
+    // ffmpeg 8.1+ captures the window itself (Windows Graphics Capture) and hands the GPU
+    // texture straight to the encoder: no copy to system memory, no pipe, no CPU scaling.
+    // Frames come when the window changes, so a still window costs next to nothing.
+    // A fixed, even output size (the encoder needs one) that the window is fitted into, even if
+    // it's resized mid-stream.
+    const sz = o.scale || { w: o.window.w, h: o.window.h };
+    a.push('-f', 'lavfi', '-i', `gfxcapture=hwnd=${o.window.hwnd}:max_framerate=${o.fps}:capture_cursor=0:width=${sz.w}:height=${sz.h}:resize_mode=scale_aspect`);
+  } else if (o.window) {
     // raw frames need no probing; skipping it shaves the start and keeps the pipe from backing up
     a.push('-probesize', '32', '-analyzeduration', '0', '-f', 'rawvideo', '-pix_fmt', 'bgra', '-video_size', `${o.window.w}x${o.window.h}`, '-framerate', String(o.fps), '-use_wallclock_as_timestamps', '1', '-i', o.window.pipe);
     if (fam === 'qsv') vf.push('format=nv12');
@@ -178,6 +191,13 @@ class EncoderProc extends EventEmitter {
     this.emit('frame', { data: Buffer.from(pkt), key, ts, at: t, encMs });
   }
 
+  // Backpressure: stop reading ffmpeg's output and it blocks on its next write.
+  hold(on) {
+    if (!!on === !!this.held) return;
+    this.held = !!on;
+    try { if (on) this.p.stdout.pause(); else this.p.stdout.resume(); } catch {}
+  }
+
   stop() { try { this.p.kill(); } catch {} }
 }
 
@@ -250,4 +270,4 @@ class Encoder extends EventEmitter {
   }
 }
 
-module.exports = { Encoder, EncoderProc, detectEncoders, buildArgs, codecString, findFfmpeg, CANDIDATES };
+module.exports = { Encoder, EncoderProc, detectEncoders, hasGfxCapture, buildArgs, codecString, findFfmpeg, CANDIDATES };

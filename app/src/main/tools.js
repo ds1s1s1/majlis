@@ -11,7 +11,9 @@ const works = (exe) => new Promise((res) => execFile(exe, ['-hide_banner', '-ver
 
 function findIn(dir) {
   try {
-    for (const d of fs.readdirSync(dir)) {
+    // newest build first (an older one may still be sitting next to it)
+    const dirs = fs.readdirSync(dir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    for (const d of dirs) {
       const p = path.join(dir, d, 'bin', 'ffmpeg.exe');
       if (fs.existsSync(p)) return p;
     }
