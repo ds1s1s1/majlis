@@ -28,6 +28,17 @@ else app.setAsDefaultProtocolClient('majlis');
 
 let win, store, net, helper, host, guest, replay, port;
 let encoders = [];
+process.on('uncaughtException', (err) => {
+  try {
+    fs.mkdirSync(path.join(app.getPath('userData'), 'logs'), { recursive: true });
+    fs.appendFileSync(path.join(app.getPath('userData'), 'logs', 'errors.log'), `${new Date().toISOString()} ${err && err.stack || err}
+`);
+  } catch {}
+  try { emit('notice', { key: 'internal_error' }); } catch {}
+});
+process.on('unhandledRejection', (err) => { try { fs.appendFileSync(path.join(app.getPath('userData'), 'logs', 'errors.log'), `${new Date().toISOString()} rejection ${err && err.stack || err}
+`); } catch {} });
+
 let localView = false;
 const logDir = () => path.join(app.getPath('userData'), 'logs');
 let logLast = 0;
@@ -213,11 +224,13 @@ function handlers() {
     const list = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 400, height: 225 }, fetchWindowIcons: true });
     if (!helper.p) helper.start();
     const disp = (await helper.request({ cmd: 'displays' }, 'displays'))?.list || [];
+    // only windows Windows will actually let us capture (visible, not cloaked, not tool windows)
+    const capturable = new Set(((await helper.request({ cmd: 'windows' }, 'windows'))?.list || []).map((w) => String(w.hwnd)));
     const own = win.getNativeWindowHandle().readBigUInt64LE(0).toString();
     const out = [];
     for (const s of list) {
       const [kind, idStr] = s.id.split(':');
-      if (kind === 'window' && (idStr === own || /^(NVIDIA GeForce Overlay|Program Manager|Windows Input Experience|Microsoft Text Input Application|Settings)$/i.test(s.name))) continue;
+      if (kind === 'window' && (idStr === own || (capturable.size && !capturable.has(idStr)) || /^(NVIDIA GeForce Overlay|Program Manager|Windows Input Experience|Microsoft Text Input Application|Settings)$/i.test(s.name))) continue;
       const item = { kind, name: s.name, thumb: s.thumbnail.isEmpty() ? null : s.thumbnail.toDataURL(), icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null };
       if (kind === 'window') { item.hwnd = Number(idStr); if (!item.thumb) continue; }
       else {

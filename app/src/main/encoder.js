@@ -49,7 +49,8 @@ function buildArgs(o) {
   const kb = Math.round(o.kbps);
   let vf = [];
   if (o.window) {
-    a.push('-f', 'rawvideo', '-pix_fmt', 'bgra', '-video_size', `${o.window.w}x${o.window.h}`, '-framerate', String(o.fps), '-use_wallclock_as_timestamps', '1', '-i', o.window.pipe);
+    // raw frames need no probing; skipping it shaves the start and keeps the pipe from backing up
+    a.push('-probesize', '32', '-analyzeduration', '0', '-f', 'rawvideo', '-pix_fmt', 'bgra', '-video_size', `${o.window.w}x${o.window.h}`, '-framerate', String(o.fps), '-use_wallclock_as_timestamps', '1', '-i', o.window.pipe);
     if (fam === 'qsv') vf.push('format=nv12');
     if (fam === 'sw') vf.push('format=yuv420p');
     if (o.scale) vf.unshift(`scale=${o.scale.w}:${o.scale.h}:flags=fast_bilinear`);
@@ -230,6 +231,8 @@ class Encoder extends EventEmitter {
   }
 
   requestKeyframe() {
+    // a replacement that never produced a keyframe (stuck opening its input) gets dropped
+    if (this.next && Date.now() - this.lastSwap > 8000) { this.next.stop(); this.next = null; }
     if (Date.now() - this.lastSwap < 800 || this.next) return false;
     this.swap({});
     return true;

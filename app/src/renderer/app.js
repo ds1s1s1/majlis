@@ -935,7 +935,11 @@ async function refresh() {
   if (!(S.view === 'home' && document.activeElement?.matches('#digits input')) && !document.activeElement?.matches('.view input.input')) render();
 }
 
-api.on((m) => {
+// Events can arrive before the first state load finishes; hold them until it has.
+const early = [];
+api.on((m) => { if (!S.st) early.push(m); else handleEvent(m); });
+
+function handleEvent(m) {
   switch (m.type) {
     case 'registered': S.st.registered = true; S.st.publicAddr = m.publicAddr; S.st.relays = m.relays; S.via = m.via; renderStatus(); if (S.view === 'home') { const st = $('.idstatus'); if (st) render(); } break;
     case 'id-changed': refresh(); break;
@@ -1009,7 +1013,7 @@ api.on((m) => {
       break;
     }
   }
-});
+}
 
 window.addEventListener('message', (e) => {
   if (e.data === 'majlis-port' && e.ports[0]) {
@@ -1035,6 +1039,7 @@ setInterval(() => {
   $('.brand-mark').innerHTML = mark(18);
   S.hz = await measureHz().catch(() => 60);
   await refresh();
+  for (const m of early.splice(0)) handleEvent(m);
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);

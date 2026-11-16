@@ -40,6 +40,10 @@ static class WindowCapture
     public static void Start(long hwnd, int fps, string pipeName)
     {
         Stop();
+        var h = new IntPtr(hwnd);
+        if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) throw new Exception("window is closed or hidden");
+        // a minimized window has nothing to capture; bring it back first
+        if (Native.IsIconic(h)) { Native.ShowWindow(h, 9); Thread.Sleep(250); }
         D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, new[] { FeatureLevel.Level_11_0 }, out dev, out ctx).CheckError();
         using var dxgi = dev.QueryInterface<IDXGIDevice>();
         CreateDirect3D11DeviceFromDXGIDevice(dxgi.NativePointer, out var gptr);
@@ -67,21 +71,43 @@ static class WindowCapture
         try { session.IsBorderRequired = false; } catch { }
         pool.FrameArrived += OnFrame;
 
-        pipe = new NamedPipeServerStream(pipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, W * H * 8);
+        PipeName = pipeName;
         running = true;
         session.StartCapture();
+
+        // Several readers can be connected at once: when the app swaps encoders (new bitrate,
+        // keyframe request) the replacement ffmpeg reads alongside the old one until it takes over.
+        acceptor = new Thread(() =>
+        {
+            while (running)
+            {
+                var s = new NamedPipeServerStream(pipeName, PipeDirection.Out, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.None, 0, W * H * 4);
+                try { s.WaitForConnection(); } catch { s.Dispose(); break; }
+                if (!running) { s.Dispose(); break; }
+                lock (clients) clients.Add(s);
+            }
+        }) { IsBackground = true };
+        acceptor.Start();
         Program.Event("wincap", new { ok = true, w = W, h = H, pipe = @"\\.\pipe\" + pipeName });
 
         writer = new Thread(() =>
         {
-            try { pipe.WaitForConnection(); } catch { return; }
             var local = new byte[frameBuf.Length];
             long interval = TimeSpan.TicksPerSecond / fps, next = DateTime.UtcNow.Ticks;
             while (running)
             {
-                // constant frame rate for the encoder: repeat the last frame if nothing changed
-                lock (frameLock) Buffer.BlockCopy(frameBuf, 0, local, 0, local.Length);
-                try { pipe.Write(local, 0, local.Length); } catch { break; }
+                NamedPipeServerStream[] list;
+                lock (clients) list = clients.ToArray();
+                if (list.Length > 0)
+                {
+                    // constant frame rate for the encoder: repeat the last frame if nothing changed
+                    lock (frameLock) Buffer.BlockCopy(frameBuf, 0, local, 0, local.Length);
+                    foreach (var c in list)
+                    {
+                        try { c.Write(local, 0, local.Length); }
+                        catch { lock (clients) clients.Remove(c); try { c.Dispose(); } catch { } } // that ffmpeg went away
+                    }
+                }
                 next += interval;
                 long wait = next - DateTime.UtcNow.Ticks;
                 if (wait > 0) Thread.Sleep(TimeSpan.FromTicks(wait)); else next = DateTime.UtcNow.Ticks;
@@ -89,6 +115,10 @@ static class WindowCapture
         }) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
         writer.Start();
     }
+
+    static readonly List<NamedPipeServerStream> clients = new();
+    static Thread acceptor;
+    static string PipeName;
 
     static void OnFrame(Direct3D11CaptureFramePool p, object _)
     {
@@ -116,10 +146,14 @@ static class WindowCapture
 
     public static void Stop()
     {
+        bool was = running;
         running = false;
         try { session?.Dispose(); } catch { }
         try { pool?.Dispose(); } catch { }
         try { pipe?.Dispose(); } catch { }
+        lock (clients) { foreach (var c in clients) try { c.Dispose(); } catch { } clients.Clear(); }
+        // wake the acceptor out of WaitForConnection
+        if (was && PipeName != null) try { using var poke = new NamedPipeClientStream(".", PipeName, PipeDirection.In); poke.Connect(200); } catch { }
         try { staging?.Dispose(); ctx?.Dispose(); dev?.Dispose(); } catch { }
         session = null; pool = null; pipe = null; staging = null; ctx = null; dev = null;
     }

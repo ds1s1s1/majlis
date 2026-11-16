@@ -19,6 +19,7 @@ class Helper extends EventEmitter {
   constructor() {
     super();
     this.p = null; this.buf = Buffer.alloc(0); this.ready = false; this.info = null;
+    this.on('error', () => {}); // never let a stray 'error' take the app down
   }
 
   start() {
@@ -44,7 +45,10 @@ class Helper extends EventEmitter {
       if (type === 1) {
         let m; try { m = JSON.parse(payload); } catch { continue; }
         if (m.ev === 'hello') { this.ready = true; this.info = m; }
-        this.emit('ev', m); this.emit(m.ev, m);
+        this.emit('ev', m);
+        // 'error' is special for EventEmitter (throws when nobody listens), so failures from
+        // the helper travel under their own name
+        this.emit(m.ev === 'error' ? 'helper-error' : m.ev, m);
       } else if (type === 2) this.emit('opus', Buffer.from(payload));
       else if (type === 3) this.emit('cursor', { x: payload.readFloatLE(0), y: payload.readFloatLE(4), visible: payload[8] === 1, shape: payload.readInt32LE(9) });
     }
@@ -56,12 +60,17 @@ class Helper extends EventEmitter {
     try { this.p.stdin.write(JSON.stringify(obj) + '\n'); return true; } catch { return false; }
   }
 
+  // Send a command and wait for its reply event. If the helper reports that this command
+  // failed, resolve right away with null (and the reason on `lastError`) instead of timing out.
   request(obj, ev, timeout = 4000) {
     return new Promise((res) => {
-      const to = setTimeout(() => { this.off(ev, h); res(null); }, timeout);
-      const h = (m) => { clearTimeout(to); res(m); };
-      this.once(ev, h);
-      this.cmd(obj);
+      const done = (v) => { clearTimeout(to); this.off(ev, ok); this.off('helper-error', fail); res(v); };
+      const ok = (m) => done(m);
+      const fail = (m) => { if (m.cmd === obj.cmd) { this.lastError = m.msg; done(null); } };
+      const to = setTimeout(() => done(null), timeout);
+      this.on(ev, ok);
+      this.on('helper-error', fail);
+      if (!this.cmd(obj)) done(null);
     });
   }
 

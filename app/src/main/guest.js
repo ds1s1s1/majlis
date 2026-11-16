@@ -50,9 +50,11 @@ class Guest extends EventEmitter {
     link.on('ctrl', (m) => this._ctrl(m));
     link.on('raw', (b) => this._raw(b));
     link.on('path', (p) => this.emit('path', p));
-    this.started = now(); this.rttSum = 0; this.rttN = 0;
+    this.started = now(); this.rtts = [];
     link.on('close', (r) => {
-      const summary = { name: link.peer.nick || link.peer.id, ms: now() - this.started, mb: Math.round(link.stats.rx / 1e5) / 10, rtt: this.rttN ? Math.round(this.rttSum / this.rttN) : null };
+      // median ping, ignoring the first seconds while the connection settles
+      const rs = this.rtts.slice().sort((a, b) => a - b);
+      const summary = { name: link.peer.nick || link.peer.id, ms: now() - this.started, mb: Math.round(link.stats.rx / 1e5) / 10, rtt: rs.length ? Math.round(rs[rs.length >> 1]) : null };
       this.emit('state', { state: 'ended', reason: r, summary });
       this.link = null; this.state = 'idle'; clearInterval(this.fbTimer); clearInterval(this.pingTimer);
     });
@@ -121,7 +123,7 @@ class Guest extends EventEmitter {
     this.last = r;
     const body = Buffer.from(JSON.stringify(r));
     this.link.send(Buffer.concat([Buffer.from([0x06]), body]));
-    if (this.link.rtt) { this.rttSum += this.link.rtt; this.rttN++; }
+    if (this.link.rtt && now() - this.started > 4000) { this.rtts.push(this.link.rtt); if (this.rtts.length > 5000) this.rtts.shift(); }
     this.emit('stats', { ...r, rtt: Math.round(this.link.rtt * 10) / 10, path: this.link.pathInfo(), paths: this.link.allPaths() });
   }
 

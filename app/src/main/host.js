@@ -628,7 +628,13 @@ class Host extends EventEmitter {
     if (this.wincap && this.wincap.hwnd === win.hwnd) return;
     const pipe = `majlis-win-${process.pid}-${Date.now() % 100000}`;
     const r = await this.helper.request({ cmd: 'wincap', hwnd: win.hwnd, fps: this.store.get('fps') || 60, pipe }, 'wincap', 5000);
-    if (!r?.ok) { this.emit('notice', { key: 'wincap_failed' }); this.store.set('captureWindow', null); return; }
+    if (!r?.ok) {
+      // that window can't be captured (closed, hidden, protected): fall back to the whole screen once
+      this.emit('notice', { key: 'wincap_failed', detail: this.helper.lastError });
+      this.store.set('captureWindow', null);
+      this.emit('update');
+      return;
+    }
     const list = await this.helper.request({ cmd: 'windows' }, 'windows');
     const w = list?.list.find((x) => x.hwnd === win.hwnd);
     this.wincap = { hwnd: win.hwnd, w: r.w, h: r.h, pipe: r.pipe, rect: w ? { x: w.x, y: w.y, w: r.w, h: r.h } : { x: 0, y: 0, w: r.w, h: r.h } };

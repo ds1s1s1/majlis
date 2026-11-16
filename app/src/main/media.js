@@ -29,7 +29,8 @@ class VideoTx {
     const hostTs = now() >>> 0;
     for (let b = 0; b < blocks; b++) {
       const first = b * MAXK, k = Math.min(MAXK, total - first);
-      const m = Math.min(255 - k, Math.max(1, Math.ceil(k * this.fecRatio)));
+      // keyframes are what everything after them depends on: protect them harder
+      const m = Math.min(255 - k, Math.max(key ? 3 : 1, Math.ceil(k * (key ? Math.max(0.3, this.fecRatio) : this.fecRatio))));
       const shards = [];
       for (let i = 0; i < k; i++) {
         const s = new Uint8Array(SHARD);
