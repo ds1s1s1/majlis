@@ -1,0 +1,71 @@
+'use strict';
+// Talks to majlis-helper.exe (input injection, virtual pads, game audio, cursor, window capture).
+const { spawn } = require('child_process');
+const { EventEmitter } = require('events');
+const fs = require('fs');
+const path = require('path');
+
+function helperPath() {
+  const cands = [
+    process.env.MAJLIS_HELPER,
+    path.join(process.resourcesPath || '', 'helper', 'majlis-helper.exe'),
+    path.join(__dirname, '../../../helper/dist/majlis-helper.exe'),
+    path.join(__dirname, '../../../helper/bin/Release/net10.0-windows10.0.22621.0/majlis-helper.exe'),
+  ];
+  return cands.find((c) => c && fs.existsSync(c)) || null;
+}
+
+class Helper extends EventEmitter {
+  constructor() {
+    super();
+    this.p = null; this.buf = Buffer.alloc(0); this.ready = false; this.info = null;
+  }
+
+  start() {
+    const exe = helperPath();
+    if (!exe) { this.emit('missing'); return false; }
+    this.p = spawn(exe, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    this.p.stdout.on('data', (d) => this._feed(d));
+    this.p.on('exit', (code) => { this.ready = false; this.p = null; this.emit('exit', code); });
+    this.p.on('error', () => {});
+    this.p.stdin.on('error', () => {});
+    this.cmd({ cmd: 'hello' });
+    return true;
+  }
+
+  _feed(d) {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
+    let o = 0;
+    while (this.buf.length - o >= 5) {
+      const type = this.buf[o], len = this.buf.readUInt32LE(o + 1);
+      if (this.buf.length - o - 5 < len) break;
+      const payload = this.buf.subarray(o + 5, o + 5 + len);
+      o += 5 + len;
+      if (type === 1) {
+        let m; try { m = JSON.parse(payload); } catch { continue; }
+        if (m.ev === 'hello') { this.ready = true; this.info = m; }
+        this.emit('ev', m); this.emit(m.ev, m);
+      } else if (type === 2) this.emit('opus', Buffer.from(payload));
+      else if (type === 3) this.emit('cursor', { x: payload.readFloatLE(0), y: payload.readFloatLE(4), visible: payload[8] === 1, shape: payload.readInt32LE(9) });
+    }
+    this.buf = o ? Buffer.from(this.buf.subarray(o)) : this.buf;
+  }
+
+  cmd(obj) {
+    if (!this.p) return false;
+    try { this.p.stdin.write(JSON.stringify(obj) + '\n'); return true; } catch { return false; }
+  }
+
+  request(obj, ev, timeout = 4000) {
+    return new Promise((res) => {
+      const to = setTimeout(() => { this.off(ev, h); res(null); }, timeout);
+      const h = (m) => { clearTimeout(to); res(m); };
+      this.once(ev, h);
+      this.cmd(obj);
+    });
+  }
+
+  stop() { this.cmd({ cmd: 'quit' }); setTimeout(() => { try { this.p?.kill(); } catch {} }, 500); }
+}
+
+module.exports = { Helper, helperPath };

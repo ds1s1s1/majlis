@@ -1,0 +1,15 @@
+# One box running signaling + relay. For a fleet (Jeddah, Riyadh, Dammam) run MODE=relay on
+# the extra boxes with the same RELAY_SECRET and list all of them in RELAYS on the signal box.
+services:
+  majlis:
+    build: .
+    restart: unless-stopped
+    network_mode: host          # UDP hole punching needs the real source ports
+    environment:
+      RELAY_SECRET: change-me-to-a-long-random-string
+      PUBLIC_URL: https://majlis.example.com
+      RELAY_HOST: jed.example.com
+      RELAY_NAME: jed
+      RELAY_LABEL: Jeddah
+    volumes:
+      - ./data:/data

@@ -1,0 +1,69 @@
+{
+  "name": "majlis",
+  "productName": "Majlis",
+  "version": "0.1.0",
+  "description": "Play with your friends over the internet. No accounts, just numbers.",
+  "main": "src/main/main.js",
+  "author": "ds1s1s1",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "fonts": "node scripts/copy-fonts.js",
+    "dist": "electron-builder --win portable nsis"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-mono": "^5.1.0",
+    "@fontsource/ibm-plex-sans-arabic": "^5.1.0",
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "app.majlis.desktop",
+    "productName": "Majlis",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../helper/dist",
+        "to": "helper",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "name": "Majlis",
+        "schemes": [
+          "majlis"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "portable": {
+      "artifactName": "Majlis-portable.exe"
+    },
+    "nsis": {
+      "artifactName": "Majlis-setup.exe",
+      "oneClick": true
+    }
+  },
+  "homepage": "https://github.com/ds1s1s1/majlis",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ds1s1s1/majlis.git"
+  }
+}

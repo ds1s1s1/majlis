@@ -1,0 +1,13 @@
+node_modules/
+app/dist/
+app/dist-friends/
+app/dist-public/
+app/src/main/build-config.json
+helper/bin/
+helper/obj/
+helper/dist/
+server/data/
+cloud/.wrangler/
+cloud/.turn.env
+.dev.vars
+*.log

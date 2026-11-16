@@ -1,0 +1,50 @@
+// Hand-drawn line icons, 24-unit grid, 1.6 stroke. Kept here so the app has one consistent set.
+const P = {
+  home: '<path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/>',
+  room: '<path d="M3 19h18"/><path d="M5 19v-5.5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2V19"/><path d="M8 11.5V8a4 4 0 0 1 8 0v3.5"/><path d="M5 15.5h14"/>',
+  net: '<path d="M4 20V16"/><path d="M9 20v-7"/><path d="M14 20V9"/><path d="M19 20V5"/>',
+  lib: '<rect x="3.5" y="4" width="7" height="10" rx="1"/><rect x="13.5" y="4" width="7" height="10" rx="1"/><path d="M3.5 18h7M13.5 18h7M3.5 21h4M13.5 21h4"/>',
+  set: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>',
+  chat: '<path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  pad: '<path d="M7 8h10a4 4 0 0 1 3.9 4.9l-.9 4a2.5 2.5 0 0 1-4.3 1.1L13.5 16h-3l-2.2 2a2.5 2.5 0 0 1-4.3-1.1l-.9-4A4 4 0 0 1 7 8z"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="11.5" r=".6" fill="currentColor"/><circle cx="17" cy="13.5" r=".6" fill="currentColor"/>',
+  kbd: '<rect x="3" y="6.5" width="18" height="11" rx="1.5"/><path d="M7 10h.01M10 10h.01M13 10h.01M16 10h.01M7 13.5h10"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
+  eyeoff: '<path d="M4 4l16 16"/><path d="M10 6a8.6 8.6 0 0 1 2-.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-3 3.6M6.6 7.6A15.5 15.5 0 0 0 2.5 12S6 18.5 12 18.5a8.7 8.7 0 0 0 4-1"/>',
+  mic: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
+  micoff: '<path d="M4 4l16 16"/><path d="M15 10.5V6.5a3 3 0 0 0-5.8-1M9 9v2.5a3 3 0 0 0 4.6 2.5M5.5 11.5a6.5 6.5 0 0 0 10.6 5M18.5 11.5a6.4 6.4 0 0 1-.5 2.4M12 18v2.5"/>',
+  door: '<path d="M14 4H6.5A1.5 1.5 0 0 0 5 5.5v13A1.5 1.5 0 0 0 6.5 20H14"/><path d="M10 12h10M17 9l3 3-3 3"/>',
+  shield: '<path d="M12 3.5 19 6v5.5c0 4.3-3 7.7-7 9-4-1.3-7-4.7-7-9V6z"/><path d="m9 12 2 2 4-4"/>',
+  hand: '<path d="M8.5 12V6a1.5 1.5 0 0 1 3 0v5M11.5 11V4.5a1.5 1.5 0 0 1 3 0V11M14.5 11V6a1.5 1.5 0 0 1 3 0v7a7 7 0 0 1-7 7h-.5a6 6 0 0 1-4.6-2.2L3 14.6a1.5 1.5 0 0 1 2.3-1.9L8.5 15"/>',
+  monitor: '<rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M8.5 20h7M12 16.5V20"/>',
+  window: '<rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M3 8.5h18"/><path d="M6 6.5h.01M8.5 6.5h.01"/>',
+  clip: '<rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M3 9h18M7 5l2 4M12 5l2 4M17 5l2 4"/>',
+  lock: '<rect x="5" y="10.5" width="14" height="10" rx="1.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
+  full: '<path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  more: '<circle cx="5.5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="18.5" cy="12" r="1" fill="currentColor"/>',
+  bolt: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
+  router: '<rect x="3" y="13" width="18" height="6" rx="1.5"/><path d="M7 16h.01M10 16h.01M17 13V8M14.5 9.5a3.5 3.5 0 0 1 5 0M12.5 7.5a6.4 6.4 0 0 1 9 0"/>',
+  swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+  refresh: '<path d="M20 11a8 8 0 0 0-14.3-4.3L4 8.5M4 4v4.5h4.5M4 13a8 8 0 0 0 14.3 4.3L20 15.5M20 20v-4.5h-4.5"/>',
+  star: '<path d="m12 4 2.4 5 5.4.7-4 3.7 1 5.3-4.8-2.6-4.8 2.6 1-5.3-4-3.7 5.4-.7z"/>',
+  play: '<path d="M7 5.5v13a1 1 0 0 0 1.5.87l11-6.5a1 1 0 0 0 0-1.74l-11-6.5A1 1 0 0 0 7 5.5z"/>',
+  pause: '<rect x="6.5" y="5" width="3.5" height="14" rx="1"/><rect x="14" y="5" width="3.5" height="14" rx="1"/>',
+  back: '<path d="M11 7 6 12l5 5M18 7l-5 5 5 5"/>',
+  fwd: '<path d="m13 7 5 5-5 5M6 7l5 5-5 5"/>',
+  film: '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M7 4v16M17 4v16M3 8h4M3 12h4M3 16h4M17 8h4M17 12h4M17 16h4"/>',
+  camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2l1.5-2h6l1.5 2h2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.2"/>',
+  wave: '<path d="M3 12h2l2-5 3 10 3-12 3 9 2-2h3"/>',
+};
+
+export function icon(name, size = 18, cls = '') {
+  return `<svg class="ic ${cls}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
+}
+
+// Brand mark: a woven Sadu-style diamond row, the pattern you'd see on a majlis cushion.
+export function mark(size = 22) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor"><path d="M12 2 17 7 12 12 7 7z"/><path d="M12 12 17 17 12 22 7 17z" opacity=".55"/><path d="M2 12 5.5 8.5 9 12 5.5 15.5z" opacity=".8"/><path d="M15 12l3.5-3.5L22 12l-3.5 3.5z" opacity=".8"/></g></svg>`;
+}

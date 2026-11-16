@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>دعوة مجلس</title>
+<meta property="og:title" content="تعال العب معي في مجلس">
+<meta property="og:description" content="الرقم {{NUM}}">
+<style>
+  :root { --bg:#100f0d; --fg:#ece5d8; --mut:#958c80; --line:rgba(236,229,216,.1); --acc:#e3a63b; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f4efe6; --fg:#1d1a16; --mut:#6f675c; --line:rgba(29,26,22,.12); --acc:#a8690f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--fg);
+         font: 16px/1.6 "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; padding:24px 16px; }
+  main { width:100%; max-width:420px; }
+  .band { height:6px; margin-bottom:28px; background:
+      linear-gradient(135deg, var(--acc) 25%, transparent 25%) 0 0/12px 12px,
+      linear-gradient(225deg, var(--acc) 25%, transparent 25%) 0 0/12px 12px; opacity:.85; }
+  h1 { font-size:15px; font-weight:500; color:var(--mut); margin:0 0 6px; }
+  .num { font: 600 44px/1.1 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing:.04em; direction:ltr; text-align:right; margin:0 0 28px; }
+  a.btn, button { display:block; width:100%; text-align:center; padding:14px; border-radius:6px; font:inherit; font-weight:600;
+       background:var(--acc); color:#1a1408; text-decoration:none; border:0; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); margin-top:10px; font-weight:500; }
+  p.note { color:var(--mut); font-size:14px; margin-top:24px; border-top:1px solid var(--line); padding-top:16px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="band"></div>
+  <h1 id="h">خويك يبيك تدخل مجلسه</h1>
+  <div class="num">{{NUM}}</div>
+  <a class="btn" href="{{DEEP}}">افتح في مجلس</a>
+  <button class="ghost" id="copy">انسخ الرقم</button>
+  <p class="note">ما عندك البرنامج؟ نزّله، شغّله، والصق الرقم في خانة «اتصل بخويك». ما يحتاج تسجيل.</p>
+</main>
+<script>
+  if ('{{KIND}}' === 'c') document.getElementById('h').textContent = 'رمز دخول مؤقت لمجلس خويك';
+  document.getElementById('copy').onclick = async (e) => {
+    try { await navigator.clipboard.writeText('{{NUM}}'.replace(/\s/g, '')); e.target.textContent = 'انتسخ'; } catch {}
+  };
+</script>
+</body>
+</html>

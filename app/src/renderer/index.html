@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ar" dir="rtl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file:; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' blob:; worker-src 'self' blob:">
+<title>Majlis</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand"><span class="brand-mark"></span><span class="brand-name" data-t="app"></span></div>
+    <div class="tb-status" id="tbStatus"></div>
+  </header>
+
+  <div class="shell">
+    <nav class="rail" id="rail"></nav>
+    <main class="view" id="view"></main>
+  </div>
+
+  <section class="stage" id="stage" hidden>
+    <div class="stage-video" id="stageVideo">
+      <canvas id="screen"></canvas>
+      <img id="cursor" alt="" hidden>
+      <div class="stage-wait" id="stageWait"></div>
+    </div>
+    <div class="hud" id="hud"></div>
+    <aside class="drawer" id="drawer"></aside>
+  </section>
+
+  <div class="layer" id="modal"></div>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
