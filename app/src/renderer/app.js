@@ -696,7 +696,7 @@ function viewSettings() {
 
     <section class="sgroup"><h2>${t('set_server')}</h2><div class="rows">
       <div class="field"><label>${t('server')}</label><input class="input mono" data-s="server" value="${esc(s.server)}" placeholder="${s.builtInServer ? t('server_builtin') : t('server_hint')}"></div>
-      <div class="field"><label>${t('access_key')}</label><input class="input mono" type="password" data-s="accessKey" value="${esc(s.accessKey)}" placeholder="${s.builtInServer ? t('server_builtin') : ''}"><div class="sub">${t('access_key_sub')}</div></div>
+      ${s.builtInServer ? `<div class="sub">${icon('shield', 13)} ${t('builtin_note')}</div>` : `<div class="field"><label>${t('access_key')}</label><input class="input mono" type="password" data-s="accessKey" value="${esc(s.accessKey)}"><div class="sub">${t('access_key_sub')}</div></div>`}
       <div class="field"><label>${t('server_ws')}</label><input class="input mono" data-s="serverWs" value="${esc(s.serverWs)}" placeholder="wss://majlis.example.com/signal"></div>
       <div class="field"><label>${t('invite_base')}</label><input class="input mono" data-s="inviteBase" value="${esc(s.inviteBase)}" placeholder="https://majlis.example.com"></div>
     </div></section>

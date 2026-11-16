@@ -101,12 +101,19 @@ class Store {
   get(k) {
     const v = this.d.settings[k];
     if (k === 'server' && !v) return BUILD.server || '';
+    // On the built-in server the built-in key always wins: a number typed into the key box
+    // by mistake (easy to confuse with the room PIN) must never lock you out.
+    if (k === 'accessKey' && BUILD.accessKey && this.usingBuiltIn()) return BUILD.accessKey;
     if (k === 'accessKey' && !v) return BUILD.accessKey || '';
     return v;
   }
+  usingBuiltIn() {
+    const srv = this.d.settings.server;
+    return !!BUILD.server && (!srv || String(srv).replace(/\/+$/, '') === BUILD.server.replace(/\/+$/, ''));
+  }
   hasServer() { return !!String(this.get('server') || '').trim(); }
   set(k, v) { this.d.settings[k] = v; this.save(); }
-  all() { return { ...this.d.settings, builtInServer: !!BUILD.server && !this.d.settings.server }; }
+  all() { return { ...this.d.settings, builtInServer: this.usingBuiltIn() }; }
   patch(obj) { for (const [k, v] of Object.entries(obj || {})) if (k in DEFAULTS) this.d.settings[k] = v; this.save(); }
 
   // ---------------------------------------------------------------- identity
