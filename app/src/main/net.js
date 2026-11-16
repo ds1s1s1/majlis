@@ -41,7 +41,8 @@ function localCandidates(p4, p6) {
     for (const a of list || []) {
       if (a.internal) continue;
       if (a.family === 'IPv4' && p4) out.push({ a: a.address, p: p4, f: 'v4', k: 'lan' });
-      if (a.family === 'IPv6' && p6 && !a.address.startsWith('fe80')) {
+      // Teredo (2001:0::/32) and 6to4 (2002::/16) are tunnels, not real IPv6: slow, skip them
+      if (a.family === 'IPv6' && p6 && !a.address.startsWith('fe80') && !/^(2001:0?:|2002:)/i.test(a.address)) {
         const global = /^[23]/.test(a.address);
         out.push({ a: a.address, p: p6, f: 'v6', k: global ? 'v6' : 'lan' });
       }

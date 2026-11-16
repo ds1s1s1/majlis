@@ -116,7 +116,7 @@ async function check(net, store, { upload = true } = {}) {
     if (up && up.loss < 0.02) up.capped = true; // the line may be faster than what we pushed
   }
 
-  const v6 = Object.values(os.networkInterfaces()).flat().some((a) => a && a.family === 'IPv6' && !a.internal && /^[23]/.test(a.address));
+  const v6 = Object.values(os.networkInterfaces()).flat().some((a) => a && a.family === 'IPv6' && !a.internal && /^[23]/.test(a.address) && !/^(2001:0?:|2002:)/i.test(a.address));
   const pub4 = net.publicAddr.v4?.ip || null;
   const cgnat = upnp?.wanIp ? (isPrivate4(upnp.wanIp) || (pub4 && upnp.wanIp !== pub4)) : null;
   const jitter = relays[0]?.jitter ?? null;
