@@ -185,6 +185,24 @@ pub fn focus(hwnd: i64) {
     unsafe { if IsIconic(h).as_bool() { let _ = ShowWindow(h, SW_RESTORE); } let _ = SetForegroundWindow(h); }
 }
 
+// The film window (mpv's own; Chromium paints over anything drawn into its windows) made part
+// of the app: owned by `owner` (stays above it, minimises with it, no taskbar button) and put at
+// x,y,w,h in physical pixels, or hidden.
+// `top`: also raise it (above its owner chain's other windows: the controls over the film)
+pub fn place(hwnd: i64, owner: i64, x: i32, y: i32, w: i32, h: i32, show: bool, top: bool) {
+    let hw = HWND(hwnd as _);
+    unsafe {
+        if !IsWindow(Some(hw)).as_bool() { return; }
+        if owner != 0 {
+            SetWindowLongPtrW(hw, GWLP_HWNDPARENT, owner as isize);
+            let ex = GetWindowLongPtrW(hw, GWL_EXSTYLE);
+            SetWindowLongPtrW(hw, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize));
+        }
+        let flags = SWP_NOACTIVATE | SWP_FRAMECHANGED | if show { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW } | if top { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOZORDER };
+        let _ = SetWindowPos(hw, if top { Some(HWND_TOP) } else { None }, x, y, w, h, flags);
+    }
+}
+
 // before ffmpeg captures a window itself: still there, visible, not minimised
 pub fn winprep(hwnd: i64) -> Value {
     let h = HWND(hwnd as _);

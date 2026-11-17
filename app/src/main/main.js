@@ -33,7 +33,7 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 if (process.defaultApp) app.setAsDefaultProtocolClient('majlis', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('majlis');
 
-let win, store, net, helper, engine, host, guest, replay, port;
+let win, store, net, helper, engine, host, guest, replay, port, theater;
 let encoders = [];
 process.on('uncaughtException', (err) => {
   try {
@@ -145,7 +145,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL) ? { query: { view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
+  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL || process.env.MAJLIS_TITLE) ? { query: { title: process.env.MAJLIS_TITLE || '', view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
   // dev aid: MAJLIS_SHOT=out.png saves a screenshot of the page after a delay
   if (process.env.MAJLIS_SHOT) {
     setTimeout(async () => {
@@ -450,6 +450,7 @@ app.whenReady().then(async () => {
   replay = new Replay({ ffmpeg: ffmpegPath(), helper, store, encoders });
   handlers();
   createWindow();
+  theater = require('./theater').setup({ getWin: () => win, store, emit, helper, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
   registerShortcuts();
 
   let firstReg = true;
@@ -527,6 +528,18 @@ app.whenReady().then(async () => {
   }
   if (process.env.MAJLIS_MOVIE) setTimeout(async () => { host.setEnabled(true); host.setMode('watch'); await ensureFfmpeg(); await host.movieOpen(process.env.MAJLIS_MOVIE, { fresh: true, autoplay: true }); }, 2500);
   if (process.env.MAJLIS_CHAT) setTimeout(() => host.hostChat(process.env.MAJLIS_CHAT), 9000);
+  // dev aid: MAJLIS_SHOT_SCREEN=out.png saves what's on screen inside the app window (native
+  // windows over it included, e.g. the film), cropped to the window: nothing else on the desktop
+  if (process.env.MAJLIS_SHOT_SCREEN) setTimeout(async () => {
+    const d = screen.getDisplayMatching(win.getBounds()), f = d.scaleFactor;
+    const src = (await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: d.size.width * f, height: d.size.height * f } })).find((s) => +s.display_id === d.id);
+    const b = win.getBounds();
+    const img = src.thumbnail.crop({ x: Math.round((b.x - d.bounds.x) * f), y: Math.round((b.y - d.bounds.y) * f), width: Math.round(b.width * f), height: Math.round(b.height * f) });
+    fs.writeFileSync(process.env.MAJLIS_SHOT_SCREEN, img.toPNG());
+  }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
+  // dev aid: MAJLIS_PLAY=<http url> opens it in the theater
+  if (process.env.MAJLIS_PLAY_PAUSE) setTimeout(() => theater.mpv?.set('pause', true).catch(() => {}), 11000);
+  if (process.env.MAJLIS_PLAY) setTimeout(() => theater.play({ type: 'movie', id: 'dev-play', card: { name: 'Test', type: 'movie' }, stream: { url: process.env.MAJLIS_PLAY } }).catch((e) => console.log('[play]', e.message)), 4000);
   if (process.env.MAJLIS_JOIN) setTimeout(() => emit('deeplink', { kind: 'join', target: process.env.MAJLIS_JOIN }), 3000);
 });
 
@@ -540,6 +553,6 @@ app.on('open-url', (e, url) => { const l = deepLink([url]); if (l) emit('deeplin
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); } catch {}
+  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); } catch {}
   try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
 });

@@ -3,6 +3,7 @@ import { icon, mark } from './icons.js';
 import { Player, VoiceHub, decodeCaps, measureHz } from './stream.js';
 import { accelFrom, matchAccel } from './keys.js';
 import { initWatch } from './watch.js';
+import { initCinema } from './cinema.js';
 
 const api = window.majlis;
 const $ = (s, r = document) => r.querySelector(s);
@@ -76,7 +77,7 @@ function watchUI() {
 }
 
 // ------------------------------------------------------------------------- frame
-const NAV = [['home', 'home', 'nav_home'], ['room', 'room', 'nav_room'], ['net', 'net', 'nav_net'], ['lib', 'lib', 'nav_lib']];
+const NAV = [['home', 'home', 'nav_home'], ['room', 'room', 'nav_room'], ['cinema', 'film', 'nav_cinema'], ['net', 'net', 'nav_net'], ['lib', 'lib', 'nav_lib']];
 function renderRail() {
   const knocks = S.host?.knocks?.length || 0;
   $('#rail').innerHTML = NAV.map(([v, ic, k]) => `<button data-v="${v}" class="${S.view === v ? 'on' : ''}">${icon(ic, 21)}<span>${t(k)}</span>${v === 'room' && knocks ? `<span class="badge">${knocks}</span>` : ''}</button>`).join('')
@@ -94,9 +95,11 @@ function renderStatus() {
   $('#tbStatus').innerHTML = s;
 }
 
+let CIN = null;
 function go(v) { S.view = v; renderRail(); render(); }
 
 function render() {
+  if (S.view === 'cinema') { CIN ||= initCinema({ api, t, icon, esc, toast, $, $$ }); $('#view').innerHTML = CIN.viewCinema(); CIN.mountCinema(); return; }
   const fn = { home: viewHome, room: viewRoom, net: viewNet, lib: viewLib, set: viewSettings }[S.view];
   $('#view').innerHTML = fn();
   ({ home: mountHome, room: mountRoom, net: mountNet, lib: mountLib, set: mountSettings }[S.view])?.();
@@ -1046,7 +1049,8 @@ async function refresh() {
   S.st = await api.invoke('state');
   S.host = S.st.host;
   applyLook(); renderRail(); renderStatus();
-  if (!(S.view === 'home' && document.activeElement?.matches('#digits input')) && !document.activeElement?.matches('.view input.input')) render();
+  // (cinema keeps its own state and scroll: a settings refresh must not rebuild it)
+  if (S.view !== 'cinema' && !(S.view === 'home' && document.activeElement?.matches('#digits input')) && !document.activeElement?.matches('.view input.input')) render();
 }
 
 // Events can arrive before the first state load finishes; hold them until it has.
@@ -1164,6 +1168,8 @@ setInterval(() => {
   for (const m of early.splice(0)) handleEvent(m);
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
+  // test aid: open a title in cinema mode straight away (type:id)
+  if (q.get('title')) { go('cinema'); const [ty, ...id] = q.get('title').split(':'); setTimeout(() => CIN?.openTitle(ty, id.join(':')), 500); }
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);
   // test aid: the host opens its own view of the film once it's playing
   if (q.get('local')) { const iv = setInterval(() => { const b = $('#watchnow'); if (b) { clearInterval(iv); b.click(); } }, 500); }

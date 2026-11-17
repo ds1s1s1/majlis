@@ -101,6 +101,7 @@ fn main() {
             "replay_audio" => { let p = c["path"].as_str().unwrap_or(""); proto::event("replay_audio", json!({ "path": p, "ok": aud.save_wav(p, u("seconds").unwrap_or(30)) })); }
             "cursor" => desk::cursor(c["on"].as_bool().unwrap_or(false)),
             "focus" => desk::focus(c["hwnd"].as_i64().unwrap_or(0)),
+            "place" => { let n = |k: &str| c[k].as_i64().unwrap_or(0); desk::place(n("hwnd"), n("owner"), n("x") as i32, n("y") as i32, n("w") as i32, n("h") as i32, c["show"].as_bool().unwrap_or(true), c["top"].as_bool().unwrap_or(false)); }
             "winprep" => proto::event("winprep", desk::winprep(c["hwnd"].as_i64().unwrap_or(0))),
             "gpu_prio" => { let pid = u("pid").unwrap_or(0); proto::event("gpu_prio", json!({ "pid": pid, "ok": desk::gpu_priority(pid) })); }
             "ptt" => desk::ptt(c["vk"].as_i64().unwrap_or(0) as i32),

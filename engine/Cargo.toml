@@ -1,5 +1,5 @@
 [workspace]
-members = ["majlis-engine", "majlis-core"]
+members = ["majlis-engine", "majlis-core", "majlis-media"]
 resolver = "2"
 
 [profile.release]

@@ -2,6 +2,14 @@
 export const STR = {
   ar: {
     app: 'مجلس',
+    nav_cinema: 'السينما',
+    cin_title: 'السينما', cin_back: 'رجوع', cin_search: 'دوّر فلم أو مسلسل', cin_addons: 'الإضافات', cin_play: 'شغّل', cin_more: 'التفاصيل',
+    cin_loading: 'لحظة…', cin_continue: 'كمّل المشاهدة', cin_series: 'مسلسلات', cin_movies: 'أفلام', cin_no_rows: 'ما فيه كتالوجات. ضيف إضافة من «الإضافات».',
+    cin_nothing: 'ما لقينا شي.', cin_instant: 'فوري', cin_cast: 'الممثلين', cin_play_best: 'شغّل أفضل نسخة', cin_specials: 'خاص', cin_season: 'الموسم',
+    cin_streams: 'النسخ المتوفرة', cin_finding: 'ندوّر على نسخ…', cin_pick_ep: 'اختار حلقة.', cin_no_streams: 'ما فيه نسخ. ضيف إضافة بث من «الإضافات».',
+    cin_addons_sub: 'إضافات Stremio: الصق رابط manifest.json. مجلس ما يجي معه إضافات بث، تضيفها أنت.', cin_add: 'أضف', cin_err: 'صار خطأ: {e}', cin_bad_addon: 'الرابط مو إضافة صالحة: {e}',
+    th_buffering: 'يحمّل…', th_subs: 'الترجمة', th_off: 'بدون', th_builtin: 'مدمجة', th_sub_delay: 'تأخير الترجمة', th_sub_size: 'حجم الخط', th_audio: 'الصوت',
+    th_speed: 'السرعة', th_recovering: 'يرجّع التشغيل…', th_failed: 'تعذّر التشغيل',
     nav_home: 'الرئيسية', nav_room: 'المجلس', nav_net: 'الشبكة', nav_lib: 'المكتبة', nav_set: 'الإعدادات',
     st_online: 'متصل', st_offline: 'غير متصل بالسيرفر', st_connecting: 'يتصل بالسيرفر', st_tcp: 'عبر TCP',
 
@@ -125,6 +133,14 @@ export const STR = {
   },
   en: {
     app: 'Majlis',
+    nav_cinema: 'Cinema',
+    cin_title: 'Cinema', cin_back: 'Back', cin_search: 'Search movies and series', cin_addons: 'Addons', cin_play: 'Play', cin_more: 'Details',
+    cin_loading: 'One moment…', cin_continue: 'Continue watching', cin_series: 'Series', cin_movies: 'Movies', cin_no_rows: 'No catalogs. Add an addon under “Addons”.',
+    cin_nothing: 'Nothing found.', cin_instant: 'Instant', cin_cast: 'Cast', cin_play_best: 'Play the best copy', cin_specials: 'Specials', cin_season: 'Season',
+    cin_streams: 'Available copies', cin_finding: 'Looking for copies…', cin_pick_ep: 'Pick an episode.', cin_no_streams: 'No copies. Add a streaming addon under “Addons”.',
+    cin_addons_sub: 'Stremio addons: paste a manifest.json link. Majlis ships no streaming addons; you add your own.', cin_add: 'Add', cin_err: 'Something went wrong: {e}', cin_bad_addon: 'Not a valid addon: {e}',
+    th_buffering: 'Loading…', th_subs: 'Subtitles', th_off: 'Off', th_builtin: 'built-in', th_sub_delay: 'Subtitle delay', th_sub_size: 'Text size', th_audio: 'Audio',
+    th_speed: 'Speed', th_recovering: 'Resuming playback…', th_failed: 'Playback failed',
     nav_home: 'Home', nav_room: 'Room', nav_net: 'Network', nav_lib: 'Library', nav_set: 'Settings',
     st_online: 'Online', st_offline: 'Server unreachable', st_connecting: 'Connecting', st_tcp: 'via TCP',
     your_number: 'Your number', copy: 'Copy', copied: 'Copied', invite: 'Invite link', whatsapp: 'WhatsApp',

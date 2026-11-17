@@ -11,9 +11,10 @@
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "fonts": "node scripts/copy-fonts.js",
-    "dist": "npm run core && electron-builder --win portable nsis",
+    "dist": "npm run core && npm run mpv && electron-builder --win portable nsis",
     "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\"",
-    "verify-release": "node scripts/check-release.js"
+    "verify-release": "node scripts/check-release.js",
+    "mpv": "node scripts/fetch-mpv.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
@@ -37,7 +38,18 @@
         "from": "../engine/target/release",
         "to": "engine",
         "filter": [
-          "majlis-engine.exe"
+          "majlis-engine.exe",
+          "majlis-media.exe"
+        ]
+      },
+      {
+        "from": "../engine/vendor/mpv",
+        "to": "mpv",
+        "filter": [
+          "mpv.exe",
+          "d3dcompiler_43.dll",
+          "mpv/fonts.conf",
+          "LICENSE-mpv.txt"
         ]
       }
     ],

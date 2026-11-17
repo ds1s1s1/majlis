@@ -1,5 +1,10 @@
 // Hand-drawn line icons, 24-unit grid, 1.6 stroke. Kept here so the app has one consistent set.
 const P = {
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+  sub: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 11h4M13 11h4M7 15h7M16 15h1"/>',
+  vol: '<path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
+  moon: '<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
   home: '<path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/>',
   room: '<path d="M3 19h18"/><path d="M5 19v-5.5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2V19"/><path d="M8 11.5V8a4 4 0 0 1 8 0v3.5"/><path d="M5 15.5h14"/>',
   net: '<path d="M4 20V16"/><path d="M9 20v-7"/><path d="M14 20V9"/><path d="M19 20V5"/>',
