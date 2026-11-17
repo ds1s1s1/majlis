@@ -20,6 +20,16 @@ function icons() {
   $('#night').classList.toggle('on', night);
 }
 
+// a chapter called intro/opening (in either language) gets a skip button; credits get "next"
+const INTRO = /\b(intro|opening|op|recap|previously)\b|مقدمة|شارة البداية/i, OUTRO = /\b(credits|ending|ed|outro|preview)\b|شارة النهاية/i;
+function chapters() {
+  const list = P['chapter-list'] || [], i = P.chapter ?? -1, c = list[i];
+  const intro = c && INTRO.test(c.title || '') && list[i + 1];
+  $('#skipintro').hidden = !intro;
+  if (intro) $('#skipintro').dataset.to = list[i + 1].time;
+  $('#nextep').hidden = !(P.series && ((c && OUTRO.test(c.title || '')) || (P.duration && P['time-pos'] > P.duration - 60)));
+}
+
 function draw() {
   const d = P.duration || 0, p = P['time-pos'] || 0, c = Math.min(d, p + (P['demuxer-cache-duration'] || 0));
   $('#fill').style.width = d ? `${(p / d) * 100}%` : '0';
@@ -30,6 +40,7 @@ function draw() {
   const waiting = P['paused-for-cache'] || (P['time-pos'] == null && !P['eof-reached']);
   $('#center').innerHTML = waiting ? `<div class="th-spin"></div><span>${t('th_buffering')}</span>` : '';
   $('#play').innerHTML = icon(P.pause ? 'play' : 'pause', 24);
+  chapters();
 }
 
 // controls fade out while the film plays and the mouse rests
@@ -97,13 +108,17 @@ async function init() {
   icons(); draw();
   api.on((m) => {
     if (m.type === 'player') { P[m.name] = m.value; draw(); if (m.name === 'pause') { icons(); wake(); } }
-    else if (m.type === 'theater') { $('#title').textContent = m.card?.name || ''; night = false; icons(); wake(); partyButton(); }
+    else if (m.type === 'theater') { $('#title').textContent = m.card?.name || ''; P.series = m.card?.type === 'series'; night = false; icons(); wake(); partyButton(); }
+    else if (m.type === 'next') { $('#state').textContent = t('th_next_up', { n: m.name }); }
     else if (m.type === 'party') partyState(m.state);
     else if (m.type === 'player-state') $('#state').textContent = m.state === 'recovering' ? t('th_recovering') : m.state === 'failed' ? t('th_failed') : '';
   });
   Object.assign(P, await cmd('state') || {});
   $('#title').textContent = P.now?.card?.name || ''; draw();
   $('#close').onclick = () => cmd('close');
+  $('#skipintro').textContent = t('th_skip_intro'); $('#nextep').textContent = t('th_next_ep');
+  $('#skipintro').onclick = () => cmd('seek', { to: +$('#skipintro').dataset.to, abs: true });
+  $('#nextep').onclick = () => api.invoke('player:next');
   $('#party').onclick = async () => { const i = await api.invoke('party:info'); if (i.on && i.role === 'host') await api.invoke('party:end'); else if (!i.on) await api.invoke('party:start'); partyButton(); };
   partyButton();
   $('#play').onclick = () => cmd('toggle');

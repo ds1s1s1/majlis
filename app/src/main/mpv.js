@@ -26,7 +26,7 @@ const BASE = [
   '--network-timeout=20', '--ytdl=no', '--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
 ];
 
-const WATCHED = ['time-pos', 'duration', 'pause', 'paused-for-cache', 'demuxer-cache-duration', 'speed', 'eof-reached', 'track-list', 'volume', 'sub-delay'];
+const WATCHED = ['time-pos', 'duration', 'pause', 'paused-for-cache', 'demuxer-cache-duration', 'speed', 'eof-reached', 'track-list', 'volume', 'sub-delay', 'chapter-list', 'chapter'];
 
 class Mpv extends EventEmitter {
   constructor({ wid, exe = mpvPath(), args = [] } = {}) {

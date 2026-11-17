@@ -50,6 +50,7 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     mpv.on('prop', (name, value) => {
       toOverlay({ type: 'player', name, value });
       emit('player', { name, value });
+      if (name === 'eof-reached' && value === true && now?.type === 'series' && store.get('autoNext') !== false && (!party || party.role === 'host')) nextEpisode().catch(() => {});
       if (name === 'time-pos' && now && value > 5) {
         const p = progress(), d = mpv.props.duration || 0;
         // remember where we were (every ~5 s of film), forget it once the film's nearly done
@@ -238,6 +239,31 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   }
   ipcMain.handle('party:end', () => { if (party?.role === 'host') getHost()?.syncClose(); party = null; toOverlay({ type: 'party', state: null }); return true; });
   ipcMain.handle('party:info', () => ({ canStart: !!getHost()?.guests?.size, on: !!party, role: party?.role || null }));
+
+  // The episode after this one, best copy first: on the end of an episode (auto-next) or from
+  // the "next" button. In a party the host moves everyone along.
+  async function nextEpisode() {
+    if (!now || now.type !== 'series' || now.nexting) return null;
+    now.nexting = true;
+    try {
+      const metaId = now.card?.metaId || String(now.key).split(':')[0];
+      const { meta } = await svc.call('meta', { addons: addons(), type: 'series', id: metaId });
+      const eps = (meta.videos || []).filter((v) => v.season > 0).sort((a, b) => a.season - b.season || (a.episode ?? a.number) - (b.episode ?? b.number));
+      const i = eps.findIndex((v) => v.id === now.key);
+      const nx = i >= 0 ? eps[i + 1] : null;
+      if (!nx) return null;
+      const { streams } = await svc.call('streams', { addons: addons(), type: 'series', id: nx.id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } });
+      // the same release group as now if there is one (same subtitles timing, same quality), else the best
+      const same = streams.find((s) => now.stream?.name && s.name === now.stream.name && s.addon?.id === now.stream.addon?.id);
+      const pick = same || streams.find((s) => (s.majlis?.score ?? 0) > 0);
+      if (!pick) return null;
+      const card = { ...now.card, name: `${meta.name} · S${nx.season}E${nx.episode ?? nx.number}` };
+      toOverlay({ type: 'next', name: card.name });
+      if (party?.role === 'host') return getHost()?.syncOpen({ stream: pick, type: 'series', id: nx.id, card, pos: 0 });
+      return play({ type: 'series', id: nx.id, card, stream: pick });
+    } finally { if (now) now.nexting = false; }
+  }
+  ipcMain.handle('player:next', () => nextEpisode());
 
   ipcMain.handle('player:cmd', async (e, c) => {
     if (!mpv) return null;
