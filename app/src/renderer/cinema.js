@@ -2,7 +2,7 @@
 // play it in the theater. Rows load as they scroll into view; everything here is plain DOM.
 export function initCinema(d) {
   const { api, t, icon, esc, toast, $, $$ } = d;
-  const C = { page: 'home', rows: null, data: new Map(), detail: null, q: '', results: null, addons: null, hero: null };
+  const C = { page: 'home', rows: null, data: new Map(), detail: null, q: '', results: null, addons: null, hero: null, vote: null };
 
   const img = (u, cls = '') => (u ? `<img class="${cls}" src="${esc(u)}" loading="lazy" alt="" referrerpolicy="no-referrer">` : `<div class="${cls} noimg">${icon('film', 28)}</div>`);
   const card = (m) => `<button class="pcard" data-type="${esc(m.type)}" data-id="${esc(m.id)}" title="${esc(m.name)}">${img(m.poster, 'pimg')}<span class="pname">${esc(m.name)}</span></button>`;
@@ -31,6 +31,8 @@ export function initCinema(d) {
           <div class="row gap"><button class="btn acc" id="heroplay">${icon('play', 18)}<span>${t('cin_play')}</span></button><button class="btn" id="heroinfo">${icon('info', 18)}<span>${t('cin_more')}</span></button></div>
         </div>` : `<div class="hero-body"><h1>${t('cin_title')}</h1><p>${t('cin_loading')}</p></div>`}
       </section>
+      ${C.vote?.items?.length ? `<section class="crow vote"><h3>${t('vote_title')}</h3><div class="ctrack">${C.vote.items.map((v) => `<div class="vcard">${img(v.poster, 'pimg')}<span class="pname">${esc(v.name)}</span><span class="sub">${t('vote_count', { n: v.votes })}${v.voters.length ? ` · ${esc(v.voters.join('، '))}` : ''}</span><button class="btn sm" data-vote="${esc(v.id)}">${icon('check', 14)}<span>${t('vote_cast')}</span></button></div>`).join('')}</div>
+        ${C.vote.host ? `<div class="row gap"><button class="btn acc" id="votewin">${icon('star', 16)}<span>${t('vote_winner')}</span></button><button class="btn ghost" id="voteclear">${t('vote_clear')}</button></div>` : ''}</section>` : ''}
       ${prog.length ? `<section class="crow"><h3>${t('cin_continue')}</h3><div class="ctrack">${prog.map(([id, p]) => `<button class="pcard cont" data-type="${esc(p.meta.type)}" data-id="${esc(p.meta.metaId || id)}">${img(p.meta.poster, 'pimg')}<span class="pname">${esc(p.meta.name)}</span><i class="pbar" style="width:${Math.min(100, Math.round((p.t / (p.d || 1)) * 100))}%"></i></button>`).join('')}</div></section>` : ''}
       ${(C.rows || []).map((r, i) => `<section class="crow" data-row="${i}"><h3>${esc(r.name)} <small>${esc(r.addonName)} · ${t(r.type === 'series' ? 'cin_series' : 'cin_movies')}</small></h3><div class="ctrack">${C.data.has(i) ? C.data.get(i).map(card).join('') : '<div class="cskel"></div>'.repeat(8)}</div></section>`).join('')}
       ${C.rows && !C.rows.length ? `<p class="sub">${t('cin_no_rows')}</p>` : ''}`;
@@ -60,7 +62,7 @@ export function initCinema(d) {
             <div class="hero-meta">${[m.releaseInfo || m.year, m.runtime, m.imdbRating && `IMDb ${m.imdbRating}`, ...(m.genres || m.genre || []).slice(0, 4)].filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join('')}</div>
             <p dir="auto">${esc(m.description || '')}</p>
             ${(m.cast || []).length ? `<p class="sub">${t('cin_cast')}: ${esc(m.cast.slice(0, 8).join('، '))}</p>` : ''}
-            ${D.streams?.length ? `<button class="btn acc" id="playbest">${icon('play', 18)}<span>${t('cin_play_best')}</span></button>` : ''}
+            <div class="row gap">${D.streams?.length ? `<button class="btn acc" id="playbest">${icon('play', 18)}<span>${t('cin_play_best')}</span></button>` : ''}${C.room ? `<button class="btn" id="nominate">${icon('star', 16)}<span>${t('vote_nominate')}</span></button>` : ''}</div>
           </div>
         </div>
       </section>
@@ -157,6 +159,9 @@ export function initCinema(d) {
     if (C.page === 'home') {
       const h = $('.hero[data-id]');
       if (h) { $('#heroplay').onclick = () => open(h.dataset.type, h.dataset.id); $('#heroinfo').onclick = () => open(h.dataset.type, h.dataset.id); }
+      $$('[data-vote]').forEach((b) => (b.onclick = () => api.invoke('vote:cast', b.dataset.vote)));
+      $('#votewin') && ($('#votewin').onclick = async () => { const w = await api.invoke('vote:winner'); if (w) { toast(t('vote_won', { n: w.name })); open(w.type, w.id); } });
+      $('#voteclear') && ($('#voteclear').onclick = () => api.invoke('vote:clear'));
       const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting) { io.unobserve(e.target); loadRow(+e.target.dataset.row); } }, { root: v, rootMargin: '400px' });
       $$('.crow[data-row]').forEach((s) => { if (!C.data.has(+s.dataset.row)) io.observe(s); });
     }
@@ -165,6 +170,7 @@ export function initCinema(d) {
       $$('[data-vid]').forEach((b) => (b.onclick = () => streams(b.dataset.vid)));
       $$('[data-s]').forEach((b) => (b.onclick = () => play(C.detail.streams[+b.dataset.s])));
       $('#playbest') && ($('#playbest').onclick = () => play(C.detail.streams[0]));
+      $('#nominate') && ($('#nominate').onclick = async () => { const m = C.detail.meta; await api.invoke('vote:nominate', { id: m.id, type: m.type, name: m.name, poster: m.poster }); toast(t('vote_nominated')); });
     }
     if (C.page === 'addons') {
       $('#aadd').onclick = async () => {
@@ -188,10 +194,13 @@ export function initCinema(d) {
     }
   }
 
+  function setVote(v) { C.vote = v; if (C.page === 'home') redraw(); }
+
   async function enter() {
+    C.room = await api.invoke('vote:room').catch(() => null);
     C.progress = await api.invoke('media:progress').catch(() => ({}));
     if (!C.rows) { C.rows = await api.invoke('media:rows').catch(() => []); redraw(); }
   }
 
-  return { viewCinema: view, mountCinema: () => { mount(); enter(); }, cinemaState: C, openTitle: open, search, showAddons };
+  return { viewCinema: view, mountCinema: () => { mount(); enter(); }, cinemaState: C, openTitle: open, search, showAddons, setVote };
 }

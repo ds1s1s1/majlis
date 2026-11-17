@@ -170,6 +170,14 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   });
   ipcMain.handle('media:friends-on', (e, m) => friendsOn(m));
 
+  // tonight's vote: through the host when we are one, else through the guest link
+  const inRoom = () => (getHost()?.guests?.size ? 'host' : getGuest()?.link ? 'guest' : null);
+  ipcMain.handle('vote:nominate', (e, meta) => { const r = inRoom(); if (r === 'host') getHost().voteNominate(meta, store.get('nick')); else if (r === 'guest') getGuest().voteNominate(meta); return r; });
+  ipcMain.handle('vote:cast', (e, id) => { const r = inRoom(); if (r === 'host') getHost().voteCast(id, 'host'); else if (r === 'guest') getGuest().voteCast(id); return r; });
+  ipcMain.handle('vote:winner', () => (inRoom() === 'host' ? getHost().voteWinner() : null));
+  ipcMain.handle('vote:clear', () => { if (inRoom() === 'host') getHost().voteClear(); return true; });
+  ipcMain.handle('vote:room', () => inRoom());
+
   // what we share with friends in the room: watched / rated / in progress (no more)
   function activity() {
     if (store.get('shareActivity') === false) return null;

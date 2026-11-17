@@ -470,6 +470,8 @@ app.whenReady().then(async () => {
   // what friends have watched, both ways
   host.getActivity = guest.getActivity = () => theater.activity();
   host.on('activity', (a) => theater.saveFriend(a));
+  host.on('vote', (items) => emit('vote', { items, host: true }));
+  guest.on('vote', (items) => emit('vote', { items, host: false }));
   guest.on('activity', (a) => theater.saveFriend(a));
   guest.on('sync', (st) => theater.onSync('guest', st));
   registerShortcuts();

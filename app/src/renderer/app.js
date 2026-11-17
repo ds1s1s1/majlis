@@ -1085,6 +1085,7 @@ function handleEvent(m) {
   switch (m.type) {
     case 'registered': S.st.registered = true; S.st.publicAddr = m.publicAddr; S.st.relays = m.relays; S.via = m.via; renderStatus(); if (S.view === 'home') { const st = $('.idstatus'); if (st) render(); } break;
     case 'id-changed': refresh(); break;
+    case 'vote': cinema().setVote(m); break;
     case 'presence': S.presence = m.on; if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
     case 'knock-progress': if (m.state === 'waiting' && S.connect.state === 'knocking') { S.connect.state = 'waiting'; renderKnockLine(); } break;
     case 'knock': S.host = S.host || {}; renderRail(); if (S.st.settings.knockSound !== false) chime(); knockDialog(m); if (S.view === 'room') render(); break;

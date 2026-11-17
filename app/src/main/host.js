@@ -72,6 +72,7 @@ class Host extends EventEmitter {
     this.mode = store.get('mode') === 'watch' ? 'watch' : 'play';
     this.movie = new Movie(ffmpeg);
     this.sync = new SyncHost();
+    this.vote = []; // tonight's nominations: [{ id, type, name, poster, by, voters: [ids] }]
     this.movie.on('config', (c) => {
       for (const g of this.guests.values()) this._sendMovieConfig(g);
       if (c.rendition === 'low') return;
@@ -232,6 +233,7 @@ class Host extends EventEmitter {
     for (const s of this.cursorShapes.values()) link.ctrl({ t: 'cursor_shape', ...s });
     // a watch-together film is on: the newcomer opens it on their own line and falls in step
     if (this.sync.state) link.ctrl({ t: 'sync_state', ...this.sync.state });
+    if (this.vote.length) link.ctrl({ t: 'vote_state', items: this._voteView() });
     // what we've watched, for their title pages (if we share it)
     const act = this.getActivity?.(); if (act) link.ctrl({ t: 'activity', items: act });
     this._roster();
@@ -279,6 +281,8 @@ class Host extends EventEmitter {
       // watch together (each on their own line): requests from those who may control, and
       // everyone's buffer reports
       case 'activity': this.emit('activity', { id: g.id, name: g.nick, items: m.items }); break;
+      case 'vote_nominate': this.voteNominate(m.meta, g.nick); break;
+      case 'vote_cast': this.voteCast(m.id, g.sid); break;
       case 'sync_req': if (this._canControl(g)) this._syncSend(this.sync.request(m)); break;
       case 'sync_rep': this._syncSend(this.sync.report(g.sid, m, (id) => this.guests.get(id)?.nick || this.store.get('nick') || '')); break;
       case 'askpause': this.emit('askpause', { name: g.nick }); break;
@@ -357,6 +361,29 @@ class Host extends EventEmitter {
   }
 
   _canControl(g) { return this.store.get('watchControl') === 'all' || g.role === 'full'; }
+
+  // ---- tonight's vote: anyone nominates a title, everyone has one vote (changing it moves it),
+  // the host plays the winner. Only well-formed nominations get in (they crossed the network).
+  voteNominate(meta, by) {
+    const id = String(meta?.id || '').slice(0, 64);
+    if (!/^[\w:.-]+$/.test(id) || this.vote.some((v) => v.id === id) || this.vote.length >= 20) return;
+    this.vote.push({ id, type: meta.type === 'series' ? 'series' : 'movie', name: String(meta.name || id).slice(0, 120), poster: /^https:\/\//.test(meta.poster || '') ? String(meta.poster).slice(0, 500) : null, by: String(by || '').slice(0, 64), voters: [] });
+    this._voteSend();
+  }
+  voteCast(id, voter) {
+    for (const v of this.vote) v.voters = v.voters.filter((x) => x !== voter);
+    const v = this.vote.find((x) => x.id === id); if (v) v.voters.push(voter);
+    this._voteSend();
+  }
+  voteClear() { this.vote = []; this._voteSend(); }
+  // the most votes; a tie is settled at random (the wheel)
+  voteWinner() {
+    const top = Math.max(0, ...this.vote.map((v) => v.voters.length));
+    const tied = this.vote.filter((v) => v.voters.length === top);
+    return tied.length ? tied[Math.floor(Math.random() * tied.length)] : null;
+  }
+  _voteView() { return this.vote.map(({ voters, ...v }) => ({ ...v, votes: voters.length, voters: voters.map((s) => (s === 'host' ? this.store.get('nick') || '' : this.guests.get(s)?.nick || '')) })); }
+  _voteSend() { const items = this._voteView(); for (const g of this.guests.values()) g.link.ctrl({ t: 'vote_state', items }); this.emit('vote', items); }
 
   // ---- watch together, each viewer on their own line (cinema mode). `src` is what every viewer
   // resolves and plays themselves: { stream, type, id, card }.

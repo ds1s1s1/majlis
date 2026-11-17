@@ -107,6 +107,7 @@ class Guest extends EventEmitter {
       // watch together on our own line: the host's shared state (or the end of it)
       case 'sync_state': this.syncEpoch = m.epoch; this.emit('sync', m); break;
       case 'activity': this.emit('activity', { id: this.hostId, name: this.link?.peer?.nick, items: m.items }); break;
+      case 'vote_state': this.emit('vote', Array.isArray(m.items) ? m.items : []); break;
       case 'sync_end': this.syncEpoch = null; this.emit('sync', null); break;
       case 'mode': if (m.mode !== 'watch') this.fclock = null; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;
@@ -115,6 +116,8 @@ class Guest extends EventEmitter {
     }
   }
 
+  voteNominate(meta) { this.link?.ctrl({ t: 'vote_nominate', meta }); }
+  voteCast(id) { this.link?.ctrl({ t: 'vote_cast', id }); }
   syncRequest(r) { this.link?.ctrl({ t: 'sync_req', epoch: this.syncEpoch, ...r }); }
   syncReport(r) { this.link?.ctrl({ t: 'sync_rep', epoch: this.syncEpoch, ...r }); }
   // the host's clock, by ours (the same offset the film clock uses)

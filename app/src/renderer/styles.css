@@ -604,3 +604,7 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .fcard { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); display: flex; flex-direction: column; gap: 4px; }
 .fcard .sub { color: var(--acc); }
 .fcard p { margin: 4px 0 0; color: var(--fg-2); font-size: 13px; line-height: 1.6; unicode-bidi: plaintext; }
+
+.vote .vcard { flex: 0 0 160px; display: flex; flex-direction: column; gap: 4px; }
+.vote .vcard .btn { justify-content: center; }
+.vote .row { margin-top: 8px; }
