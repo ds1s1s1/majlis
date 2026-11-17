@@ -34,6 +34,7 @@ export const STR = {
     run_setup: 'شغّل الإعداد من جديد', next: 'التالي', ob_welcome: 'هلا بك في السينما', ob_welcome_sub: 'اختر ملفك وشكلك. تقدر تغيّر كل شي بعدين.',
     ob_bring: 'جيب اللي عندك', ob_bring_sub: 'مكتبتك وإضافاتك من Stremio، وتقييماتك من Letterboxd.', ob_watch: 'كيف تحب تشاهد', ob_watch_sub: 'الجودة والديبريد والمفاتيح. كله اختياري.',
     ob_skip_all: 'تخطّ', ob_start: 'يلا نبدأ',
+    tracker_sub: 'يسجّل اللي تشوفه ويجيب سجلك', enter_code: 'اكتب الرمز {code} في الصفحة', import_history: 'جيب السجل', open_page: 'افتح الصفحة', connect: 'اربط',
     dl_queued: 'بالانتظار', dl_downloading: 'ينزل', dl_paused: 'موقف', dl_done: 'جاهز', dl_failed: 'فشل', pause: 'وقّف', resume_dl: 'كمّل', delete_file_q: 'تحذف الملف من الجهاز بعد؟',
   },
   en: {
@@ -70,6 +71,7 @@ export const STR = {
     run_setup: 'Run setup again', next: 'Next', ob_welcome: 'Welcome to the cinema', ob_welcome_sub: 'Pick your profile and look. All of it can change later.',
     ob_bring: 'Bring what you have', ob_bring_sub: 'Your library and addons from Stremio, your ratings from Letterboxd.', ob_watch: 'How you like to watch', ob_watch_sub: 'Quality, debrid and keys. All optional.',
     ob_skip_all: 'Skip', ob_start: "Let's go",
+    tracker_sub: 'Scrobbles what you watch and brings your history', enter_code: 'Enter {code} on the page', import_history: 'Import history', open_page: 'Open page', connect: 'Connect',
     dl_queued: 'Queued', dl_downloading: 'Downloading', dl_paused: 'Paused', dl_done: 'Ready', dl_failed: 'Failed', pause: 'Pause', resume_dl: 'Resume', delete_file_q: 'Delete the file from this computer too?',
   },
 } as const;

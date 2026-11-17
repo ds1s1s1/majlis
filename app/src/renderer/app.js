@@ -1103,6 +1103,7 @@ function handleEvent(m) {
     case 'vote': cinema().setVote(m); break;
     case 'theater': if (!m.open) MEDIA?.refresh(); break;
     case 'downloads': MEDIA?.refresh('downloads'); break;
+    case 'trackers': MEDIA?.refresh('trackers'); break;
     case 'presence': S.presence = m.on; if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
     case 'knock-progress': if (m.state === 'waiting' && S.connect.state === 'knocking') { S.connect.state = 'waiting'; renderKnockLine(); } break;
     case 'knock': S.host = S.host || {}; renderRail(); if (S.st.settings.knockSound !== false) chime(); knockDialog(m); if (S.view === 'room') render(); break;

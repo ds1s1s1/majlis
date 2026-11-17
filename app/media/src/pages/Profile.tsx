@@ -122,10 +122,12 @@ export function LookSection() {
   );
 }
 
-// Stremio account, Letterboxd export
+// Stremio account, Letterboxd export, Trakt and Simkl
 export function AccountsSection() {
   const t = useT(), { toast } = useHost(), qc = useQueryClient();
   const caps = useCaps().data;
+  type TS = Record<'trakt' | 'simkl', 'on' | { code: string; url: string } | null>;
+  const trk = useQuery({ queryKey: ['trackers'], queryFn: () => cin<TS>('trackers'), refetchInterval: (q) => (Object.values(q.state.data || {}).some((x) => x && x !== 'on') ? 3000 : false) }).data;
   const [busy, setBusy] = useState<string | null>(null);
   const run = async (what: string, fn: () => Promise<string | void>) => {
     setBusy(what);
@@ -141,6 +143,19 @@ export function AccountsSection() {
             <Pill ghost onClick={() => run('out', async () => { await cin('stremio-logout'); })}>{t('sign_out')}</Pill>
           </>) : <Pill busy={busy === 'in'} onClick={() => run('in', async () => { await cin('stremio-login', {}); const r = await cin<{ pulled: number }>('stremio-sync', { addons: true }); return t('synced', { a: r.pulled, b: 0 }); })}>{t('sign_in_browser')}</Pill>}
         </Card>
+        {(['trakt', 'simkl'] as const).map((svc) => {
+          const s = trk?.[svc];
+          return (
+            <Card key={svc} logo={svc === 'trakt' ? 'T' : 'S'} color={svc === 'trakt' ? '#ed1c24' : '#0b0f10'} title={svc === 'trakt' ? 'Trakt' : 'Simkl'}
+              sub={s === 'on' ? t('connected') : s ? t('enter_code', { code: s.code }) : t('tracker_sub')}>
+              {s === 'on' ? (<>
+                <Pill busy={busy === `${svc}i`} onClick={() => run(`${svc}i`, async () => t('imported_n', { n: await cin<number>('tracker-import') }))}>{t('import_history')}</Pill>
+                <Pill ghost onClick={() => run(`${svc}o`, async () => { await cin('tracker-out', { svc }); })}>{t('sign_out')}</Pill>
+              </>) : s ? <Pill ghost onClick={() => invoke('open', s.url)}>{t('open_page')}</Pill>
+                : <Pill busy={busy === svc} onClick={() => run(svc, async () => { await cin('tracker-start', { svc }); })}>{t('connect')}</Pill>}
+            </Card>
+          );
+        })}
         <Card logo="L" color="#00c030" title="Letterboxd" sub={t('letterboxd_sub')}>
           <Pill busy={busy === 'lb'} onClick={() => run('lb', async () => { const r = await invoke<{ films: number } | null>('media:letterboxd-import'); return r ? t('imported_n', { n: r.films }) : undefined; })}>{t('import_zip')}</Pill>
         </Card>

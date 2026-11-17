@@ -15,6 +15,7 @@ const store = require('./store-api');
 const { StremioAccount, loginInBrowser } = require('./stremio-sync');
 const debrid = require('./debrid');
 const { Downloads } = require('./downloads');
+const { Trackers } = require('./trackers');
 const { DEFAULT_ADDONS } = require('../mediasvc');
 
 // build-config.json (private builds only): { mediaKeys: { tmdb, trakt, ... } } as the built-in fallback
@@ -210,6 +211,16 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     return out;
   });
 
+  // ---- Trakt / Simkl (per profile; sign-ins through the Majlis server)
+  const trackers = new Trackers({
+    server: () => { const s = String(st.get('server') || ''); return /^https:\/\//i.test(s) ? s.replace(/\/+$/, '') : null; },
+    accessKey: () => st.get('accessKey'), get: pget, set: pset, protect: (b) => st._protect(b), unprotect: (s) => st._unprotect(s), openExternal,
+  });
+  h('trackers', () => trackers.status());
+  h('tracker-start', ({ svc }) => trackers.start(svc, () => emit('trackers', {})));
+  h('tracker-out', ({ svc }) => { trackers.signOut(svc); return true; });
+  h('tracker-import', () => trackers.importInto(library()));
+
   // ---- profiles and preferences
   // the look is per profile ({ avatar, accent, theme }); playback and debrid choices are per machine
   const GLOBAL = { mediaMaxHeight: 'number', mediaVsr: 'boolean', debridService: 'string', debridOnly: 'boolean', autoNext: 'boolean', subLang2: 'string', cinemaOnboarded: 'boolean' };
@@ -263,7 +274,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
   // for the player (theater.js): progress into the library
   // a finished download's file, for the player (by id: the page never hands mpv a path)
   const downloadFile = (id) => { const d = downloads.items.find((x) => x.id === id && x.state === 'done'); return d?.file && fs.existsSync(d.file) ? d.file : null; };
-  return { library, client, meta, addons, streams, subtitles, skips, debrid: debridService, downloadFile, flush: () => { for (const l of libs.values()) l.flush(); downloads.save(true); } };
+  return { library, client, meta, addons, streams, subtitles, skips, debrid: debridService, downloadFile, scrobble: (a, x, p) => trackers.scrobble(a, x, p), flush: () => { for (const l of libs.values()) l.flush(); downloads.save(true); } };
 }
 
 module.exports = { setup };

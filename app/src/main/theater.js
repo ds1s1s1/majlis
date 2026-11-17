@@ -57,8 +57,10 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     mpv.on('ready', async () => { try { film = Number(await mpv.get('window-id')); fit(); } catch {} });
     mpv.on('prop', (name, value) => {
       if (name === 'duration' && value && shown) { fit(); setTimeout(fit, 500); }
+      if (name === 'pause' && now?.scrobbled) scrob(value ? 'pause' : 'start');
       if (name === 'duration' && value && now && !now.skipsAsked && getMediaHub()) {
         now.skipsAsked = true;
+        now.scrobbled = true; scrob('start');
         const key = now.key;
         getMediaHub().skips(key, value).then((list) => { if (now?.key === key && list.length) toOverlay({ type: 'skips', list }); }).catch(() => {});
       }
@@ -93,7 +95,15 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   // place it again then, and a few times while it settles; each pass also raises the controls
   function show() { shown = true; overlay.show(); fit(); overlay.focus(); for (const ms of [300, 1000, 2500]) setTimeout(fit, ms); }
 
+  // Trakt / Simkl see what's on (progress in %)
+  function scrob(action) {
+    if (!now?.card?.metaId || !mpv?.props) return;
+    const d = mpv.props.duration || 0, p = mpv.props['time-pos'] || 0;
+    getMediaHub()?.scrobble(action, { type: now.type, metaId: now.card.metaId, videoId: now.key }, d ? Math.round((p / d) * 1000) / 10 : 0);
+  }
+
   function close() {
+    if (now?.scrobbled) scrob('stop');
     if (party?.role === 'host') getHost()?.syncClose();
     party = null;
     if (mpv) mpv.command('stop').catch(() => {});

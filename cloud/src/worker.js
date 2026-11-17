@@ -10,6 +10,28 @@ const isCode = (s) => typeof s === 'string' && /^\d{6}$/.test(s);
 const enc = new TextEncoder();
 const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
+// Media center sign-ins. Client ids are public; the secrets stay here (wrangler secret put
+// TRAKT_SECRET; TRAKT_ID and SIMKL_ID as vars or secrets). The app never sees a secret.
+async function oauth(req, env, url) {
+  if (env.ACCESS_KEY && url.searchParams.get('k') !== env.ACCESS_KEY) return json({ error: 'forbidden' }, 403);
+  const p = url.pathname;
+  if (p === '/oauth/config') return json({ trakt: env.TRAKT_ID || null, simkl: env.SIMKL_ID || null });
+  if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
+  if (!p.startsWith('/oauth/trakt/')) return json({ error: 'not found' }, 404);
+  if (!env.TRAKT_ID || !env.TRAKT_SECRET) return json({ error: 'Trakt is not set up on this server' }, 501);
+  const b = await req.json().catch(() => ({}));
+  const trakt = async (path, body) => {
+    const r = await fetch(`https://api.trakt.tv${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Majlis' }, body: JSON.stringify(body) });
+    // Trakt's status codes carry the meaning while polling (400 pending, 429 slow down, 410 expired, 418 denied)
+    return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  };
+  const id = env.TRAKT_ID, secret = env.TRAKT_SECRET;
+  if (p === '/oauth/trakt/device') return trakt('/oauth/device/code', { client_id: id });
+  if (p === '/oauth/trakt/poll') return trakt('/oauth/device/token', { code: String(b.code || ''), client_id: id, client_secret: secret });
+  if (p === '/oauth/trakt/refresh') return trakt('/oauth/token', { refresh_token: String(b.refresh_token || ''), client_id: id, client_secret: secret, redirect_uri: 'urn:ietf:wg:oauth:2.0:oob', grant_type: 'refresh_token' });
+  return json({ error: 'not found' }, 404);
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -27,6 +49,7 @@ export default {
       return json({ bytes, ms: Date.now() - t0, colo: req.cf?.colo });
     }
     if (url.pathname === '/health') return new Response('ok');
+    if (url.pathname.startsWith('/oauth/')) return oauth(req, env, url);
     const m = url.pathname.match(/^\/(j|c)\/(\d{6}|\d{9})$/);
     if (m) {
       const t = m[2];
