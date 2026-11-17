@@ -14,7 +14,7 @@ const imp = require('./imports');
 
 const NIGHT = '@night:dynaudnorm=f=150:g=15:p=0.9';
 
-function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, getGuest }) {
+function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, getGuest, getMediaHub = () => null }) {
   const svc = new MediaService();
   let overlay = null, mpv = null, now = null, film = 0, shown = false; // now: what's on; film: mpv's window
   const hwnd = (bw) => Number(bw.getNativeWindowHandle().readBigUInt64LE(0));
@@ -58,6 +58,16 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
       toOverlay({ type: 'player', name, value });
       emit('player', { name, value });
       if (name === 'eof-reached' && value === true && now?.type === 'series' && store.get('autoNext') !== false && (!party || party.role === 'host')) nextEpisode().catch(() => {});
+      if (name === 'time-pos' && now && getMediaHub() && now.card?.metaId) {
+        const step = value - (now.libAt ?? value);
+        if (now.libAt == null || Math.abs(step) >= 5) {
+          const d = mpv.props.duration || 0;
+          const m = { id: now.card.metaId, type: now.type, name: now.card.seriesName || now.card.name, poster: now.card.poster || null };
+          // a jump (seek) isn't time watched
+          getMediaHub().library().progress(m, now.key, value * 1000, d * 1000, step > 0 && step < 30 ? step * 1000 : 0);
+          now.libAt = value;
+        }
+      }
       if (name === 'time-pos' && now && value > 5) {
         const p = progress(), d = mpv.props.duration || 0;
         // remember where we were (every ~5 s of film), forget it once the film's nearly done
@@ -81,6 +91,8 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     party = null;
     if (mpv) mpv.command('stop').catch(() => {});
     if (now?.infoHash) svc.call('stop', { infoHash: now.infoHash }).catch(() => {});
+    // shortcut: no next-episode id here, so leaving in the credits only resets the position (Stremio moves to the next episode)
+    if (now?.card?.metaId) getMediaHub()?.library().stopped({ id: now.card.metaId, type: now.type }, null);
     now = null;
     shown = false; fit();
     if (overlay && !overlay.isDestroyed()) overlay.hide();

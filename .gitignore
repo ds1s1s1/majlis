@@ -12,3 +12,4 @@ engine/target/
 engine/vendor/
 app/native/
 helper/
+app/src/renderer/media/

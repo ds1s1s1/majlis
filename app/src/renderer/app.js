@@ -110,8 +110,21 @@ const PAL = initPalette({ t, icon, esc, commands: () => [
   { id: 'cinema-search-run', when: false, run: (q) => { go('cinema'); cinema().search(q); } },
 ] });
 
+// Cinema is the React app in media/ (built into renderer/media): mounted once into its own node
+// and only hidden when you leave, so its pages, scroll and loaded rows are there when you come back.
+let MEDIA = null;
+const mediaHost = () => ({ lang: getLang(), theme: S.st?.settings?.cinemaTheme || 'majlis', toast, leave: () => go('home') });
+async function showMedia() {
+  document.body.classList.add('cin-on'); $('#cinRoot').hidden = false;
+  if (MEDIA) { MEDIA.update(mediaHost()); return; }
+  try { MEDIA = (await import('./media/cinema.js')).mount($('#cinRoot'), mediaHost()); }
+  catch (e) { toast(e.message); }
+}
+function hideMedia() { document.body.classList.remove('cin-on'); $('#cinRoot').hidden = true; }
+
 function render() {
-  if (S.view === 'cinema') { $('#view').innerHTML = cinema().viewCinema(); CIN.mountCinema(); return; }
+  if (S.view === 'cinema') { showMedia(); return; }
+  hideMedia();
   const fn = { home: viewHome, room: viewRoom, net: viewNet, lib: viewLib, set: viewSettings }[S.view];
   $('#view').innerHTML = fn();
   ({ home: mountHome, room: mountRoom, net: mountNet, lib: mountLib, set: mountSettings }[S.view])?.();
@@ -820,6 +833,7 @@ function applyLook() {
   document.documentElement.dataset.theme = s.theme === 'light' ? 'light' : 'dark';
   setLang(s.lang);
   $$('[data-t]').forEach((el) => (el.textContent = t(el.dataset.t)));
+  MEDIA?.update(mediaHost());
 }
 
 // ========================================================================= STAGE (guest)
@@ -1087,6 +1101,7 @@ function handleEvent(m) {
     case 'registered': S.st.registered = true; S.st.publicAddr = m.publicAddr; S.st.relays = m.relays; S.via = m.via; renderStatus(); if (S.view === 'home') { const st = $('.idstatus'); if (st) render(); } break;
     case 'id-changed': refresh(); break;
     case 'vote': cinema().setVote(m); break;
+    case 'theater': if (!m.open) MEDIA?.refresh(); break;
     case 'presence': S.presence = m.on; if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
     case 'knock-progress': if (m.state === 'waiting' && S.connect.state === 'knocking') { S.connect.state = 'waiting'; renderKnockLine(); } break;
     case 'knock': S.host = S.host || {}; renderRail(); if (S.st.settings.knockSound !== false) chime(); knockDialog(m); if (S.view === 'room') render(); break;
@@ -1195,7 +1210,7 @@ setInterval(() => {
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
   // test aid: open a title in cinema mode straight away (type:id)
-  if (q.get('title')) { go('cinema'); const [ty, ...id] = q.get('title').split(':'); setTimeout(() => CIN?.openTitle(ty, id.join(':')), 500); }
+  if (q.get('title')) { go('cinema'); const [ty, ...id] = q.get('title').split(':'); setTimeout(() => MEDIA?.open({ kind: 'title', type: ty, id: id.join(':') }), 1500); }
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);
   if (q.get('pal')) setTimeout(() => { PAL.open(); const i = document.querySelector('.pal-q input'); if (i) { i.value = q.get('pal'); i.dispatchEvent(new Event('input')); } }, 1200);
   // test aid: the host opens its own view of the film once it's playing
