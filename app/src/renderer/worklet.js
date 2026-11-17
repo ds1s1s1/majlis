@@ -42,6 +42,7 @@ class Mixer extends AudioWorkletProcessor {
       } else if (m.t === 'gain') { this.gain = { ...this.gain, ...m.g }; if (m.per) this.per = { ...this.per, ...m.per }; }
       else if (m.t === 'target') this.target = Math.round(48000 * m.ms / 1000);
       else if (m.t === 'duck') this.duck = !!m.on;
+      else if (m.t === 'spatial') this.spatial = !!m.on;
       // diagnostics: corrections and underruns of the film/game ring since the last ask
       else if (m.t === 'astat') { const g = this.rings.get('game'); this.port.postMessage({ t: 'astat', fix: g?.fix || 0, under: this.under || 0, avail: g?.avail || 0 }); if (g) g.fix = 0; this.under = 0; }
       else if (m.t === 'flush') { const r = this.rings.get(m.k); if (r) { r.rd = r.w; r.started = false; } }
@@ -58,8 +59,11 @@ class Mixer extends AudioWorkletProcessor {
       const target = k === 'game' ? this.target : 48000 * 0.04;
       if (!ring.started) { if (ring.avail < target) continue; ring.started = true; }
       const g = k === 'game' ? this.gain.game * this.duckLevel : this.gain.voice * (this.per[k] ?? 1);
+      // spatial voice: speaker 1..4 sit from left to right (equal-power pan), so you hear who talks
+      const n0 = k === 'game' || !this.spatial ? -1 : (parseInt(k.slice(1), 10) || 1) - 1;
+      const pan = n0 < 0 ? 0 : ((n0 % 4) - 1.5) * 0.4, gl = g * Math.cos((pan + 1) * Math.PI / 4) * Math.SQRT2, gr = g * Math.sin((pan + 1) * Math.PI / 4) * Math.SQRT2;
       const n = Math.min(L.length, ring.avail);
-      for (let i = 0; i < n; i++) { L[i] += ring.l[ring.rd] * g; R[i] += ring.r[ring.rd] * g; ring.rd = (ring.rd + 1) % ring.size; }
+      for (let i = 0; i < n; i++) { L[i] += ring.l[ring.rd] * gl; R[i] += ring.r[ring.rd] * gr; ring.rd = (ring.rd + 1) % ring.size; }
       if (n < L.length) { ring.started = false; if (k === 'game') this.under = (this.under || 0) + 1; } // underrun: rebuild a small cushion
     }
     return true;

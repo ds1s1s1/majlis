@@ -101,6 +101,14 @@ function partyState(s) {
   partyButton();
 }
 
+let saidT = 0;
+async function said() {
+  const s = await cmd('sub-text');
+  const el = $('#said');
+  el.textContent = s || t('th_said_none'); el.hidden = false;
+  clearTimeout(saidT); saidT = setTimeout(() => (el.hidden = true), 4500);
+}
+
 async function init() {
   const st = await api.invoke('state');
   setLang(st.settings?.lang);
@@ -116,6 +124,8 @@ async function init() {
   Object.assign(P, await cmd('state') || {});
   $('#title').textContent = P.now?.card?.name || ''; draw();
   $('#close').onclick = () => cmd('close');
+  $('#said-btn').innerHTML = icon('chat', 22); $('#said-btn').title = t('th_said');
+  $('#said-btn').onclick = said;
   $('#skipintro').textContent = t('th_skip_intro'); $('#nextep').textContent = t('th_next_ep');
   $('#skipintro').onclick = () => cmd('seek', { to: +$('#skipintro').dataset.to, abs: true });
   $('#nextep').onclick = () => api.invoke('player:next');
@@ -146,7 +156,7 @@ async function init() {
       arrowup: () => { const v = Math.min(150, +$('#volume').value + 5); $('#volume').value = v; cmd('volume', { v }); },
       arrowdown: () => { const v = Math.max(0, +$('#volume').value - 5); $('#volume').value = v; cmd('volume', { v }); },
       f: () => cmd('fullscreen'), m: () => cmd('mute'), n: () => $('#night').onclick(),
-      z: () => cmd('sub-delay', { d: -0.1 }), x: () => cmd('sub-delay', { d: 0.1 }), c: () => subsMenu(), a: () => audioMenu(),
+      w: () => said(), z: () => cmd('sub-delay', { d: -0.1 }), x: () => cmd('sub-delay', { d: 0.1 }), c: () => subsMenu(), a: () => audioMenu(),
       escape: () => { if (!$('#menu').hidden) $('#menu').hidden = true; else cmd('close'); },
     }[k];
     if (act) { e.preventDefault(); act(); wake(); }

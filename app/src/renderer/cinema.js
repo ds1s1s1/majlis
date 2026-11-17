@@ -69,7 +69,7 @@ export function initCinema(d) {
       </section>
       ${D.friends?.length ? `<section class="crow"><h3>${t('cin_friends_saw')}</h3><div class="flist2">${D.friends.map((f) => `<div class="fcard"><b>${esc(f.name)}</b>
         <span class="sub">${f.rating ? '★'.repeat(Math.round(f.rating)) + (f.rating % 1 ? '½' : '') : f.watched ? t('cin_friend_watched') : f.progress != null ? t('cin_friend_progress', { p: f.progress }) : ''}</span>
-        ${f.review ? `<p dir="auto">${esc(f.review.slice(0, 400))}</p>` : ''}</div>`).join('')}</div></section>` : ''}
+        ${f.review ? `<p dir="auto" class="spoiler" title="${esc(t('cin_spoiler'))}">${esc(f.review.slice(0, 400))}</p>` : ''}</div>`).join('')}</div></section>` : ''}
       ${seasons.length ? `<section class="crow"><div class="seg">${seasons.map((s) => `<button data-season="${s}" class="${s === D.season ? 'on' : ''}">${s === 0 ? t('cin_specials') : `${t('cin_season')} ${s}`}</button>`).join('')}</div>
         <div class="eplist">${eps.map((v) => `<button class="ep ${v.id === D.video ? 'on' : ''}" data-vid="${esc(v.id)}">${img(v.thumbnail, 'epimg')}<span><b>${v.episode ?? v.number ?? ''}. ${esc(v.name || v.title || '')}</b><small>${esc((v.overview || v.description || '').slice(0, 140))}</small></span></button>`).join('')}</div></section>` : ''}
       <section class="crow"><h3>${t('cin_streams')}</h3>
@@ -182,6 +182,7 @@ export function initCinema(d) {
       $$('[data-vid]').forEach((b) => (b.onclick = () => streams(b.dataset.vid)));
       $$('[data-s]').forEach((b) => (b.onclick = () => play(C.detail.streams[+b.dataset.s])));
       $('#playbest') && ($('#playbest').onclick = () => play(C.detail.streams[0]));
+      $$('.spoiler').forEach((p) => (p.onclick = () => p.classList.add('shown')));
       $('#nominate') && ($('#nominate').onclick = async () => { const m = C.detail.meta; await api.invoke('vote:nominate', { id: m.id, type: m.type, name: m.name, poster: m.poster }); toast(t('vote_nominated')); });
     }
     if (C.page === 'addons') {

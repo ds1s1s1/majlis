@@ -304,6 +304,7 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
       case 'sub-scale': return mpv.set('sub-scale', c.v);
       case 'sub-pos': return mpv.set('sub-pos', c.v);
       case 'night': return mpv.command('af', 'toggle', NIGHT);
+      case 'sub-text': return mpv.get('sub-text').catch(() => '');
       case 'sub-file': return mpv.command('sub-add', c.path, 'select');
       case 'fullscreen': { const w = getWin(); w.setFullScreen(!w.isFullScreen()); return w.isFullScreen(); }
       case 'close': close(); return true;

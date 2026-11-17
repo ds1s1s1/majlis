@@ -53,6 +53,7 @@ const DEFAULTS = {
   nightAudio: false,
   autoNext: true,
   autoDuck: true,
+  spatialVoice: true,     // friends' voices placed left to right
   allowChat: true,
   noVsync: false,
   maxRes: 'source',        // source | 720 | 1080 | 1440

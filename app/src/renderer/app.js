@@ -753,6 +753,7 @@ function viewSettings() {
     <section class="sgroup"><h2>${t('set_privacy')}</h2><div class="rows">
       ${row(t('share_status'), sw('shareStatus'), t('share_status_sub'))}
       ${row(t('share_activity'), sw('shareActivity'), t('share_activity_sub'))}
+      ${row(t('spatial_voice'), sw('spatialVoice'), t('spatial_voice_sub'))}
       ${row(t('accept_codes'), sw('acceptCodes'), t('temp_code_hint'))}
     </div></section>
 

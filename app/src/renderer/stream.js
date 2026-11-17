@@ -397,6 +397,7 @@ export class Player {
     this.mixer.port.onmessage = (e) => { if (e.data.t === 'astat') this.astat = e.data; };
     this.setVolumes(this.settings.gameVol ?? 1, this.settings.voiceVol ?? 1);
     this.mixer.port.postMessage({ t: 'duck', on: this.settings.autoDuck !== false });
+    this.mixer.port.postMessage({ t: 'spatial', on: this.settings.spatialVoice !== false });
     this.mixer.port.postMessage({ t: 'target', ms: this._mixTarget() });
     this.adec = new AudioDecoder({ output: (d) => { const meta = this.ameta.shift(); this._pcm('game', d, meta ? this._audioWant(meta) : null); }, error: () => {} });
     this.adec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });

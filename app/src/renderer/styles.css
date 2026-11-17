@@ -616,3 +616,7 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .profs { padding: 10px; }
 .profs h3 { margin: 6px 10px 10px; }
 .profs .plist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+
+.spoiler { filter: blur(6px); cursor: pointer; transition: filter .2s; }
+.spoiler.shown { filter: none; cursor: auto; }
+.th-said { position: absolute; inset-inline: 10%; bottom: 150px; text-align: center; font-size: 34px; font-weight: 600; line-height: 1.5; text-shadow: 0 2px 12px #000, 0 0 3px #000; unicode-bidi: plaintext; }
