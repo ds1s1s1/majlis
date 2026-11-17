@@ -33,7 +33,7 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 if (process.defaultApp) app.setAsDefaultProtocolClient('majlis', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('majlis');
 
-let win, store, net, helper, engine, host, guest, replay, port, theater, discord;
+let win, store, net, helper, engine, host, guest, replay, port, theater, discord, mediaHub;
 let encoders = [];
 process.on('uncaughtException', (err) => {
   try {
@@ -451,6 +451,7 @@ app.whenReady().then(async () => {
   handlers();
   createWindow();
   theater = require('./theater').setup({ getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
+  mediaHub = require('./media/hub').setup({ store, dataDir: app.getPath('userData'), openExternal: (u) => shell.openExternal(u) });
   // Discord: our profile shows what we're watching / hosting; a friend's "Join" there knocks here
   const dcId = store.get('discordClientId');
   if (/^\d{15,22}$/.test(String(dcId || ''))) {
@@ -578,6 +579,6 @@ app.on('open-url', (e, url) => { const l = deepLink([url]); if (l) emit('deeplin
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); discord?.stop(); } catch {}
+  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); discord?.stop(); mediaHub?.flush(); } catch {}
   try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
 });
