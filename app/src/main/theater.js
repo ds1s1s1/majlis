@@ -50,11 +50,18 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     await overlay.loadFile(path.join(rendererDir, 'theater.html'));
     for (const ev of ['move', 'resize', 'enter-full-screen', 'leave-full-screen', 'maximize', 'unmaximize', 'restore', 'minimize']) w.on(ev, fit);
     // a borderless mpv window with no taskbar button of its own, parked until placed
-    mpv = new Mpv({ args: ['--border=no', '--title=Majlis film', '--taskbar-progress=no', '--snap-window=no', '--window-dragging=no', '--auto-window-resize=no', '--keepaspect-window=no', '--geometry=1x1+-32000+-32000'] });
+    // RTX Video Super Resolution / the GPU's own upscaler, when switched on in settings
+    const vsr = store.get('mediaVsr') ? ['--vf=d3d11vpp=scale=2:scaler=nvidia'] : [];
+    mpv = new Mpv({ args: [...vsr, '--border=no', '--title=Majlis film', '--taskbar-progress=no', '--snap-window=no', '--window-dragging=no', '--auto-window-resize=no', '--keepaspect-window=no', '--geometry=1x1+-32000+-32000'] });
     // every (re)start of mpv is a new window: take it over again
     mpv.on('ready', async () => { try { film = Number(await mpv.get('window-id')); fit(); } catch {} });
     mpv.on('prop', (name, value) => {
       if (name === 'duration' && value && shown) { fit(); setTimeout(fit, 500); }
+      if (name === 'duration' && value && now && !now.skipsAsked && getMediaHub()) {
+        now.skipsAsked = true;
+        const key = now.key;
+        getMediaHub().skips(key, value).then((list) => { if (now?.key === key && list.length) toOverlay({ type: 'skips', list }); }).catch(() => {});
+      }
       toOverlay({ type: 'player', name, value });
       emit('player', { name, value });
       if (name === 'eof-reached' && value === true && now?.type === 'series' && store.get('autoNext') !== false && (!party || party.role === 'host')) nextEpisode().catch(() => {});
@@ -102,12 +109,23 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
 
   // the URL mpv opens and the per-file options it needs
   async function resolve(stream) {
+    if (stream.majlisDownload) {
+      const f = getMediaHub()?.downloadFile(stream.majlisDownload);
+      if (!f) throw new Error('the downloaded file is gone');
+      return { url: f, opts: {} };
+    }
     if (stream.url && /^https?:/.test(stream.url)) {
       const h = stream.behaviorHints?.proxyHeaders?.request || {};
       const opts = {};
       const hs = Object.entries(h).map(([k, v]) => `${k}: ${v}`.replace(/,/g, '\\,'));
       if (hs.length) opts['http-header-fields'] = hs.join(',');
       return { url: stream.url, opts };
+    }
+    // a debrid key turns the torrent into a direct link when the service has it; else BitTorrent
+    const deb = stream.infoHash ? getMediaHub()?.debrid() : null;
+    if (deb) {
+      try { const d = await deb.resolve(stream); return { url: d.url, opts: {}, debrid: deb.name }; }
+      catch (e) { toOverlay({ type: 'player-state', state: 'debrid-miss', detail: e.message }); }
     }
     if (stream.infoHash) {
       const r = await svc.call('play', { infoHash: stream.infoHash, fileIdx: stream.fileIdx ?? 0, sources: stream.sources || [] });
@@ -119,7 +137,10 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   // Arabic first, then the user's other language, then English: added in that order, first selected
   async function subtitles(type, id) {
     try {
-      const r = await svc.call('subtitles', { addons: addons(), type, id });
+      const hub = getMediaHub();
+      const bh = now?.stream?.behaviorHints || {};
+      const extra = [['videoHash', bh.videoHash], ['videoSize', bh.videoSize], ['filename', bh.filename]].filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]);
+      const r = hub ? { subtitles: await hub.subtitles({ type, id, extra }) } : await svc.call('subtitles', { addons: addons(), type, id });
       const pref = ['ara', 'ar', store.get('subLang2') || 'eng', 'en'];
       const pick = [];
       for (const l of pref) for (const s of r.subtitles || []) if (s.lang === l && pick.length < 6 && !pick.includes(s)) pick.push(s);
@@ -242,11 +263,11 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
 
   // { type, id (the video: tt..:s:e for an episode), card (poster/name for "continue watching"), stream }
   ipcMain.handle('media:play', (e, x) => play(x));
-  async function play({ type, id, card, stream, pos }) {
+  async function play({ type, id, card, stream, pos, addon }) {
     await windows();
     const r = await resolve(stream);
     const p = progress()[id];
-    now = { key: id, card, stream, infoHash: r.infoHash, type };
+    now = { key: id, card, stream, infoHash: r.infoHash, type, addon: addon || null };
     const opts = { ...r.opts, 'force-media-title': (card?.name || '').replace(/,/g, ' ') };
     if (pos != null) opts.start = String(pos / 1000);
     else if (p?.t) opts.start = String(Math.max(0, p.t - 3));
@@ -282,15 +303,27 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
       const i = eps.findIndex((v) => v.id === now.key);
       const nx = i >= 0 ? eps[i + 1] : null;
       if (!nx) return null;
-      const { streams } = await svc.call('streams', { addons: addons(), type: 'series', id: nx.id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } });
-      // the same release group as now if there is one (same subtitles timing, same quality), else the best
-      const same = streams.find((s) => now.stream?.name && s.name === now.stream.name && s.addon?.id === now.stream.addon?.id);
-      const pick = same || streams.find((s) => (s.majlis?.score ?? 0) > 0);
+      // stremio-core's rule: the next video from the same addon, same bingeGroup (same release:
+      // same subtitle timing, same quality); else the best ranked copy from all addons
+      const hub = getMediaHub(), bg = now.stream?.behaviorHints?.bingeGroup;
+      let pick = null, addon = now.addon;
+      if (hub && addon && bg) {
+        const r = await hub.client.request(addon, { resource: 'stream', type: 'series', id: nx.id }).catch(() => null);
+        pick = r?.streams.find((s) => s.behaviorHints?.bingeGroup === bg) || null;
+      }
+      if (!pick && hub) {
+        const best = (await hub.streams({ type: 'series', id: nx.id, bingeGroup: bg })).streams.find((x) => x.tier > 0);
+        pick = best?.stream || null; addon = best?.addon.url || null;
+      }
+      if (!pick && !hub) {
+        const { streams } = await svc.call('streams', { addons: addons(), type: 'series', id: nx.id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } });
+        pick = streams.find((s) => (s.majlis?.score ?? 0) > 0) || null;
+      }
       if (!pick) return null;
       const card = { ...now.card, name: `${meta.name} · S${nx.season}E${nx.episode ?? nx.number}` };
       toOverlay({ type: 'next', name: card.name });
       if (party?.role === 'host') return getHost()?.syncOpen({ stream: pick, type: 'series', id: nx.id, card, pos: 0 });
-      return play({ type: 'series', id: nx.id, card, stream: pick });
+      return play({ type: 'series', id: nx.id, card, stream: pick, addon });
     } finally { if (now) now.nexting = false; }
   }
   ipcMain.handle('player:next', () => nextEpisode());

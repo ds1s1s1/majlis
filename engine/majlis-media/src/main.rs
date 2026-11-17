@@ -98,6 +98,28 @@ async fn stop(State(a): S, Path(k): Path<String>, Json(b): Json<Stop>) -> Respon
     match a.torrents.stop(&b.info_hash).await { Ok(()) => Json(json!({ "ok": true })).into_response(), Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e) }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Download { info_hash: String, #[serde(default)] file_idx: usize, #[serde(default)] sources: Vec<String>, folder: String }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Cancel { info_hash: String, #[serde(default)] file_idx: usize, #[serde(default)] delete: bool }
+
+async fn download(State(a): S, Path(k): Path<String>, Json(b): Json<Download>) -> Response {
+    if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
+    match a.torrents.download(&b.info_hash, b.file_idx, &b.sources, &b.folder).await { Ok(()) => Json(json!({ "ok": true })).into_response(), Err(e) => err(StatusCode::BAD_GATEWAY, e) }
+}
+
+async fn cancel(State(a): S, Path(k): Path<String>, Json(b): Json<Cancel>) -> Response {
+    if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
+    match a.torrents.cancel_download(&b.info_hash, b.file_idx, b.delete).await { Ok(()) => Json(json!({ "ok": true })).into_response(), Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e) }
+}
+
+async fn downloads(State(a): S, Path(k): Path<String>) -> Response {
+    if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
+    Json(a.torrents.download_stats().await).into_response()
+}
+
 async fn stats(State(a): S, Path(k): Path<String>) -> Response {
     if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
     Json(a.torrents.stats().await).into_response()
@@ -154,6 +176,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/{k}/play", post(play))
         .route("/{k}/stop", post(stop))
         .route("/{k}/stats", get(stats))
+        .route("/{k}/download", post(download))
+        .route("/{k}/download-cancel", post(cancel))
+        .route("/{k}/downloads", get(downloads))
         .route("/{k}/s/{ih}/{idx}", get(stream))
         .with_state(app.clone());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

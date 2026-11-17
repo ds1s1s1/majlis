@@ -60,8 +60,8 @@ export const episodeOf = (videoId: string | null | undefined) => {
 export const yearOf = (p: Preview) => String(p.releaseInfo ?? p.year ?? '').slice(0, 4);
 
 // open a copy in the player (theater.js): card carries what "continue watching" and next-episode need
-export const play = (a: { type: Type; videoId: string; meta: Preview; stream: Stream; label?: string; pos?: number }) =>
-  invoke('media:play', { type: a.type, id: a.videoId, stream: a.stream, pos: a.pos, card: { name: a.label || a.meta.name, seriesName: a.meta.name, poster: a.meta.poster || null, type: a.type, metaId: a.meta.id } });
+export const play = (a: { type: Type; videoId: string; meta: Preview; stream: Stream; label?: string; pos?: number; addon?: string }) =>
+  invoke('media:play', { type: a.type, id: a.videoId, stream: a.stream, pos: a.pos, addon: a.addon, card: { name: a.label || a.meta.name, seriesName: a.meta.name, poster: a.meta.poster || null, type: a.type, metaId: a.meta.id } });
 
 // ---- M3: browsing, calendar, library tabs, addons
 export interface Manifest { id: string; name: string; version: string; description?: string; logo?: string; background?: string; types: string[]; catalogs: { type: Type; id: string; name: string | null; extra: Extra[] }[]; resources: { name: string }[]; behaviorHints: { configurable?: boolean; configurationRequired?: boolean; adult?: boolean } }

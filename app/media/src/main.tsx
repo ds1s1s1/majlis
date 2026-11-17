@@ -16,7 +16,7 @@ export function mount(el: HTMLElement, host: HostApi) {
   return {
     update: (h: HostApi) => render(h),
     // the library changed outside the page (the player saved progress)
-    refresh: () => { qc.invalidateQueries({ queryKey: ['continue'] }); qc.invalidateQueries({ queryKey: ['library'] }); qc.invalidateQueries({ queryKey: ['meta'] }); },
+    refresh: (what?: string) => { if (what) { qc.invalidateQueries({ queryKey: [what] }); return; } qc.invalidateQueries({ queryKey: ['continue'] }); qc.invalidateQueries({ queryKey: ['library'] }); qc.invalidateQueries({ queryKey: ['meta'] }); },
     open: (r: Route) => bus.dispatchEvent(new CustomEvent('open', { detail: r })),
     go: (tab: Tab) => bus.dispatchEvent(new CustomEvent('go', { detail: tab })),
     unmount: () => root.unmount(),

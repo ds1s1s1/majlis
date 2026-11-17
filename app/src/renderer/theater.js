@@ -22,12 +22,15 @@ function icons() {
 
 // a chapter called intro/opening (in either language) gets a skip button; credits get "next"
 const INTRO = /\b(intro|opening|op|recap|previously)\b|مقدمة|شارة البداية/i, OUTRO = /\b(credits|ending|ed|outro|preview)\b|شارة النهاية/i;
+// AniSkip times (anime) work the same way: inside an opening/recap -> skip it; inside the ending -> next
+let SKIPS = [];
 function chapters() {
-  const list = P['chapter-list'] || [], i = P.chapter ?? -1, c = list[i];
-  const intro = c && INTRO.test(c.title || '') && list[i + 1];
+  const list = P['chapter-list'] || [], i = P.chapter ?? -1, c = list[i], p = P['time-pos'] ?? -1;
+  const sk = SKIPS.find((s) => p >= s.start && p < s.end - 1);
+  const intro = sk && sk.kind !== 'ed' ? { time: sk.end } : c && INTRO.test(c.title || '') && list[i + 1];
   $('#skipintro').hidden = !intro;
-  if (intro) $('#skipintro').dataset.to = list[i + 1].time;
-  $('#nextep').hidden = !(P.series && ((c && OUTRO.test(c.title || '')) || (P.duration && P['time-pos'] > P.duration - 60)));
+  if (intro) $('#skipintro').dataset.to = intro.time;
+  $('#nextep').hidden = !(P.series && ((sk && sk.kind === 'ed') || (c && OUTRO.test(c.title || '')) || (P.duration && p > P.duration - 60)));
 }
 
 function draw() {
@@ -116,7 +119,8 @@ async function init() {
   icons(); draw();
   api.on((m) => {
     if (m.type === 'player') { P[m.name] = m.value; draw(); if (m.name === 'pause') { icons(); wake(); } }
-    else if (m.type === 'theater') { $('#title').textContent = m.card?.name || ''; P.series = m.card?.type === 'series'; night = false; icons(); wake(); partyButton(); }
+    else if (m.type === 'skips') { SKIPS = m.list || []; chapters(); }
+    else if (m.type === 'theater') { SKIPS = []; $('#title').textContent = m.card?.name || ''; P.series = m.card?.type === 'series'; night = false; icons(); wake(); partyButton(); }
     else if (m.type === 'next') { $('#state').textContent = t('th_next_up', { n: m.name }); }
     else if (m.type === 'party') partyState(m.state);
     else if (m.type === 'player-state') $('#state').textContent = m.state === 'recovering' ? t('th_recovering') : m.state === 'failed' ? t('th_failed') : '';

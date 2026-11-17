@@ -20,6 +20,8 @@ export const STR = {
     collections_sub: 'سلاسل أفلام تنشاف بالترتيب.', needs_tmdb: 'المجموعات تحتاج مفتاح TMDB. حطه من الإعدادات.',
     addon_added: 'انضافت {name}', addon_link_ph: 'الصق رابط إضافة (manifest.json أو stremio://)', install: 'ثبّت', installed: 'مثبتة', move_up: 'فوق', move_down: 'تحت',
     configure: 'إعداد', remove: 'شيل', addon_store: 'متجر الإضافات', configure_first: 'تحتاج إعداد أول',
+    download: 'نزّل', dl_started: 'بدأ التنزيل', open_folder: 'افتح المجلد', dl_empty: 'نزّل من صفحة أي عمل (زر التنزيل جنب كل مصدر) وتلقاه هنا.',
+    dl_queued: 'بالانتظار', dl_downloading: 'ينزل', dl_paused: 'موقف', dl_done: 'جاهز', dl_failed: 'فشل', pause: 'وقّف', resume_dl: 'كمّل', delete_file_q: 'تحذف الملف من الجهاز بعد؟',
   },
   en: {
     home: 'Home', discover: 'Discover', catalogs: 'Catalogs', movies: 'Movies', shows: 'Shows', anime: 'Anime', calendar: 'Calendar',
@@ -41,6 +43,8 @@ export const STR = {
     collections_sub: 'Film series to watch in order.', needs_tmdb: 'Collections need a TMDB key. Add one in settings.',
     addon_added: 'Added {name}', addon_link_ph: 'Paste an addon link (manifest.json or stremio://)', install: 'Install', installed: 'Installed', move_up: 'Up', move_down: 'Down',
     configure: 'Configure', remove: 'Remove', addon_store: 'Addon store', configure_first: 'Needs setup first',
+    download: 'Download', dl_started: 'Download started', open_folder: 'Open folder', dl_empty: 'Download from any title page (the button next to each source) and it shows up here.',
+    dl_queued: 'Queued', dl_downloading: 'Downloading', dl_paused: 'Paused', dl_done: 'Ready', dl_failed: 'Failed', pause: 'Pause', resume_dl: 'Resume', delete_file_q: 'Delete the file from this computer too?',
   },
 } as const;
 

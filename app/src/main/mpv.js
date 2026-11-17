@@ -23,7 +23,11 @@ const BASE = [
   '--hwdec=auto-safe', '--vo=gpu-next', '--gpu-api=d3d11',
   '--cache=yes', '--demuxer-max-bytes=512MiB', '--demuxer-max-back-bytes=128MiB', '--hr-seek=yes',
   '--audio-pitch-correction=yes', '--slang=ar,ara,arabic,en,eng', '--sub-auto=fuzzy',
-  '--network-timeout=20', '--ytdl=no', '--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
+  '--network-timeout=20', '--ytdl=no',
+  // a dropped or rate-limited connection (debrid hosts send 429/5xx under load) picks up again
+  '--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=[429,5xx],reconnect_delay_max=5',
+  // HDR: tone-map with the measured peak on SDR screens, hand HDR straight to an HDR-on Windows display
+  '--tone-mapping=spline', '--hdr-compute-peak=yes', '--target-colorspace-hint=yes',
 ];
 
 const WATCHED = ['time-pos', 'duration', 'pause', 'paused-for-cache', 'demuxer-cache-duration', 'speed', 'eof-reached', 'track-list', 'volume', 'sub-delay', 'chapter-list', 'chapter'];

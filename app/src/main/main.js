@@ -451,7 +451,7 @@ app.whenReady().then(async () => {
   handlers();
   createWindow();
   theater = require('./theater').setup({ getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest, getMediaHub: () => mediaHub, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
-  mediaHub = require('./media/hub').setup({ store, dataDir: app.getPath('userData'), openExternal: (u) => shell.openExternal(u) });
+  mediaHub = require('./media/hub').setup({ store, dataDir: app.getPath('userData'), videosDir: app.getPath('videos'), svc: theater.svc, emit, openExternal: (u) => shell.openExternal(u), openPath: (p) => { fs.mkdirSync(p, { recursive: true }); shell.openPath(p); } });
   // Discord: our profile shows what we're watching / hosting; a friend's "Join" there knocks here
   const dcId = store.get('discordClientId');
   if (/^\d{15,22}$/.test(String(dcId || ''))) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { useStreams, play, type Item, type Ranked, type Type } from '../api';
+import { useQueryClient } from '@tanstack/react-query';
+import { cin, useStreams, play, type Item, type Ranked, type Type } from '../api';
 import { useHost, useT } from '../host';
 import { Icon } from './Icon';
 
@@ -11,11 +12,12 @@ function Badge({ children, tone = 'plain' }: { children: React.ReactNode; tone?:
 }
 
 // One ranked copy: what it is (resolution, HDR, size, swarm) and where it comes from
-function StreamRow({ r, best, onPlay }: { r: Ranked; best: boolean; onPlay: () => void }) {
+function StreamRow({ r, best, onPlay, onDownload }: { r: Ranked; best: boolean; onPlay: () => void; onDownload: () => void }) {
   const t = useT(), f = r.facts, s = r.stream;
   const text = [s.title, s.description, s.name].filter(Boolean).join('\n').split('\n').filter((l) => l.trim());
   return (
-    <button onClick={onPlay} className={`group flex w-full items-start gap-4 rounded-xl p-3.5 text-start transition hover:bg-white/6 ${best ? 'bg-acc/8 ring-1 ring-acc/40' : ''}`}>
+    <div className={`group/s flex items-start rounded-xl transition hover:bg-white/6 ${best ? 'bg-acc/8 ring-1 ring-acc/40' : ''}`}>
+    <button onClick={onPlay} className="group flex min-w-0 flex-1 items-start gap-4 p-3.5 text-start">
       <span className={`mt-0.5 grid size-9 flex-none place-items-center rounded-full transition ${best ? 'bg-acc text-acc-ink' : 'bg-white/8 text-fg2 group-hover:bg-fg group-hover:text-bg'}`}><Icon n="play" s={16} /></span>
       <span className="min-w-0 flex-1">
         <span className="mb-1.5 flex flex-wrap items-center gap-1.5">
@@ -33,6 +35,12 @@ function StreamRow({ r, best, onPlay }: { r: Ranked; best: boolean; onPlay: () =
         <span className="clamp-2 block break-all text-[13px] leading-snug text-fg2" dir="ltr">{text[0]}</span>
       </span>
     </button>
+    {r.stream.url || r.stream.infoHash ? (
+      <button onClick={onDownload} title={t('download')} aria-label={t('download')} className="m-3 grid size-9 flex-none place-items-center rounded-full text-fg3 opacity-0 transition hover:bg-white/10 hover:text-fg group-hover/s:opacity-100 focus-visible:opacity-100">
+        <Icon n="download" s={18} />
+      </button>
+    ) : null}
+    </div>
   );
 }
 
@@ -40,14 +48,19 @@ function StreamRow({ r, best, onPlay }: { r: Ranked; best: boolean; onPlay: () =
 export function StreamList({ type, meta, videoId, label, auto, pos, onStarted }: {
   type: Type; meta: Item; videoId: string; label?: string; auto?: boolean; pos?: number; onStarted?: () => void;
 }) {
-  const t = useT(), { toast } = useHost();
+  const t = useT(), { toast } = useHost(), qc = useQueryClient();
   const q = useStreams(type, videoId);
   const list = (q.data?.streams || []).filter((r) => r.score > -1e5);
   const fired = useRef(false);
   const start = (r: Ranked) => {
     toast(t('playing'));
-    play({ type, videoId, meta, stream: r.stream, label, pos }).catch((e: Error) => toast(e.message));
+    play({ type, videoId, meta, stream: r.stream, label, pos, addon: r.addon.url }).catch((e: Error) => toast(e.message));
     onStarted?.();
+  };
+  const download = async (r: Ranked) => {
+    await cin('dl-add', { meta: { id: meta.id, name: meta.name, poster: meta.poster }, type, videoId, label, stream: r.stream });
+    qc.invalidateQueries({ queryKey: ['downloads'] });
+    toast(t('dl_started'));
   };
   useEffect(() => {
     if (!auto || fired.current || !list.length) return;
@@ -61,5 +74,5 @@ export function StreamList({ type, meta, videoId, label, auto, pos, onStarted }:
     </div>
   );
   if (!list.length) return <p className="rounded-xl bg-white/4 p-5 text-sm text-fg2">{t('no_sources')}</p>;
-  return <div className="space-y-1">{list.slice(0, 60).map((r, i) => <StreamRow key={i} r={r} best={i === 0 && r.tier > 0} onPlay={() => start(r)} />)}</div>;
+  return <div className="space-y-1">{list.slice(0, 60).map((r, i) => <StreamRow key={i} r={r} best={i === 0 && r.tier > 0} onPlay={() => start(r)} onDownload={() => download(r)} />)}</div>;
 }

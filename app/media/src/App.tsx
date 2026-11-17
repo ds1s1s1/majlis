@@ -14,6 +14,7 @@ import { Calendar } from './pages/Calendar';
 import { Library } from './pages/Library';
 import { Collections } from './pages/Collections';
 import { Addons } from './pages/Addons';
+import { Downloads } from './pages/Downloads';
 
 // the tabs in the pill, in order (each one is a page below)
 const TABS: { id: Tab; label: Key; page: (active: boolean) => ReactNode }[] = [
@@ -26,6 +27,7 @@ const TABS: { id: Tab; label: Key; page: (active: boolean) => ReactNode }[] = [
   { id: 'calendar', label: 'calendar', page: () => <Calendar /> },
   { id: 'library', label: 'library', page: () => <Library /> },
   { id: 'collections', label: 'collections', page: () => <Collections /> },
+  { id: 'downloads', label: 'downloads', page: () => <Downloads /> },
   { id: 'addons', label: 'addons', page: () => <Addons /> },
 ];
 

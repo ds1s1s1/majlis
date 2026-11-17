@@ -13,16 +13,18 @@ const { Calendar } = require('./calendar');
 const { rank } = require('./ranking');
 const store = require('./store-api');
 const { StremioAccount, loginInBrowser } = require('./stremio-sync');
+const debrid = require('./debrid');
+const { Downloads } = require('./downloads');
 const { DEFAULT_ADDONS } = require('../mediasvc');
 
 // build-config.json (private builds only): { mediaKeys: { tmdb, trakt, ... } } as the built-in fallback
 let BUILD = {};
 try { BUILD = require('../build-config.json'); } catch {}
-const KEY_NAMES = ['tmdb', 'rpdb', 'mdblist', 'fanart', 'trakt', 'opensubtitles'];
+const KEY_NAMES = ['tmdb', 'rpdb', 'mdblist', 'fanart', 'trakt', 'opensubtitles', 'realdebrid', 'torbox', 'premiumize'];
 // film series worth a marathon (TMDB collection ids)
 const MARATHONS = [119, 1241, 10, 230, 263, 2344, 264, 84, 295, 87359, 404609, 9485, 8091, 31562, 328, 131635, 726871, 87096, 10194, 748, 1570, 8945, 528, 645];
 
-function setup({ store: st, dataDir, openExternal }) {
+function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDir = dataDir, svc = null, emit = () => {} }) {
   http.init(path.join(dataDir, 'media-cache'));
   const profile = () => st.get('mediaProfile') || 'default';
   const pk = (k) => (profile() === 'default' ? k : `${k}@${profile()}`);
@@ -128,14 +130,42 @@ function setup({ store: st, dataDir, openExternal }) {
   });
 
   // every addon's streams for a video, ranked best first
-  h('streams', async ({ type, id, bingeGroup }) => {
+  async function streams({ type, id, bingeGroup }) {
     const r = await client.all(addons(), { resource: 'stream', type, id });
     const list = r.flatMap((x, addonRank) => (x.result?.streams || []).map((stream) => ({ stream, addon: { url: x.url, name: x.manifest.name }, addonRank })));
     const o = { maxHeight: st.get('mediaMaxHeight') || 1080, downMbps: st.get('downMbps') || 0, debridOnly: !!st.get('debridOnly'), lang: lang(), bingeGroup };
     return { streams: rank(list, o), errors: r.filter((x) => x.error).map((x) => ({ addon: x.manifest.name, error: x.error.message })) };
-  });
-  h('subtitles', async ({ type, id, extra = [] }) => (await client.all(addons(), { resource: 'subtitles', type, id, extra }))
-    .flatMap((x) => (x.result?.subtitles || []).map((s) => ({ ...s, addon: x.manifest.name }))));
+  }
+  async function subtitles({ type, id, extra = [] }) {
+    return (await client.all(addons(), { resource: 'subtitles', type, id, extra })).flatMap((x) => (x.result?.subtitles || []).map((s) => ({ ...s, addon: x.manifest.name })));
+  }
+  // opening/ending times for an anime episode (AniSkip, keyless; Kitsu ids map to MAL through ani.zip)
+  async function skips(videoId, durationSec) {
+    const m = /^kitsu:(\d+):(\d+)$/.exec(videoId || '');
+    if (!m) return [];
+    const map = await http.json(`https://api.ani.zip/mappings?kitsu_id=${m[1]}`, { ttl: 7 * 864e5 }).catch(() => null);
+    const mal = map?.mappings?.mal_id;
+    if (!mal) return [];
+    const r = await http.json(`https://api.aniskip.com/v2/skip-times/${mal}/${m[2]}?types[]=op&types[]=ed&types[]=recap&episodeLength=${Math.round(durationSec || 0)}`, { ttl: 864e5 }).catch(() => null);
+    return (r?.results || []).map((x) => ({ kind: x.skipType, start: x.interval.startTime, end: x.interval.endTime }));
+  }
+  // the viewer's debrid service, when one has a key: { name, resolve(stream) }
+  function debridService() {
+    const k = keys(), name = st.get('debridService') || debrid.SERVICES.find((s) => k[s]);
+    return name && k[name] ? { name, resolve: (s) => debrid.resolve(name, k[name], s) } : null;
+  }
+  h('streams', streams);
+
+  // ---- downloads (one list for the whole app, not per profile: files on disk are shared)
+  const folder = () => st.get('downloadDir') || path.join(videosDir, 'Majlis');
+  const downloads = new Downloads({ file: path.join(dataDir, 'media', 'downloads.json'), folder, svc, debrid: () => debridService(), changed: () => emit('downloads', {}) });
+  h('dl-list', () => downloads.list());
+  h('dl-add', (a) => downloads.add(a));
+  h('dl-pause', ({ id }) => downloads.pause(id));
+  h('dl-resume', ({ id }) => downloads.start(id));
+  h('dl-remove', ({ id, deleteFile }) => downloads.remove(id, deleteFile));
+  h('dl-folder', () => openPath(folder()));
+  h('subtitles', subtitles);
 
   // ---- library
   h('library', () => library().library());
@@ -181,7 +211,7 @@ function setup({ store: st, dataDir, openExternal }) {
   });
 
   // ---- keys (the user's own; built-in ones are never sent to the page)
-  h('caps', () => ({ tmdb: meta.tmdbOn(), trakt: !!keys().trakt, stremio: !!pget('stremioKey') }));
+  h('caps', () => ({ tmdb: meta.tmdbOn(), trakt: !!keys().trakt, stremio: !!pget('stremioKey'), debrid: debridService()?.name || null }));
   h('keys', () => ({ user: userKeys(), builtIn: Object.fromEntries(KEY_NAMES.map((k) => [k, !!BUILD.mediaKeys?.[k]])) }));
   h('keys-set', (patch) => {
     const k = { ...userKeys() };
@@ -192,7 +222,9 @@ function setup({ store: st, dataDir, openExternal }) {
   });
 
   // for the player (theater.js): progress into the library
-  return { library, client, meta, addons, flush: () => { for (const l of libs.values()) l.flush(); } };
+  // a finished download's file, for the player (by id: the page never hands mpv a path)
+  const downloadFile = (id) => { const d = downloads.items.find((x) => x.id === id && x.state === 'done'); return d?.file && fs.existsSync(d.file) ? d.file : null; };
+  return { library, client, meta, addons, streams, subtitles, skips, debrid: debridService, downloadFile, flush: () => { for (const l of libs.values()) l.flush(); downloads.save(true); } };
 }
 
 module.exports = { setup };

@@ -16,6 +16,8 @@ pub struct Torrents {
     offline: bool, // tests: no DHT, trackers or listening, nothing leaves the machine
     session: OnceCell<Arc<Session>>,
     live: Mutex<HashMap<String, Arc<ManagedTorrent>>>,
+    // Downloads page: whole files kept in a folder the viewer chose ("hash:fileIdx" -> torrent)
+    saved: Mutex<HashMap<String, Arc<ManagedTorrent>>>,
 }
 
 // Trackers come from the addon's `sources` ("tracker:udp://..."); "dht:" entries need nothing.
@@ -28,7 +30,7 @@ pub fn magnet(info_hash: &str, sources: &[String]) -> String {
 pub fn valid_hash(h: &str) -> bool { h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()) }
 
 impl Torrents {
-    pub fn new(dir: PathBuf) -> Torrents { Torrents { dir, offline: false, session: OnceCell::new(), live: Mutex::new(HashMap::new()) } }
+    pub fn new(dir: PathBuf) -> Torrents { Torrents { dir, offline: false, session: OnceCell::new(), live: Mutex::new(HashMap::new()), saved: Mutex::new(HashMap::new()) } }
 
     async fn session(&self) -> Result<Arc<Session>> {
         self.session.get_or_try_init(|| async {
@@ -70,6 +72,41 @@ impl Torrents {
         Ok(())
     }
 
+    // The whole file into `folder` (it stays there: cancel can keep or delete it).
+    // shortcut: a torrent already streaming is the same torrent to librqbit, so it keeps the stream's folder; stop the stream first
+    pub async fn download(&self, info_hash: &str, file_idx: usize, sources: &[String], folder: &str) -> Result<()> {
+        let h = info_hash.to_ascii_lowercase();
+        if !valid_hash(&h) { return Err(anyhow!("bad info hash")); }
+        let key = format!("{h}:{file_idx}");
+        if self.saved.lock().await.contains_key(&key) { return Ok(()); }
+        let s = self.session().await?;
+        let opts = AddTorrentOptions { only_files: Some(vec![file_idx]), overwrite: true, output_folder: Some(folder.to_string()), ..Default::default() };
+        let r = s.add_torrent(AddTorrent::from_url(magnet(&h, sources)), Some(opts)).await?;
+        let t = r.into_handle().ok_or_else(|| anyhow!("torrent not added"))?;
+        self.saved.lock().await.insert(key, t);
+        Ok(())
+    }
+
+    pub async fn cancel_download(&self, info_hash: &str, file_idx: usize, delete_files: bool) -> Result<()> {
+        let key = format!("{}:{file_idx}", info_hash.to_ascii_lowercase());
+        let Some(t) = self.saved.lock().await.remove(&key) else { return Ok(()) };
+        if let Some(s) = self.session.get() { s.delete(t.id().into(), delete_files).await?; }
+        Ok(())
+    }
+
+    pub async fn download_stats(&self) -> serde_json::Value {
+        let saved = self.saved.lock().await;
+        serde_json::Value::Object(saved.iter().map(|(k, t)| {
+            let idx: usize = k.rsplit(':').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let mut v = serde_json::to_value(t.stats()).unwrap_or_default();
+            // where the file lands, once the magnet has resolved (the page plays it from there)
+            if let Ok(Some(p)) = t.with_metadata(|m| m.file_infos.get(idx).map(|f| t.output_folder().join(&f.relative_filename))) {
+                v["file"] = serde_json::json!(p.to_string_lossy());
+            }
+            (k.clone(), v)
+        }).collect())
+    }
+
     pub async fn stats(&self) -> serde_json::Value {
         let live = self.live.lock().await;
         serde_json::Value::Object(live.iter().map(|(h, t)| (h.clone(), serde_json::to_value(t.stats()).unwrap_or_default())).collect())
@@ -91,7 +128,7 @@ mod tests {
         let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(dir.join("film.bin"), &data).unwrap();
         let made = librqbit::create_torrent(&dir.join("film.bin"), librqbit::CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(262144) }, &librqbit::spawn_utils::BlockingSpawner::new(2)).await.unwrap();
-        let t = Torrents { dir: dir.clone(), offline: true, session: OnceCell::new(), live: Mutex::new(HashMap::new()) };
+        let t = Torrents { dir: dir.clone(), offline: true, session: OnceCell::new(), live: Mutex::new(HashMap::new()), saved: Mutex::new(HashMap::new()) };
         let h = t.add("test".into(), AddTorrent::from_bytes(made.as_bytes().unwrap()), 0, vec![]).await.unwrap();
         let mut fs = h.clone().stream(0).await.unwrap();
         assert_eq!(fs.len(), 3_000_000);
