@@ -19,6 +19,8 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   // watch together on everyone's own line: { role: 'host'|'guest', viewer, epoch } while one is on
   let party = null;
   const addons = () => store.get('addons') || DEFAULT_ADDONS;
+  // up from the start (an idle process), so the first visit to cinema doesn't wait for it
+  svc._start().catch(() => {});
   const progress = () => store.get('mediaProgress') || {};
   const toOverlay = (m) => { if (overlay && !overlay.isDestroyed()) overlay.webContents.send('ev', m); };
 
@@ -117,10 +119,11 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     return l;
   });
   // every catalog that needs no input (search/genre-required ones aren't home rows)
+  // every addon's manifest at once, in the user's order (a dead addon is just skipped)
+  const manifests = () => Promise.all(addons().map((url) => svc.call('manifest', { url }).then((m) => ({ url, m }), () => null))).then((l) => l.filter(Boolean));
   ipcMain.handle('media:rows', async () => {
     const rows = [];
-    for (const url of addons()) {
-      let m; try { m = await svc.call('manifest', { url }); } catch { continue; }
+    for (const { url, m } of await manifests()) {
       for (const c of m.catalogs || []) {
         if ((c.extra || []).some((x) => x.isRequired) || (c.extraRequired || []).length) continue;
         rows.push({ addon: url, addonName: m.name, type: c.type, id: c.id, name: c.name || c.id });
@@ -130,15 +133,14 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   });
   ipcMain.handle('media:catalog', (e, q) => svc.call('catalog', q));
   ipcMain.handle('media:search', async (e, { q }) => {
-    const out = [];
-    for (const url of addons()) {
-      let m; try { m = await svc.call('manifest', { url }); } catch { continue; }
+    const jobs = [];
+    for (const { url, m } of await manifests()) {
       for (const c of m.catalogs || []) {
         if (!(c.extra || []).some((x) => x.name === 'search') && !(c.extraSupported || []).includes('search')) continue;
-        try { const r = await svc.call('catalog', { addon: url, type: c.type, id: c.id, extra: `search=${encodeURIComponent(q)}` }); out.push({ type: c.type, name: c.name, metas: r.metas || [] }); } catch {}
+        jobs.push(svc.call('catalog', { addon: url, type: c.type, id: c.id, extra: `search=${encodeURIComponent(q)}` }).then((r) => ({ type: c.type, name: c.name, metas: r.metas || [] }), () => null));
       }
     }
-    return out;
+    return (await Promise.all(jobs)).filter(Boolean);
   });
   ipcMain.handle('media:meta', (e, { type, id }) => svc.call('meta', { addons: addons(), type, id }));
   ipcMain.handle('media:streams', (e, { type, id }) => svc.call('streams', { addons: addons(), type, id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } }));

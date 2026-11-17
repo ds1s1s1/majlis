@@ -4,6 +4,7 @@ import { Player, VoiceHub, decodeCaps, measureHz } from './stream.js';
 import { accelFrom, matchAccel } from './keys.js';
 import { initWatch } from './watch.js';
 import { initCinema } from './cinema.js';
+import { initPalette } from './palette.js';
 
 const api = window.majlis;
 const $ = (s, r = document) => r.querySelector(s);
@@ -97,9 +98,20 @@ function renderStatus() {
 
 let CIN = null;
 function go(v) { S.view = v; renderRail(); render(); }
+const cinema = () => (CIN ||= initCinema({ api, t, icon, esc, toast, $, $$ }));
+const PAL = initPalette({ t, icon, esc, commands: () => [
+  ...[['home', 'home', 'home'], ['room', 'room', 'room'], ['cinema', 'film', 'cinema movies'], ['net', 'net', 'network'], ['lib', 'lib', 'library games'], ['set', 'set', 'settings']]
+    .map(([v, ic, alt]) => ({ id: `go-${v}`, label: t(v === 'set' ? 'nav_set' : `nav_${v}`), alt, icon: ic, run: () => go(v) })),
+  { id: 'addons', label: t('cin_addons'), alt: 'addons stremio', icon: 'plus', run: () => { go('cinema'); cinema().showAddons(); } },
+  { id: 'copy-id', label: t('pal_copy_id'), alt: 'copy my number id', icon: 'copy', run: () => { navigator.clipboard.writeText(S.st?.id || ''); toast(t('pal_copied')); } },
+  { id: 'theme', label: t('pal_theme'), alt: 'theme dark light', icon: 'eye', run: async () => { await set({ theme: S.st.settings.theme === 'light' ? 'dark' : 'light' }); applyLook(); } },
+  { id: 'lang', label: t('pal_lang'), alt: 'language arabic english', icon: 'chat', run: async () => { await set({ lang: S.st.settings.lang === 'en' ? 'ar' : 'en' }); applyLook(); renderRail(); render(); } },
+  { id: 'panic', label: t('pal_panic'), alt: 'kick all panic', icon: 'door', when: !!S.host?.guests?.length, run: () => api.invoke('host:panic') },
+  { id: 'cinema-search-run', when: false, run: (q) => { go('cinema'); cinema().search(q); } },
+] });
 
 function render() {
-  if (S.view === 'cinema') { CIN ||= initCinema({ api, t, icon, esc, toast, $, $$ }); $('#view').innerHTML = CIN.viewCinema(); CIN.mountCinema(); return; }
+  if (S.view === 'cinema') { $('#view').innerHTML = cinema().viewCinema(); CIN.mountCinema(); return; }
   const fn = { home: viewHome, room: viewRoom, net: viewNet, lib: viewLib, set: viewSettings }[S.view];
   $('#view').innerHTML = fn();
   ({ home: mountHome, room: mountRoom, net: mountNet, lib: mountLib, set: mountSettings }[S.view])?.();
@@ -149,6 +161,7 @@ function viewHome() {
         <div class="modes">
           <button class="mode ${S.host?.mode !== 'watch' ? 'on' : ''}" data-m="play">${icon('pad', 26)}<span class="mt">${t('mode_play')}</span><span class="ms">${t('mode_play_sub')}</span></button>
           <button class="mode ${S.host?.mode === 'watch' ? 'on' : ''}" data-m="watch">${icon('film', 26)}<span class="mt">${t('mode_watch')}</span><span class="ms">${t('mode_watch_sub')}</span></button>
+          <button class="mode" id="gocinema">${icon('star', 26)}<span class="mt">${t('mode_cinema')}</span><span class="ms">${t('mode_cinema_sub')}</span></button>
         </div>
       </section>
 
@@ -204,6 +217,7 @@ function mountHome() {
     api.invoke('open', `https://wa.me/?text=${encodeURIComponent(t('share_text', { num: fmtId(id), link: l }))}`);
   };
   $$('.mode[data-m]').forEach((b) => (b.onclick = async () => { S.host = await api.invoke('mode', b.dataset.m); render(); }));
+  $('#gocinema') && ($('#gocinema').onclick = () => go('cinema'));
   $('#hostsw').onclick = async () => { S.host = await api.invoke('host:enable', !S.host?.enabled); render(); renderRail(); };
   $('#newcode') && ($('#newcode').onclick = () => api.invoke('host:code', false));
   $('#revoke') && ($('#revoke').onclick = () => api.invoke('host:code', true));
@@ -746,7 +760,15 @@ function viewSettings() {
       ${row(t('lang'), `<div class="seg" id="lang"><button data-v="ar" class="${s.lang === 'ar' ? 'on' : ''}">العربية</button><button data-v="en" class="${s.lang === 'en' ? 'on' : ''}">English</button></div>`)}
     </div></section>
 
+    <section class="sgroup"><h2>${t('set_cinema')}</h2><div class="rows">
+      ${row(t('cin_max_h'), `<div class="seg" id="mh">${[720, 1080, 2160].map((h) => `<button data-v="${h}" class="${s.mediaMaxHeight === h ? 'on' : ''}">${h === 2160 ? '4K' : h + 'p'}</button>`).join('')}</div>`, t('cin_max_h_sub'))}
+      ${row(t('cin_debrid_only'), sw('debridOnly'), t('cin_debrid_only_sub'))}
+      ${row(t('cin_sub2'), `<input class="input mono" style="width:90px" data-s="subLang2" value="${esc(s.subLang2 || 'eng')}" dir="ltr">`, t('cin_sub2_sub'))}
+    </div></section>
+
     <section class="sgroup"><h2>${t('set_integr')}</h2><div class="rows">
+      ${row(t('discord_id'), `<input class="input mono" style="width:220px" data-s="discordClientId" value="${esc(s.discordClientId || '')}" placeholder="123456789012345678" dir="ltr">`, t('discord_id_sub'))}
+      ${row(t('discord_presence'), sw('discordPresence'), t('discord_presence_sub'))}
       ${row(t('routerlock'), `<span class="tag ${S.st.routerLock ? 'ok' : ''}">${S.st.routerLock ? t('routerlock_found') : t('routerlock_missing')}</span><button class="btn sm" id="rl">${t('routerlock_open')}</button>`, S.st.routerLock ? `<span class="mono">${esc(S.st.routerLock)}</span>` : '')}
     </div></section>
 
@@ -764,6 +786,7 @@ function mountSettings() {
   $$('.switch[data-k]').forEach((b) => (b.onclick = async () => { await set({ [b.dataset.k]: !s[b.dataset.k] }); render(); }));
   const seg = (id, k, num) => $$(`#${id} button`).forEach((b) => (b.onclick = async () => { await set({ [k]: num ? +b.dataset.v : b.dataset.v }); applyLook(); render(); renderRail(); }));
   seg('vmode', 'voice'); seg('theme', 'theme'); seg('lang', 'lang'); seg('sq', 'spectatorQuality', true);
+  seg('mh', 'mediaMaxHeight', true);
   $('#newid').onclick = () => { if (confirm(t('confirm_new_id'))) api.invoke('identity:new'); };
   $('#pickff').onclick = async () => { const p = await api.invoke('pick:file', [{ name: 'ffmpeg', extensions: ['exe'] }]); if (p) { await set({ ffmpeg: p }); render(); } };
   $('#vigem') && ($('#vigem').onclick = () => api.invoke('vigem'));
@@ -1171,6 +1194,7 @@ setInterval(() => {
   // test aid: open a title in cinema mode straight away (type:id)
   if (q.get('title')) { go('cinema'); const [ty, ...id] = q.get('title').split(':'); setTimeout(() => CIN?.openTitle(ty, id.join(':')), 500); }
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);
+  if (q.get('pal')) setTimeout(() => { PAL.open(); const i = document.querySelector('.pal-q input'); if (i) { i.value = q.get('pal'); i.dispatchEvent(new Event('input')); } }, 1200);
   // test aid: the host opens its own view of the film once it's playing
   if (q.get('local')) { const iv = setInterval(() => { const b = $('#watchnow'); if (b) { clearInterval(iv); b.click(); } }, 500); }
 })();

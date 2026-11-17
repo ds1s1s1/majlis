@@ -145,7 +145,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL || process.env.MAJLIS_TITLE) ? { query: { title: process.env.MAJLIS_TITLE || '', view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
+  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL || process.env.MAJLIS_TITLE || process.env.MAJLIS_PAL) ? { query: { title: process.env.MAJLIS_TITLE || '', pal: process.env.MAJLIS_PAL || '', view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
   // dev aid: MAJLIS_SHOT=out.png saves a screenshot of the page after a delay
   if (process.env.MAJLIS_SHOT) {
     setTimeout(async () => {

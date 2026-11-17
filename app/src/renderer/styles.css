@@ -384,7 +384,7 @@ html[dir="rtl"] .bigms { text-align: right; }
 
 /* ---------------------------------------------------------------- mode picker */
 .modepick { margin-top: 34px; }
-.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
 .mode { all: unset; cursor: pointer; display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 14px; row-gap: 2px; align-items: center;
   padding: 16px 18px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--bg-1); color: var(--fg-3); transition: border-color .12s, background .12s; }
 .mode .ic { grid-row: 1 / span 2; }
@@ -586,3 +586,17 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .hero-meta span, .ep b, .ep small, .pname, .sname, .dtext .sub, .crow h3, .arow b, .arow small, .th-title { unicode-bidi: plaintext; }
 .th-party { margin-inline-start: 14px; font-size: 13px; color: var(--acc); }
 .th-together { display: flex; gap: 6px; align-items: center; font-size: 13px; padding: 6px 12px; border: 1px solid rgba(255,255,255,.2); }
+
+/* ===================================================================== command palette (Ctrl+K) */
+.pal-layer { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.45); display: grid; place-items: start center; padding-top: 12vh; animation: palin .12s ease-out; }
+@keyframes palin { from { opacity: 0; } }
+.palette { width: min(620px, 92vw); border-radius: 16px; background: var(--bg-1); border: 1px solid var(--line-2); box-shadow: var(--shadow); overflow: hidden; }
+.pal-q { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); color: var(--fg-3); }
+.pal-q input { flex: 1; background: none; border: 0; outline: none; color: var(--fg); font: inherit; font-size: 16px; }
+.pal-list { max-height: 50vh; overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.pal-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 0; border-radius: 10px; background: none; color: var(--fg); font: inherit; text-align: start; cursor: pointer; }
+.pal-item.on, .pal-item:hover { background: var(--acc-soft); color: var(--fg); }
+.pal-item.on svg { color: var(--acc); }
+.pal-item span { flex: 1; }
+.pal-item kbd { font-family: PlexMono, monospace; font-size: 11px; color: var(--fg-3); }
+.pal-empty { padding: 14px; }

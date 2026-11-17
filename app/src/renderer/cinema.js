@@ -119,6 +119,12 @@ export function initCinema(d) {
     catch (e) { toast(t('cin_err', { e: e.message })); }
   }
 
+  async function search(q) {
+    C.q = q; C.page = 'search'; C.results = null; redraw();
+    C.results = await api.invoke('media:search', { q }).catch(() => []); redraw();
+  }
+  async function showAddons() { C.page = 'addons'; redraw(); C.addons = await api.invoke('media:addons'); redraw(); }
+
   async function loadRow(i) {
     if (C.data.has(i) || C.loading?.has(i)) return;
     (C.loading ||= new Set()).add(i);
@@ -137,13 +143,9 @@ export function initCinema(d) {
   function mount() {
     const v = $('#view');
     $('#cback') && ($('#cback').onclick = () => { C.page = 'home'; redraw(); });
-    $('#caddons').onclick = async () => { C.page = 'addons'; redraw(); C.addons = await api.invoke('media:addons'); redraw(); };
+    $('#caddons').onclick = showAddons;
     const q = $('#cq');
-    q.onkeydown = async (e) => {
-      if (e.key !== 'Enter' || !q.value.trim()) return;
-      C.q = q.value.trim(); C.page = 'search'; C.results = null; redraw();
-      C.results = await api.invoke('media:search', { q: C.q }).catch(() => []); redraw();
-    };
+    q.onkeydown = (e) => { if (e.key === 'Enter' && q.value.trim()) search(q.value.trim()); };
     wireCards(v);
     if (C.page === 'home') {
       const h = $('.hero[data-id]');
@@ -175,5 +177,5 @@ export function initCinema(d) {
     if (!C.rows) { C.rows = await api.invoke('media:rows').catch(() => []); redraw(); }
   }
 
-  return { viewCinema: view, mountCinema: () => { mount(); enter(); }, cinemaState: C, openTitle: open };
+  return { viewCinema: view, mountCinema: () => { mount(); enter(); }, cinemaState: C, openTitle: open, search, showAddons };
 }

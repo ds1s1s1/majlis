@@ -43,6 +43,11 @@ const DEFAULTS = {
   // watch party
   mode: 'play',           // play | watch
   watchControl: 'host',   // host | all  (who can pause/seek)
+  mediaMaxHeight: 1080,   // cinema: preferred top resolution when picking a stream
+  debridOnly: false,      // cinema: only instant (debrid / direct) streams, never torrents
+  subLang2: 'eng',        // cinema: subtitle language after Arabic
+  discordClientId: '',    // Discord application id (public); empty: build default or off
+  discordPresence: true,  // show what we're doing on our Discord profile
   watchMbps: 15,
   nightAudio: false,
   autoNext: true,
