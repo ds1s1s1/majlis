@@ -9,6 +9,8 @@ const path = require('path');
 const { Mpv } = require('./mpv');
 const { MediaService, DEFAULT_ADDONS } = require('./mediasvc');
 const { SyncViewer } = require('./sync');
+const { dialog } = require('electron');
+const imp = require('./imports');
 
 const NIGHT = '@night:dynaudnorm=f=150:g=15:p=0.9';
 
@@ -146,6 +148,59 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   ipcMain.handle('media:streams', (e, { type, id }) => svc.call('streams', { addons: addons(), type, id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } }));
   ipcMain.handle('media:progress', () => progress());
 
+  // ---- bringing history in, and what friends have seen
+  ipcMain.handle('media:stremio-import', async (e, { email, password }) => {
+    const r = await imp.stremioImport(email, password); // the login itself isn't kept anywhere
+    const list = addons(); for (const u of r.addons) if (!list.includes(u)) list.push(u);
+    store.set('addons', list);
+    const lib = store.get('mediaLibrary') || {}, p = progress();
+    for (const x of r.library) {
+      lib[x.id] = { id: x.id, type: x.type, name: x.name, poster: x.poster, watched: x.watched, at: x.at };
+      if (x.t > 30 && x.d && x.t < x.d * 0.95) p[x.video || x.id] = { t: x.t, d: x.d, at: x.at, meta: { name: x.name, poster: x.poster, type: x.type, metaId: x.id } };
+    }
+    store.set('mediaLibrary', lib); store.set('mediaProgress', p);
+    return { addons: r.addons.length, library: r.library.length };
+  });
+  ipcMain.handle('media:letterboxd-import', async () => {
+    const pick = await dialog.showOpenDialog(getWin(), { properties: ['openFile'], filters: [{ name: 'Letterboxd export', extensions: ['zip'] }] });
+    if (pick.canceled || !pick.filePaths[0]) return null;
+    const lb = imp.letterboxdZip(pick.filePaths[0]);
+    store.set('letterboxd', lb);
+    return { films: Object.keys(lb).length };
+  });
+  ipcMain.handle('media:friends-on', (e, m) => friendsOn(m));
+
+  // what we share with friends in the room: watched / rated / in progress (no more)
+  function activity() {
+    if (store.get('shareActivity') === false) return null;
+    const out = [];
+    for (const x of Object.values(store.get('mediaLibrary') || {})) if (x.watched) out.push({ id: x.id, name: x.name, watched: true });
+    for (const [id, p] of Object.entries(progress())) out.push({ id: p.meta?.metaId || id, name: p.meta?.name, t: Math.round(p.t), d: Math.round(p.d) });
+    for (const x of Object.values(store.get('letterboxd') || {})) if (x.watched || x.rating) out.push({ name: x.name, year: x.year, watched: !!x.watched, rating: x.rating || null, review: x.review || null });
+    return out.slice(0, 3000);
+  }
+  // friends who've seen this title: by id, or by name + year (Letterboxd knows no ids)
+  function friendsOn({ id, name, year }) {
+    const key = imp.letterboxdKey(name, String(year || '').slice(0, 4));
+    const out = [];
+    for (const f of Object.values(store.get('friendActivity') || {})) {
+      const hit = (f.items || []).filter((x) => (x.id && (x.id === id || String(x.id).startsWith(`${id}:`))) || (x.name && x.year && imp.letterboxdKey(x.name, x.year) === key));
+      if (!hit.length) continue;
+      out.push({ name: f.name, watched: hit.some((x) => x.watched), rating: hit.find((x) => x.rating)?.rating || null, review: hit.find((x) => x.review)?.review || null, progress: hit.find((x) => x.t && x.d) ? Math.round((hit.find((x) => x.t && x.d).t / hit.find((x) => x.t && x.d).d) * 100) : null });
+    }
+    return out;
+  }
+  // what a friend shared, kept only in the shape we expect (it crossed the network)
+  function saveFriend({ id, name, items }) {
+    if (!/^\d{9}$/.test(String(id || '')) || !Array.isArray(items)) return;
+    const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : undefined);
+    const num = (v) => (Number.isFinite(v) ? v : undefined);
+    const clean = items.slice(0, 3000).map((x) => ({ id: str(x?.id, 64), name: str(x?.name, 200), year: str(String(x?.year ?? ''), 4) || undefined, watched: !!x?.watched, rating: num(x?.rating) ?? null, review: str(x?.review, 2000) ?? null, t: num(x?.t), d: num(x?.d) }));
+    const all = store.get('friendActivity') || {};
+    all[id] = { name: str(name, 64) || id, items: clean, at: Date.now() };
+    store.set('friendActivity', all);
+  }
+
   // { type, id (the video: tt..:s:e for an episode), card (poster/name for "continue watching"), stream }
   ipcMain.handle('media:play', (e, x) => play(x));
   async function play({ type, id, card, stream, pos }) {
@@ -244,7 +299,7 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   // what's on, for presence (Discord)
   const info = () => (now && mpv?.props ? { name: now.card?.name || '', poster: now.card?.poster || null, pos: mpv.props['time-pos'] || 0, dur: mpv.props.duration || 0, paused: !!mpv.props.pause, together: !!party } : null);
 
-  return { play, partyStart, close, onSync, info, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
+  return { play, partyStart, close, onSync, info, activity, saveFriend, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
 }
 
 module.exports = { setup };

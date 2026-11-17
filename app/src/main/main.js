@@ -467,6 +467,10 @@ app.whenReady().then(async () => {
   }
   // watch together: the shared state reaches the theater, as host and as guest
   host.on('sync', (st) => theater.onSync('host', st));
+  // what friends have watched, both ways
+  host.getActivity = guest.getActivity = () => theater.activity();
+  host.on('activity', (a) => theater.saveFriend(a));
+  guest.on('activity', (a) => theater.saveFriend(a));
   guest.on('sync', (st) => theater.onSync('guest', st));
   registerShortcuts();
 

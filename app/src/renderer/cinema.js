@@ -64,6 +64,9 @@ export function initCinema(d) {
           </div>
         </div>
       </section>
+      ${D.friends?.length ? `<section class="crow"><h3>${t('cin_friends_saw')}</h3><div class="flist2">${D.friends.map((f) => `<div class="fcard"><b>${esc(f.name)}</b>
+        <span class="sub">${f.rating ? '★'.repeat(Math.round(f.rating)) + (f.rating % 1 ? '½' : '') : f.watched ? t('cin_friend_watched') : f.progress != null ? t('cin_friend_progress', { p: f.progress }) : ''}</span>
+        ${f.review ? `<p dir="auto">${esc(f.review.slice(0, 400))}</p>` : ''}</div>`).join('')}</div></section>` : ''}
       ${seasons.length ? `<section class="crow"><div class="seg">${seasons.map((s) => `<button data-season="${s}" class="${s === D.season ? 'on' : ''}">${s === 0 ? t('cin_specials') : `${t('cin_season')} ${s}`}</button>`).join('')}</div>
         <div class="eplist">${eps.map((v) => `<button class="ep ${v.id === D.video ? 'on' : ''}" data-vid="${esc(v.id)}">${img(v.thumbnail, 'epimg')}<span><b>${v.episode ?? v.number ?? ''}. ${esc(v.name || v.title || '')}</b><small>${esc((v.overview || v.description || '').slice(0, 140))}</small></span></button>`).join('')}</div></section>` : ''}
       <section class="crow"><h3>${t('cin_streams')}</h3>
@@ -76,6 +79,9 @@ export function initCinema(d) {
   function viewAddons() {
     return `${bar()}<section class="crow"><h3>${t('cin_addons')}</h3><p class="sub">${t('cin_addons_sub')}</p>
       <div class="row gap"><input id="aurl" class="input grow" placeholder="https://…/manifest.json" dir="ltr"><button class="btn acc" id="aadd">${icon('plus', 16)}<span>${t('cin_add')}</span></button></div>
+      <h3>${t('cin_import')}</h3><p class="sub">${t('cin_import_sub')}</p>
+      <div class="row gap"><input id="semail" class="input" type="email" placeholder="${t('cin_stremio_email')}" dir="ltr" autocomplete="off"><input id="spass" class="input" type="password" placeholder="${t('cin_stremio_pass')}" dir="ltr" autocomplete="off"><button class="btn" id="simport">${t('cin_stremio_import')}</button></div>
+      <div class="row gap" style="margin-top:8px"><button class="btn" id="lbimport">${t('cin_lb_import')}</button><span class="sub">${t('cin_lb_sub')}</span></div>
       <div class="alist">${(C.addons || []).map((a, i) => `<div class="arow" data-url="${esc(a.url)}">${a.logo ? `<img src="${esc(a.logo)}" alt="" referrerpolicy="no-referrer">` : icon('lib', 22)}
         <span class="grow"><b>${esc(a.name || a.url)}</b> <small>${esc(a.version || '')}</small><small class="block">${esc(a.error || a.description || '')}</small><small class="block">${esc((a.resources || []).map((r) => r.name || r).join(' · '))}</small></span>
         <button class="btn ghost" data-move="-1" ${i === 0 ? 'disabled' : ''}>↑</button><button class="btn ghost" data-move="1" ${i === C.addons.length - 1 ? 'disabled' : ''}>↓</button><button class="btn ghost" data-rm>${icon('x', 16)}</button></div>`).join('')}</div></section>`;
@@ -91,6 +97,7 @@ export function initCinema(d) {
       const r = await api.invoke('media:meta', { type, id });
       if (C.detail?.id !== id) return;
       C.detail.meta = r.meta;
+      api.invoke('media:friends-on', { id, name: r.meta.name, year: r.meta.releaseInfo || r.meta.year }).then((f) => { if (C.detail?.id === id) { C.detail.friends = f; redraw(); } }).catch(() => {});
       const vids = r.meta.videos || [];
       if (type === 'series' && vids.length) {
         // pick up where you were: the last episode with progress, else the first of the first season
@@ -165,6 +172,15 @@ export function initCinema(d) {
         try { await api.invoke('media:addon-add', u); C.addons = await api.invoke('media:addons'); C.rows = null; C.data.clear(); C.hero = null; redraw(); }
         catch (e) { toast(t('cin_bad_addon', { e: e.message })); }
       };
+      $('#simport').onclick = async () => {
+        const email = $('#semail').value.trim(), password = $('#spass').value;
+        if (!email || !password) return;
+        $('#simport').disabled = true;
+        try { const r = await api.invoke('media:stremio-import', { email, password }); toast(t('cin_stremio_done', { a: r.addons, l: r.library })); C.addons = await api.invoke('media:addons'); C.rows = null; C.data.clear(); C.hero = null; C.progress = await api.invoke('media:progress'); redraw(); }
+        catch (e) { toast(t('cin_err', { e: e.message })); }
+        $('#spass') && ($('#spass').value = ''); $('#simport') && ($('#simport').disabled = false);
+      };
+      $('#lbimport').onclick = async () => { try { const r = await api.invoke('media:letterboxd-import'); if (r) toast(t('cin_lb_done', { n: r.films })); } catch (e) { toast(t('cin_err', { e: e.message })); } };
       $$('.arow').forEach((r) => {
         r.querySelector('[data-rm]').onclick = async () => { await api.invoke('media:addon-remove', r.dataset.url); C.addons = await api.invoke('media:addons'); C.rows = null; C.data.clear(); C.hero = null; redraw(); };
         r.querySelectorAll('[data-move]').forEach((b) => (b.onclick = async () => { await api.invoke('media:addon-move', { url: r.dataset.url, dir: +b.dataset.move }); C.addons = await api.invoke('media:addons'); C.rows = null; C.data.clear(); redraw(); }));

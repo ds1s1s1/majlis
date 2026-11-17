@@ -48,6 +48,7 @@ const DEFAULTS = {
   subLang2: 'eng',        // cinema: subtitle language after Arabic
   discordClientId: '',    // Discord application id (public); empty: build default or off
   discordPresence: true,  // show what we're doing on our Discord profile
+  shareActivity: true,    // tell friends in the room what we've watched / rated
   watchMbps: 15,
   nightAudio: false,
   autoNext: true,

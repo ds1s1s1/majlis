@@ -65,6 +65,7 @@ class Guest extends EventEmitter {
     this.retries = 0;
     link.ctrl({ t: 'hello', caps: { codecs: this.caps.codecs, maxKbps: this._maxKbps() }, screen: this.caps.screen, padType: this.caps.padType, connType: this.store.get('connType') });
     link.on('ctrl', (m) => this._ctrl(m));
+    const act = this.getActivity?.(); if (act) link.ctrl({ t: 'activity', items: act });
     link.on('raw', (b) => this._raw(b));
     link.on('path', (p) => this.emit('path', p));
     this.started = now(); this.rtts = [];
@@ -105,6 +106,7 @@ class Guest extends EventEmitter {
       case 'fclock': this.fclock = m; this._postClock(); break;
       // watch together on our own line: the host's shared state (or the end of it)
       case 'sync_state': this.syncEpoch = m.epoch; this.emit('sync', m); break;
+      case 'activity': this.emit('activity', { id: this.hostId, name: this.link?.peer?.nick, items: m.items }); break;
       case 'sync_end': this.syncEpoch = null; this.emit('sync', null); break;
       case 'mode': if (m.mode !== 'watch') this.fclock = null; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;

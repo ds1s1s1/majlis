@@ -600,3 +600,7 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .pal-item span { flex: 1; }
 .pal-item kbd { font-family: PlexMono, monospace; font-size: 11px; color: var(--fg-3); }
 .pal-empty { padding: 14px; }
+.flist2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.fcard { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); display: flex; flex-direction: column; gap: 4px; }
+.fcard .sub { color: var(--acc); }
+.fcard p { margin: 4px 0 0; color: var(--fg-2); font-size: 13px; line-height: 1.6; unicode-bidi: plaintext; }

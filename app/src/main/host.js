@@ -232,6 +232,8 @@ class Host extends EventEmitter {
     for (const s of this.cursorShapes.values()) link.ctrl({ t: 'cursor_shape', ...s });
     // a watch-together film is on: the newcomer opens it on their own line and falls in step
     if (this.sync.state) link.ctrl({ t: 'sync_state', ...this.sync.state });
+    // what we've watched, for their title pages (if we share it)
+    const act = this.getActivity?.(); if (act) link.ctrl({ t: 'activity', items: act });
     this._roster();
     link.on('ctrl', (m) => this._onCtrl(g, m));
     link.on('raw', (b) => this._onRaw(g, b));
@@ -276,6 +278,7 @@ class Host extends EventEmitter {
       case 'ready': g.ready = !!m.on; this.emit('update'); break;
       // watch together (each on their own line): requests from those who may control, and
       // everyone's buffer reports
+      case 'activity': this.emit('activity', { id: g.id, name: g.nick, items: m.items }); break;
       case 'sync_req': if (this._canControl(g)) this._syncSend(this.sync.request(m)); break;
       case 'sync_rep': this._syncSend(this.sync.report(g.sid, m, (id) => this.guests.get(id)?.nick || this.store.get('nick') || '')); break;
       case 'askpause': this.emit('askpause', { name: g.nick }); break;
