@@ -52,6 +52,7 @@ const DEFAULTS = {
   maxRes: 'source',        // source | 720 | 1080 | 1440
   qualityPreset: 'balanced', // speed | balanced | quality
   lightSpectators: false,
+  windowAudioOnly: true,    // sharing one window: send only that program's sound
   dataSaver: false,
   roomPin: '',
   mouseSens: 1,

@@ -20,9 +20,32 @@ const { signedBytes, verifyMsg, deriveId } = require('./ident');
 const { newEphemeral, deriveKeys, safetyCode, Channel } = require('./seal');
 const { stunBinding, TurnClient, handleStun, isStun } = require('./turn');
 
+// The native core (Rust, majlis-core.node): UDP sockets, sealing, FEC, pacing, reassembly and
+// rate control per packet. Optional: without it everything below runs in JS as before.
+function loadCore() {
+  if (process.env.MAJLIS_NOCORE) return null;
+  const path = require('path');
+  for (const p of [path.join(process.resourcesPath || '', 'app.asar.unpacked', 'native', 'majlis-core.node'), path.join(__dirname, '../../native/majlis-core.node')]) {
+    try { if (require('fs').existsSync(p)) return require(p); } catch {}
+  }
+  return null;
+}
+const core = loadCore();
+
+// dgram-shaped wrapper around a native socket, so the TURN/STUN/signaling code doesn't care
+class CoreSocket extends EventEmitter {
+  constructor(n, fam) { super(); this.n = n; this.fam = fam; this.id = n.id; }
+  send(buf, port, addr, cb) { const ok = this.n.send(buf, port, addr); if (cb) setImmediate(() => cb(ok ? null : new Error('send failed'))); }
+  address() { return { address: this.fam === 'v6' ? '::' : '0.0.0.0', port: this.n.port(), family: this.fam === 'v6' ? 'IPv6' : 'IPv4' }; }
+  bindChannel(...a) { try { this.n.bindChannel(...a); } catch {} }
+  setRecvBufferSize() {} setSendBufferSize() {}
+  close() { this.n.close(); }
+}
+
 const P_REQ = 0x01, P_RESP = 0x02, T_DATA = 0x10, R = 0x52;
 const now = () => Date.now();
 const FORCE_RELAY = !!process.env.MAJLIS_FORCE_RELAY;
+const NOLAN = !!process.env.MAJLIS_NOLAN; // testing aid: treat a local path like the internet
 const hr = () => Number(process.hrtime.bigint() / 1000n) / 1000; // ms, high resolution
 
 function parseServer(s) {
@@ -61,6 +84,10 @@ class Link extends EventEmitter {
     this.safety = safetyCode(keys);
     this.sidBuf = Buffer.from(sid, 'hex');
     this.sidShort = this.ch.sidShort;
+    // per-packet work goes native when the core is there (and the sockets are native too)
+    if (net.core) {
+      this.core = new net.core.CoreLink(this.sidShort, this.ch.txKey, this.ch.rxKey, this.ch.txDir, this.ch.rxDir, (kind, buf, a, b, c, d) => this._coreEvent(kind, buf, a, b, c, d));
+    }
     this.paths = new Map();       // key -> path
     this.active = null;
     this.relayInfo = relayInfo;   // { token, exp, relays:[...], chosen }
@@ -158,13 +185,50 @@ class Link extends EventEmitter {
   _select(p) {
     if (this.active === p) return;
     this.active = p;
+    this._route();
     this.emit('path', this.pathInfo());
+  }
+
+  // Tell the native core how packets it sends itself (paced video, feedback, repairs) leave:
+  // straight UDP, a TURN channel, or through JS (TURN over TLS, WebSocket).
+  _route() {
+    if (!this.core) return;
+    const p = this.active;
+    this.nativeRoute = false;
+    try {
+      if (!p) return this.core.setRoute(0, 0, '', 0, 0);
+      if (p.kind === 'ws' || p.tls) return this.core.setRoute(3, 0, '', 0, 0);
+      if (p.turn) {
+        const ch = p.turn.channels?.get(`${p.addr}|${p.port}`);
+        if (ch && !p.turn.o.tls && p.turn.o.sock?.id) { this.nativeRoute = true; return this.core.setRoute(2, p.turn.o.sock.id, p.turn.o.host, p.turn.o.port, ch); }
+        return this.core.setRoute(3, 0, '', 0, 0);
+      }
+      if (p.sock?.id && !p.needsBind) { this.nativeRoute = true; return this.core.setRoute(1, p.sock.id, p.addr, p.port, 0); }
+      this.core.setRoute(3, 0, '', 0, 0);
+    } catch { try { this.core.setRoute(3, 0, '', 0, 0); } catch {} }
+  }
+
+  _coreEvent(kind, buf, a, b, c, d) {
+    if (this.closed) return;
+    if (kind === 1) { // a body for JS (control, audio, input, pings...)
+      let from;
+      if (c & 1) { const t = this.net.turnByIdx?.get(c >> 1); from = t ? { kind: 'turn', turn: t, addr: a, port: b, fam: a.includes(':') ? 'v6' : 'v4' } : null; }
+      else { const sock = this.net.sockById?.get(d); from = sock ? { kind: 'udp', sock, fam: sock.fam, addr: a, port: b } : null; }
+      return this._body(buf, from ? this.net._pathFor(this, from) : null);
+    }
+    if (kind === 2) { // a whole video frame, reassembled natively
+      const fr = { epoch: buf[0], key: !!buf[1], gap: buf.readInt16BE(2), id: buf.readUInt32BE(4), hostTs: buf.readUInt32BE(8), encMs: buf[12], pts: buf.readUInt32BE(16), owd: buf.readInt32BE(20), data: buf.subarray(24) };
+      this.lastRx = now();
+      return this.emit('vframe', fr);
+    }
+    if (kind === 3) return this.emit('skip', a);
+    if (kind === 4) return this._rawSend(this.active, buf);
   }
 
   pathInfo() {
     const p = this.active;
     if (!p) return null;
-    return { kind: p.kind, fam: p.fam || null, lan: p.k === 'lan', label: p.label, rtt: p.rtt == null ? null : Math.round(p.rtt * 10) / 10 };
+    return { kind: p.kind, fam: p.fam || null, lan: p.k === 'lan' && !NOLAN, label: p.label, rtt: p.rtt == null ? null : Math.round(p.rtt * 10) / 10 };
   }
 
   allPaths() {
@@ -182,30 +246,42 @@ class Link extends EventEmitter {
       const s = this._score(p);
       if (s < as) { as = s; alt = p; }
     }
-    if (alt && as < Infinity) { const pkt = this.ch.seal(body); this.stats.tx += pkt.length; this._rawSend(alt, pkt); }
+    if (alt && as < Infinity) { const pkt = this.core ? this.core.seal(body) : this.ch.seal(body); this.stats.tx += pkt.length; this._rawSend(alt, pkt); }
     return ok;
   }
 
   send(body) {
     if (this.closed || !this.active) return false;
-    const pkt = this.ch.seal(body);
+    // native route: sealed and sent from Rust (one call, and it shares the paced line's queue)
+    if (this.nativeRoute) { this.stats.tx += body.length + 29; this.stats.txPkts++; return this.core.sendBody(body); }
+    const pkt = this.core ? this.core.seal(body) : this.ch.seal(body);
     this.stats.tx += pkt.length; this.stats.txPkts++;
     this._rawSend(this.active, pkt);
     return true;
   }
 
   onData(pkt, path) {
+    if (this.core) {
+      // (a packet that came through JS: TURN indication, TLS, WebSocket) the core counts it
+      const body = this.core.open(pkt);
+      if (body) this._body(body, path);
+      return;
+    }
     const body = this.ch.open(pkt);
     if (!body) return;
-    this.lastRx = now();
     this.stats.rx += pkt.length; this.stats.rxPkts++;
     // packet loss from the counter gaps: exact, independent of what the packets carried
     const c = this.ch.lastRxCtr, w = this.rxWin;
     if (w.start === null) { w.start = c; w.max = c; }
     if (c > w.max) w.max = c;
     if (c >= w.start) w.n++;
+    this._body(body, path);
+  }
+
+  _body(body, path) {
+    this.lastRx = now();
     // Host follows the guest: answer on whatever path the guest is using right now.
-    if (this.role === 'host' && path && this.active !== path) { this.active = path; this.emit('path', this.pathInfo()); }
+    if (this.role === 'host' && path && this.active !== path) { this.active = path; this._route(); this.emit('path', this.pathInfo()); }
     const ch = body[0];
     if (ch === 0x04) return this._ctrlIn(body);
     if (ch === 0x05) { this.cUnacked.delete(body.readUInt32BE(1)); return; }
@@ -232,6 +308,7 @@ class Link extends EventEmitter {
 
   // fraction of packets lost since the last call
   takeLoss() {
+    if (this.core) return this.core.takeLoss();
     const w = this.rxWin;
     if (w.start === null) return 0;
     const expected = w.max - w.start + 1;
@@ -275,6 +352,10 @@ class Link extends EventEmitter {
 
   _tick() {
     const t = now();
+    if (this.core) {
+      const [ago, rx, n] = this.core.poll();
+      this.lastRx = Math.max(this.lastRx, t - ago); this.stats.rx = rx; this.stats.rxPkts = n;
+    }
     const rto = Math.max(40, (this.rtt || 50) * 1.8);
     for (const [, u] of this.cUnacked) if (t - u.t > rto) { u.t = t; this.send(u.b); }
     if (t - this.lastRx > 10000 && t - this.created > 10000) this.close('timeout');
@@ -288,6 +369,7 @@ class Link extends EventEmitter {
     for (const p of this.paths.values()) if (p.kind === 'ws' && p.ws) try { p.ws.close(); } catch {}
     for (const t of this.turns || []) { t.close(); this.net.turnClients?.delete(t); }
     this.net.links.delete(this.sidShort);
+    try { this.core?.close(); } catch {}
     this.emit('close', reason);
   }
 }
@@ -298,6 +380,7 @@ class Net extends EventEmitter {
     super();
     this.id = identity; this.settings = settings;
     this.links = new Map();     // sidShort -> Link
+    this.core = core; this.sockById = new Map(); this.turnByIdx = new Map(); this.turnIdx = 1;
     this.pending = new Map();   // sid -> pending handshake
     this.server = { v4: null, v6: null, ws: null };
     this.publicAddr = { v4: null, v6: null };
@@ -324,6 +407,17 @@ class Net extends EventEmitter {
   }
 
   _bind(type, port) {
+    if (this.core) {
+      // native socket: sessions are handled on its own thread, the rest comes here
+      try {
+        const fam = type === 'udp6' ? 'v6' : 'v4';
+        let w = null;
+        const n = new this.core.Socket(fam === 'v6', port | 0, (buf, addr, rport) => this._onPacket(buf, { kind: 'udp', sock: w, fam, addr, port: rport }));
+        w = new CoreSocket(n, fam);
+        this.sockById.set(w.id, w);
+        return Promise.resolve(w);
+      } catch (e) { if (type === 'udp6') return Promise.reject(e); this.core = null; }
+    }
     return new Promise((res, rej) => {
       const s = dgram.createSocket({ type, ipv6Only: type === 'udp6', recvBufferSize: 8 << 20, sendBufferSize: 4 << 20 });
       s.on('error', (e) => { if (!s._bound) rej(e); });
@@ -397,6 +491,7 @@ class Net extends EventEmitter {
     }
     const t = new TurnClient({ sock, host: addr, port, username: creds.username, credential: creds.credential, tls: tlsMode });
     t.on('data', (inner, peer) => this._onPacket(inner, { kind: 'turn', turn: t, addr: peer.a, port: peer.p, fam: peer.f }));
+    t.idx = this.turnIdx++; this.turnByIdx.set(t.idx, t);
     (this.turnClients ||= new Set()).add(t);
     try {
       const relayed = await Promise.race([t.allocate(), new Promise((_, rej) => setTimeout(() => rej(new Error('turn timeout')), 5000))]);
@@ -414,6 +509,8 @@ class Net extends EventEmitter {
       for (const c of list) {
         const ch = await t.channel(c.a, c.p);
         if (!ch || link.closed) continue;
+        // relayed packets on this channel get unwrapped natively too
+        if (!t.o.tls && t.o.sock?.bindChannel) { t.o.sock.bindChannel(t.o.host, t.o.port, ch, c.a, c.p, t.idx); if (link.active?.turn === t) link._route(); }
         link.addPath({ kind: 'relay', key: `turn|${t.o.tls ? 'tls' : 'udp'}|${c.a}|${c.p}`, turn: t, addr: c.a, port: c.p, fam: c.f, label: t.o.tls ? 'tcp' : t.label, tls: !!t.o.tls });
       }
     }

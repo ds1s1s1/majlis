@@ -1,5 +1,11 @@
 'use strict';
-// Talks to majlis-helper.exe (input injection, virtual pads, game audio, cursor, window capture).
+// Talks to majlis-engine.exe (Rust): the desktop side of hosting (input injection, virtual
+// pads, game audio, pointer, window/display lists) and the video engine (capture + NVENC).
+// One process, one pipe each way:
+//   stdin  one JSON command per line
+//   stdout [type u8][len u32 LE][payload]: 1 JSON event, 2 Opus game audio, 3 pointer, 4 video frame
+// If it ever exits unexpectedly it's back within a second ('restart'), and the host re-applies
+// pads, audio and streams.
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const fs = require('fs');
@@ -7,10 +13,9 @@ const path = require('path');
 
 function helperPath() {
   const cands = [
-    process.env.MAJLIS_HELPER,
-    path.join(process.resourcesPath || '', 'helper', 'majlis-helper.exe'),
-    path.join(__dirname, '../../../helper/dist/majlis-helper.exe'),
-    path.join(__dirname, '../../../helper/bin/Release/net10.0-windows10.0.22621.0/majlis-helper.exe'),
+    process.env.MAJLIS_ENGINE,
+    path.join(process.resourcesPath || '', 'engine', 'majlis-engine.exe'),
+    path.join(__dirname, '../../../engine/target/release/majlis-engine.exe'),
   ];
   return cands.find((c) => c && fs.existsSync(c)) || null;
 }
@@ -19,17 +24,27 @@ class Helper extends EventEmitter {
   constructor() {
     super();
     this.p = null; this.buf = Buffer.alloc(0); this.ready = false; this.info = null;
+    this.stopped = false; this.restarts = 0;
+    this.setMaxListeners(50);
     this.on('error', () => {}); // never let a stray 'error' take the app down
   }
 
   start() {
     const exe = helperPath();
     if (!exe) { this.emit('missing'); return false; }
-    this.p = spawn(exe, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
-    this.p.stdout.on('data', (d) => this._feed(d));
-    this.p.on('exit', (code) => { this.ready = false; this.p = null; this.emit('exit', code); });
-    this.p.on('error', () => {});
-    this.p.stdin.on('error', () => {});
+    this.stopped = false;
+    const p = spawn(exe, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    this.p = p;
+    p.stdout.on('data', (d) => this._feed(d));
+    p.on('exit', (code) => {
+      if (this.p !== p) return;
+      this.ready = false; this.p = null; this.buf = Buffer.alloc(0);
+      this.emit('exit', code);
+      // crashed: come back, and let everyone using it set things up again
+      if (!this.stopped && this.restarts++ < 20) setTimeout(() => { if (!this.stopped && !this.p && this.start()) this.once('hello', () => this.emit('restart')); }, 800);
+    });
+    p.on('error', () => {});
+    p.stdin.on('error', () => {});
     this.cmd({ cmd: 'hello' });
     return true;
   }
@@ -47,10 +62,11 @@ class Helper extends EventEmitter {
         if (m.ev === 'hello') { this.ready = true; this.info = m; }
         this.emit('ev', m);
         // 'error' is special for EventEmitter (throws when nobody listens), so failures from
-        // the helper travel under their own name
+        // the engine travel under their own name
         this.emit(m.ev === 'error' ? 'helper-error' : m.ev, m);
       } else if (type === 2) this.emit('opus', Buffer.from(payload));
       else if (type === 3) this.emit('cursor', { x: payload.readFloatLE(0), y: payload.readFloatLE(4), visible: payload[8] === 1, shape: payload.readInt32LE(9) });
+      else if (type === 4) this.emit('vframe', payload);
     }
     this.buf = o ? Buffer.from(this.buf.subarray(o)) : this.buf;
   }
@@ -60,7 +76,7 @@ class Helper extends EventEmitter {
     try { this.p.stdin.write(JSON.stringify(obj) + '\n'); return true; } catch { return false; }
   }
 
-  // Send a command and wait for its reply event. If the helper reports that this command
+  // Send a command and wait for its reply event. If the engine reports that this command
   // failed, resolve right away with null (and the reason on `lastError`) instead of timing out.
   request(obj, ev, timeout = 4000) {
     return new Promise((res) => {
@@ -74,7 +90,7 @@ class Helper extends EventEmitter {
     });
   }
 
-  stop() { this.cmd({ cmd: 'quit' }); setTimeout(() => { try { this.p?.kill(); } catch {} }, 500); }
+  stop() { this.stopped = true; this.cmd({ cmd: 'quit' }); setTimeout(() => { try { this.p?.kill(); } catch {} }, 500); }
 }
 
 module.exports = { Helper, helperPath };

@@ -4,7 +4,7 @@
 // button press), report what the network looks like so the host can adapt.
 
 const { EventEmitter } = require('events');
-const { VideoRx } = require('./media');
+const { makeRx } = require('./media');
 
 const now = () => Date.now();
 
@@ -57,7 +57,7 @@ class Guest extends EventEmitter {
     const f = this.store.friend(link.peer.id);
     this.keyChanged = !!(f && f.pk && f.pk !== link.peer.pk);
     this.store.upsertFriend({ id: link.peer.id, pk: link.peer.pk, name: f?.name && f.name !== link.peer.id ? f.name : link.peer.nick || link.peer.id, lastSeen: now() });
-    this.rx = new VideoRx({
+    this.rx = makeRx(link, {
       onFrame: (fr) => this._frame(fr),
       onNeedKey: () => this._needKey(),
     });
@@ -94,10 +94,12 @@ class Guest extends EventEmitter {
     switch (m.t) {
       case 'config': {
         this.configs.set(m.epoch, m);
-        if (this.rx) this.rx.film = m.tier === 'movie';
+        if (this.rx) { this.rx.film = m.tier === 'movie'; this.rx.nack = m.tier !== 'play'; }
         this._post({ t: 'config', ...m });
-        // a keyframe for this epoch may have beaten the config here
-        const pk = this.pendingKey; if (pk && pk.epoch === m.epoch) { this.pendingKey = null; this._frame(pk); }
+        // frames of this epoch may have beaten the config here (a film catch-up is seconds of them)
+        const pend = (this.early || []).filter((f) => f.epoch === m.epoch);
+        this.early = (this.early || []).filter((f) => f.epoch !== m.epoch);
+        for (const f of pend) this._frame(f);
         break;
       }
       case 'fclock': this.fclock = m; this._postClock(); break;
@@ -119,7 +121,13 @@ class Guest extends EventEmitter {
   }
 
   _frame(fr) {
-    if (!this.configs.has(fr.epoch)) { if (fr.key) this.pendingKey = fr; return; }
+    if (!this.configs.has(fr.epoch)) {
+      // keep them (from a keyframe on) until the config lands; cap ~25 s of film
+      const e = (this.early ||= []);
+      if (fr.key || e.some((f) => f.epoch === fr.epoch)) e.push(fr);
+      if (e.length > 600) e.splice(0, e.length - 600);
+      return;
+    }
     const link = this.link; if (!link) return;
     // network time = when it landed here minus when the host sent it (host clock -> ours)
     const sentLocal = fr.hostTs - Math.round(link.clockOffset);

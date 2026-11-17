@@ -10,7 +10,7 @@
 const { EventEmitter } = require('events');
 const { Encoder } = require('./encoder');
 const { EngineEncoder } = require('./engine');
-const { VideoTx, RateControl } = require('./media');
+const { makeTx, makeRc } = require('./media');
 const { Movie } = require('./movie');
 
 const ROLES = ['watch', 'pad', 'kbm', 'full'];
@@ -50,6 +50,8 @@ class Host extends EventEmitter {
 
     net.on('knock', (k) => this._onKnock(k));
     net.on('code', (c) => { this.code = c.code ? { code: c.code, exp: c.exp } : null; this.emit('update'); });
+    // the engine came back after a crash: pads, audio, pointer and streams again
+    helper.on('restart', () => { this._helperOn = false; this.gameAudioOn = undefined; if (this.guests.size) { this._ensureHelper(); } });
     helper.on('opus', (pkt) => { if (!this.movie.info) this._sendAudio(audioPacket(pkt.subarray(4), 0, 0, 0)); });
     helper.on('cursor', (c) => {
       const b = Buffer.allocUnsafe(14); b[0] = 0x0a; b.writeFloatLE(c.x, 1); b.writeFloatLE(c.y, 5); b[9] = c.visible ? 1 : 0; b.writeInt32LE(c.shape, 10);
@@ -77,6 +79,21 @@ class Host extends EventEmitter {
       for (const g of this.guests.values()) if (g.tier === 'movie' && (g.rendition || 'high') === f.rendition && g.configSent.movie === f.epoch) g.tx.send(f);
       if (f.rendition === 'high') this.emit('local', { t: 'v', epoch: f.epoch, id: f.id, key: f.key, data: f.data, enc: f.encMs, net: 0, pts: f.pts });
     });
+    // The light film changed bitrate: what the old one encoded ahead (up to ~10 s) is still
+    // queued for each viewer. Swap it for the new one from where the line is, so a step down
+    // reaches the screen in ~2 s instead of ~10 (by then a weak line had long run dry).
+    this.movie.on('lowswap', () => {
+      const m = this.movie, ep = m.lowConfig?.epoch;
+      for (const g of this.guests.values()) {
+        const s = g.tx.sentPts;
+        if (g.tier !== 'movie' || g.rendition !== 'low' || g.configSent.movie !== ep || s == null) continue;
+        g.tx.flush();
+        g.bufHist = []; // judge the new bitrate on its own trend, not the one that led to it
+        const out = [...m.hist.low.filter((f) => f.epoch === ep || f.pts > s), ...m.ahist.filter((a) => a.pts > s).map((a) => ({ a, pts: a.pts }))];
+        out.sort((x, y) => x.pts - y.pts);
+        for (const x of out) x.a ? g.tx.sendRaw(audioPacket(x.a.data, 1, x.a.epoch, x.a.pts)) : g.tx.send(x);
+      }
+    });
     this.movie.on('audio', ({ data, pts, epoch }) => {
       // film audio rides the paced queue with the picture; on a line that loses packets each
       // one also goes again a packet later, so a single loss is never heard
@@ -96,6 +113,8 @@ class Host extends EventEmitter {
     this.movie.on('clock', (c) => {
       const fresh = c.run !== this.clockRun;
       this.clockRun = c.run;
+      if (fresh) for (const g of this.guests.values()) g.prevA = null; // no audio from the old run
+      for (const g of this.guests.values()) g.tx.setClock?.(c);
       for (const g of this.guests.values()) {
         if (fresh && g.tier === 'movie') { g.tx.flush(); g.audioRun = c.run; }
         if (g.tier === 'movie' || this.mode === 'watch') g.link.ctrl({ t: 'fclock', ...c });
@@ -179,7 +198,7 @@ class Host extends EventEmitter {
     const friend = this.store.upsertFriend({ id: k.from, pk: k.pk, name, lastSeen: now(), ...(trust ? { trust: 'always', role } : {}) });
     const g = {
       sid, link, id: k.from, nick: friend.name, role: ROLES.includes(role) ? role : 'watch', slot: null, padType: 'x360',
-      tier: null, tx: new VideoTx(link), joined: now(), auto, caps: k.caps || {}, fb: null, stats: {}, inSeq: -1,
+      tier: null, tx: makeTx(link), joined: now(), auto, caps: k.caps || {}, fb: null, stats: {}, inSeq: -1,
       expiresAt: duration === 'session' ? null : now() + ({ '10m': 600e3, '1h': 3600e3 }[duration] || 0) || null,
       muted: false, hand: false, configSent: {},
     };
@@ -266,10 +285,15 @@ class Host extends EventEmitter {
 
   // Desktop audio capture on/off, without restarting it when it's already in the right state
   // (a restart is an audible gap).
+  // Which sound goes out: everything except Majlis itself (friends' voices and our own
+  // sounds never echo back to them), or, when one window is shared and "that window's sound
+  // only" is on, just that program's sound (like Discord).
   _gameAudio(on) {
-    if (on === this.gameAudioOn) return;
-    this.gameAudioOn = on;
-    this.helper.cmd(on ? { cmd: 'audio', on: true, kbps: 128, keep: this.store.get('replaySeconds') + 5 } : { cmd: 'audio', on: false });
+    const only = on && this.store.get('captureWindow') && this.store.get('windowAudioOnly') !== false ? this.wincap?.pid : null;
+    const key = on ? `on:${only || ''}` : 'off';
+    if (key === this.gameAudioOn) return;
+    this.gameAudioOn = key;
+    this.helper.cmd(on ? { cmd: 'audio', on: true, kbps: 128, keep: this.store.get('replaySeconds') + 5, ...(only ? { include: only } : { exclude: process.pid }) } : { cmd: 'audio', on: false });
   }
 
   // Ask Windows to schedule the encoder's GPU work ahead of the game's, so a game pinning the
@@ -397,8 +421,13 @@ class Host extends EventEmitter {
     const c = g.rendition === 'low' ? this.movie.lowConfig : this.movie.config;
     if (!c || g.configSent.movie === c.epoch) return;
     g.tier = 'movie';
+    // the pace the tick would set, before the catch-up goes out: a new guest's sender still has
+    // its default (20 Mbps), which blew seconds of catch-up into a 3 Mbps line's drop-tail
+    if (g.rc) g.tx.rateKbps = Math.max(800, g.rc.target);
+    g.tx.keyed = true;
     g.tx.skipToKey = false;
     g.tx.dueOf = (pts) => this.movie.dueOf(pts);
+    g.tx.setClock?.(this.movie.clockMsg());
     // What's already been encoded ahead never comes round again: send it now, from the last
     // keyframe before the picture, so a newcomer (or a switch to the other rendition) starts
     // straight away instead of waiting for what's being encoded seconds from now.
@@ -406,7 +435,10 @@ class Host extends EventEmitter {
     // exactly where the old one stopped, so there's nothing to resend)
     const run = this.movie.clock.run;
     const fresh = g.feed?.run !== run || g.feed?.rendition !== g.rendition;
+    const switched = fresh && g.feed?.run === run;
     g.feed = { run, rendition: g.rendition };
+    // switching rendition: what's still queued of the other one is no use any more
+    if (switched) g.tx.flush();
     const catchUp = fresh ? this.movie.replay(g.rendition) : [];
     const epochs = new Set([...catchUp.map((f) => f.epoch), c.epoch]);
     for (const e of epochs) { const cc = this.movie.configs.get(e); if (cc) g.link.ctrl(movieConfigMsg(cc)); }
@@ -414,7 +446,7 @@ class Host extends EventEmitter {
     g.link.ctrl({ t: 'fclock', ...this.movie.clockMsg() });
     for (const f of catchUp) g.tx.send(f);
     // the film's audio for what's buffered ahead (audio is the same whichever rendition)
-    if (g.audioRun !== this.movie.clock.run) {
+    if (switched || g.audioRun !== this.movie.clock.run) { // (a switch flushed the queued audio too; the guest drops repeats by pts)
       g.audioRun = this.movie.clock.run;
       for (const a of this.movie.replayAudio()) g.tx.sendRaw(audioPacket(a.data, 1, a.epoch, a.pts));
     }
@@ -684,7 +716,7 @@ class Host extends EventEmitter {
       this._stopEncoders();
       for (const g of this.guests.values()) {
         g.tier = 'movie'; g.tierEnc = () => null;
-        if (!g.rc) g.rc = new RateControl({ maxKbps: (this.store.get('watchMbps') || 15) * 1000, startKbps: (this.store.get('watchMbps') || 15) * 1000, relaxed: true });
+        if (!g.rc) g.rc = makeRc(g.link, { maxKbps: (this.store.get('watchMbps') || 15) * 1000, startKbps: (this.store.get('watchMbps') || 15) * 1000, relaxed: true });
         g.rc.relaxed = true;
         this._sendMovieConfig(g);
       }
@@ -720,7 +752,7 @@ class Host extends EventEmitter {
         if (!g.rc) {
           const hint = this.store.get('peakLearning') ? this.store.peakHint() : null;
           const start = lan ? cap * 0.6 : Math.min(cap * 0.5, hint ? hint.mbps * 900 : 12000);
-          g.rc = new RateControl({ maxKbps: cap, startKbps: start, stability: this._stability(g), burstMs: this.engine?.ok ? 150 : 400 });
+          g.rc = makeRc(g.link, { maxKbps: cap, startKbps: start, stability: this._stability(g), burstMs: this.engine?.ok ? 150 : 400 });
         } else { g.rc.setMax(cap); g.rc.setStability(this._stability(g)); }
         if (g.maxKbps) g.rc.setMax(Math.min(cap, g.maxKbps)); // data saver on that guest's side
       }
@@ -730,12 +762,18 @@ class Host extends EventEmitter {
       if (!t) {
         // NVIDIA: the Rust engine (capture straight into NVENC, live bitrate changes, recovery
         // without keyframes). Anything else: ffmpeg as before.
-        const enc = this.engine?.ok && want.enc.fam === 'nvenc' && !want.hdr ? new EngineEncoder(this.engine) : new Encoder(this.ffmpeg);
+        const enc = this.engine?.ok && !this.engineFailed && want.enc.fam === 'nvenc' && !want.hdr ? new EngineEncoder(this.engine) : new Encoder(this.ffmpeg);
         const nt = { enc, codec, kbps, opts: want, config: null, sig: this._sig(want) };
         enc.on('config', (c) => { nt.config = c; this._sendConfig(tier); });
         enc.on('frame', (f) => { for (const g of this.guests.values()) if (g.tier === tier && g.configSent[tier] === nt.config?.epoch) g.tx.send(f); });
         nt.retries = 0;
         enc.on('error', (e) => {
+          // the engine can't do this source (a screen on another GPU, an old driver): ffmpeg takes over
+          if (enc instanceof EngineEncoder && /capture|start|NVIDIA|nvEnc/i.test(String(e.err)) && nt.retries >= 1) {
+            this.engineFailed = true; this.emit('notice', { key: 'engine_fallback', detail: String(e.err).slice(0, 200) });
+            if (this.tiers[tier] === nt) { this._stopTier(tier); for (const g of this.guests.values()) g.configSent = {}; this._retier(true); }
+            return;
+          }
           // desktop duplication drops out on mode switches, UAC prompts and fullscreen flips; retry
           if (this.tiers[tier] === nt && nt.retries++ < 6) return setTimeout(() => { if (this.tiers[tier] === nt) enc.start(nt.opts); }, 800);
           this.emit('encoder-error', { tier, err: e.err });
@@ -776,7 +814,7 @@ class Host extends EventEmitter {
 
   async _ensureWindowCapture() {
     const win = this.store.get('captureWindow');
-    if (!win) { if (this.wincap) { this.helper.cmd({ cmd: 'wincap_stop' }); this.wincap = null; } return; }
+    if (!win) { if (this.wincap) { this.wincap = null; if (this._helperOn && !this.movie.info) this._gameAudio(true); } return; }
     const gfx = !!this.gfx && this.encoders.some((e) => e.fam === 'nvenc') && !this.store.get('hdr');
     if (this.wincap && this.wincap.hwnd === win.hwnd && !!this.wincap.gfx === gfx) return;
     if (gfx) {
@@ -791,7 +829,9 @@ class Host extends EventEmitter {
         this.emit('update');
         return;
       }
-      this.wincap = { hwnd: win.hwnd, gfx: true, w: r.w & ~1, h: r.h & ~1, rect: { x: r.x, y: r.y, w: r.w, h: r.h } };
+      const wl = await this.helper.request({ cmd: 'windows' }, 'windows');
+      this.wincap = { hwnd: win.hwnd, gfx: true, pid: wl?.list.find((x) => x.hwnd === win.hwnd)?.pid || null, w: r.w & ~1, h: r.h & ~1, rect: { x: r.x, y: r.y, w: r.w, h: r.h } };
+      if (this._helperOn && !this.movie.info) this._gameAudio(true);
       return;
     }
     if (this.wincap?.gfx) this.wincap = null;
@@ -870,13 +910,18 @@ class Host extends EventEmitter {
       // Anyone watching over the internet: keep the light film running so a switch is instant.
       // It starts modest and follows the line both ways (a retune is seamless).
       const remote = movieGuests.some((g) => !g.link.pathInfo()?.lan || g.rc.target < hi * 0.85);
-      if (remote || movieGuests.some((g) => g.rendition === 'low')) this.movie.ensureLow(Math.min(lowCap, 1200));
+      // (and before anyone's here: whoever joins late then starts from frames already encoded
+      // ahead, instead of waiting seconds for a light film to start up)
+      if (!movieGuests.length || remote || movieGuests.some((g) => g.rendition === 'low')) this.movie.ensureLow(Math.min(lowCap, 1200));
       else if (this.movie.lowWanted) this.movie.dropLow();
-      let lowMin = Infinity, lowBuf = Infinity, lowSlope = Infinity;
+      let lowMin = Infinity, lowBuf = Infinity, lowSlope = Infinity, lowSent = Infinity;
       const clockOn = !!this.movie.clock.at;
       if (!this.movie.low) this.lowTuned = t; // a fresh light film gets time to settle
       for (const g of movieGuests) {
         const r = g.rendition || 'high';
+        // the light film was a guess made before the path was known; on the local network, go full
+        // (only while the line really carries the full film, or the two rules would ping-pong)
+        if (r === 'low' && g.link.pathInfo()?.lan && g.rc.target >= hi * 0.9 && t - g.rc.lastDrop > 5000) { g.rendition = 'high'; g.configSent = {}; this._sendMovieConfig(g); continue; }
         if (r === 'high') {
           g.lowSince = g.rc.target < hi * 0.75 ? g.lowSince || t : 0;
           if (g.lowSince && t - g.lowSince > 1500 && this.movie.lowConfig) { g.rendition = 'low'; g.configSent = {}; this._sendMovieConfig(g); }
@@ -889,6 +934,7 @@ class Host extends EventEmitter {
           g.buffered = clockOn && g.tx.sentPts != null ? g.tx.sentPts - this.movie.curMs() : null;
           if (g.buffered != null) {
             lowBuf = Math.min(lowBuf, g.buffered);
+            lowSent = Math.min(lowSent, g.tx.sentPts);
             // which way it's going over the last few seconds (ms of film per second)
             (g.bufHist ||= []).push({ t, b: g.buffered });
             while (g.bufHist.length > 1 && t - g.bufHist[0].t > 4000) g.bufHist.shift();
@@ -922,11 +968,15 @@ class Host extends EventEmitter {
         const since = t - (this.lowTuned || 0);
         // The surest sign: a viewer's buffer running low and still shrinking means the line
         // isn't keeping up with this bitrate, whatever the estimate says. Step down now.
-        const settled = clockOn && t - (this.movie.clock.at || t) > 3000;
-        if (settled && since > 3000 && lowBuf < 1500) want = Math.min(want, this.movie.lowKbps * 0.65);
+        // The light film is encoded ~10 s ahead, so a step down reaches viewers that much later:
+        // judge the buffer again only once they're on it, or every 3 s adds another step (1200k -> 90k).
+        const ra = this.movie.low?.readyAt;
+        const settled = clockOn && t - (this.movie.clock.at || t) > 3000 && (ra == null || lowSent >= ra);
+        // (low AND shrinking: a viewer who just joined has a thin buffer that's filling up)
+        if (settled && since > 3000 && lowBuf < 1500 && lowSlope < 0) want = Math.min(want, this.movie.lowKbps * 0.65);
         else if (settled && since > 3000 && lowBuf < 4000 && lowSlope < -150) want = Math.min(want, this.movie.lowKbps * 0.75);
         if ((want < this.movie.lowKbps * 0.85 && since > 3000) || (want > this.movie.lowKbps * 1.3 && since > 20000 && lowBuf > 6000 && lowSlope > -50)) {
-          if (this.movie.retuneLow(want)) this.lowTuned = t;
+          if (this.movie.retuneLow(want, lowSent < Infinity ? lowSent : null)) this.lowTuned = t;
         }
       }
     }
@@ -974,8 +1024,7 @@ class Host extends EventEmitter {
     else if (fps < full && bpp(full) > 0.045) fps = full;
     if (Math.abs(want - tt.kbps) / tt.kbps < 0.05 && fps === (tt.fpsNow || full)) return;
     tt.kbps = want; tt.fpsNow = fps;
-    tt.enc.swap({ kbps: want, fps });
-    tt.enc.opts.fps = full; // the tier's own frame rate stays what it was asked for
+    tt.enc.reconfigure({ kbps: want, fps }); // the tier keeps asking for `full`; this is just the current rate
   }
 
   _recordPeak() {

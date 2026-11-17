@@ -103,21 +103,21 @@ npx wrangler secret put ACCESS_KEY
 
 ## البناء من الكود
 
-تحتاج Node 20 أو أحدث، و .NET 10 SDK، و ffmpeg في الـ PATH للتطوير.
+تحتاج Node 20 أو أحدث، و Rust (stable)، و CMake (لـ libopus)، و ffmpeg في الـ PATH للتطوير.
 
 ```
-cd helper
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o dist
-
-cd ../engine
+cd engine
 cargo build --release
 
 cd ../app
 npm install
+npm run core
 npm start
 npm test
 npm run dist
 ```
+
+`cargo build` يبني محرك البث `majlis-engine.exe` ومكتبة الشبكة `majlis-core`، و `npm run core` ينسخ المكتبة لمجلد `app/native`.
 
 ## اللي باقي
 

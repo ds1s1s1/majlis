@@ -300,4 +300,77 @@ class RateControl {
   }
 }
 
-module.exports = { VideoTx, VideoRx, RateControl, SHARD, CH_VIDEO, VHDR };
+// ------------------------------------------------------------------ native (majlis-core)
+// The same three jobs done in Rust when the addon is there: everything per packet (FEC,
+// sealing, pacing, reassembly, per-packet feedback, repairs) never touches JavaScript.
+// These keep the exact faces the host and guest code already use.
+class CoreTx {
+  constructor(link) { this.link = link; this.c = link.core; this._rate = 20000; this._keyed = false; this._st = null; this._stT = 0; link.on('skip', (id) => this.onSkip?.(id)); }
+  send(frame) {
+    const pts = (frame.pts ?? frame.ts ?? 0) >>> 0;
+    this.c.txFrame(frame.data, !!frame.key, frame.epoch & 0xff, frame.id >>> 0, Math.min(255, Math.round(frame.encMs || 0)), pts);
+  }
+  sendRaw(buf) { this.c.txRaw(buf); }
+  flush() { this.c.txFlush(); }
+  setClock(c) { this.c.txClock(c.pos || 0, c.at || 0, !!c.playing); }
+  _state() { const t = Date.now(); if (!this._st || t - this._stT > 40) { this._st = this.c.txState(); this._stT = t; } return this._st; }
+  get rateKbps() { return this._rate; }
+  set rateKbps(v) { if (Math.abs(v - this._rate) > 1) { this._rate = v; this.c.txSet(v, this._keyed); } }
+  get keyed() { return this._keyed; }
+  set keyed(v) { if (!!v !== this._keyed) { this._keyed = !!v; this.c.txSet(this._rate, this._keyed); } }
+  get sentPts() { const p = this._state()[0]; return p < 0 ? null : p; }
+  get skipped() { return this._state()[1]; }
+  get repaired() { return this._state()[3]; }
+  // these are all decided natively now
+  set fecRatio(v) {} get fecRatio() { return this._state()[4]; }
+  set dueOf(f) {} set skipToKey(v) {}
+  get queue() { return []; }
+}
+
+// Rate control from per-packet feedback (gcc.rs), behind RateControl's face.
+class CoreRate {
+  constructor(link, { maxKbps, minKbps = 1500, startKbps, stability = false, relaxed = false }) {
+    this.c = link.core; this.relaxed = relaxed; this.jitEw = 0; this.bad = 0;
+    this.c.rateSet(Math.min(maxKbps, startKbps || maxKbps * 0.5), minKbps, maxKbps, stability ? 1 : 0);
+    this._max = maxKbps; this._stab = stability; this._r = this.c.rate(); this._lastDropSet = 0;
+  }
+  _sync() { this._r = this.c.rate(); }
+  get target() { return this._r[0]; }
+  set target(v) { this.c.rateSet(v, -1, -1, -1); this._sync(); }
+  get max() { return this._max; }
+  setMax(k) { this._max = k; this.c.rateSet(-1, -1, k, -1); this._sync(); }
+  get stability() { return this._stab; }
+  setStability(on) { this._stab = !!on; this.c.rateSet(-1, -1, -1, on ? 1 : 0); }
+  get lossEw() { return this._r[1]; }
+  get congestions() { return this._r[2]; }
+  get lastDrop() { return Math.max(this._lastDropSet, Date.now() - this._r[3]); }
+  set lastDrop(v) { this._lastDropSet = v; }
+  get fecRatio() { return this._r[6]; }
+  get trend() { return this._r[5]; }
+  get acked() { return this._r[4]; }
+  // the guest's 100 ms report: decisions are made per packet in Rust; keep the jitter
+  // estimate the host uses to pick stability mode
+  feedback(fb) { this.jitEw = this.jitEw ? this.jitEw * 0.9 + (fb.jitter || 0) * 0.1 : (fb.jitter || 0); this._sync(); return null; }
+}
+
+// Receive side: frames arrive whole from Rust (link 'vframe'); this only reports.
+class CoreRx {
+  constructor(link, { onFrame }) {
+    this.link = link; this.c = link.core; this._film = false; this._nack = false;
+    link.on('vframe', onFrame);
+    this._apply();
+  }
+  _apply() { this.c.setReceive(true, this._nack || this._film, this._film, this.link.rtt || 0); }
+  get film() { return this._film; }
+  set film(v) { if (!!v !== this._film) { this._film = !!v; this._apply(); } }
+  set nack(v) { if (!!v !== this._nack) { this._nack = !!v; this._apply(); } }
+  push() {}
+  count() {}
+  report() { this._apply(); try { return JSON.parse(this.c.rxReport()); } catch { return { kbps: 0, loss: 0, lost: 0, frames: 0, qd: 0, jitter: 0, fps: 0 }; } }
+}
+
+const makeTx = (link) => (link.core ? new CoreTx(link) : new VideoTx(link));
+const makeRc = (link, o) => (link.core ? new CoreRate(link, o) : new RateControl(o));
+const makeRx = (link, o) => (link.core ? new CoreRx(link, o) : new VideoRx(o));
+
+module.exports = { VideoTx, VideoRx, RateControl, CoreTx, CoreRate, CoreRx, makeTx, makeRc, makeRx, SHARD, CH_VIDEO, VHDR };

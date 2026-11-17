@@ -3,9 +3,6 @@ app/dist/
 app/dist-friends/
 app/dist-public/
 app/src/main/build-config.json
-helper/bin/
-helper/obj/
-helper/dist/
 server/data/
 cloud/.wrangler/
 cloud/.turn.env
@@ -13,3 +10,5 @@ cloud/.turn.env
 *.log
 engine/target/
 engine/vendor/
+app/native/
+helper/

@@ -435,8 +435,7 @@ app.whenReady().then(async () => {
   helper = new Helper();
   guest = new Guest({ net, store });
   // the Rust engine (NVIDIA): capture + NVENC without ffmpeg; others fall back to ffmpeg
-  engine = new Engine();
-  engine.start();
+  engine = new Engine(helper);
   host = new Host({ store, net, helper, encoders, ffmpeg: ffmpegPath(), engine });
   replay = new Replay({ ffmpeg: ffmpegPath(), helper, store, encoders });
   handlers();
@@ -532,5 +531,5 @@ app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); } catch {}
-  try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); engine?.stop(); net?.stop(); store?.flush(); } catch {}
+  try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
 });

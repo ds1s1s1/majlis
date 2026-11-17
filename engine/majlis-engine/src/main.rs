@@ -9,9 +9,13 @@
 //   {"cmd":"stop","id":1}
 //   {"cmd":"quit"}
 #![windows_subsystem = "windows"]
+mod audio;
 mod capture;
+mod desk;
 mod gpu;
+mod input;
 mod nvenc;
+mod pads;
 mod proto;
 mod source;
 
@@ -59,6 +63,10 @@ fn main() {
     }
     proto::event("ready", json!({ "version": env!("CARGO_PKG_VERSION"), "nvenc": nvenc::available().err().unwrap_or_default(), "ok": nvenc::available().is_ok() }));
     let mut m = Manager { sources: HashMap::new(), stream_src: HashMap::new() };
+    let mut inp = input::Input::new();
+    let mut pads = pads::Pads::new();
+    let aud = audio::Audio::new();
+    unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED); }
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -66,7 +74,37 @@ fn main() {
         let id = c["id"].as_u64().unwrap_or(0) as u8;
         let u = |k: &str| c[k].as_u64().map(|v| v as u32);
         match c["cmd"].as_str().unwrap_or("") {
-            "hello" => proto::event("hello", json!({ "ok": nvenc::available().is_ok(), "nvenc": nvenc::available().err().unwrap_or_default() })),
+            "hello" => proto::event("hello", json!({ "ok": nvenc::available().is_ok(), "nvenc": nvenc::available().err().unwrap_or_default(), "vigem": pads.available(), "vigemError": pads.error, "displays": desk::displays(), "wgc": true, "engine": env!("CARGO_PKG_VERSION") })),
+            // ---- the desktop side (what the C# helper used to do)
+            "in" => { if let Some(e) = c["e"].as_array() { inp.apply(e); } }
+            "capture_rect" => {
+                let (x, y, w, h) = (c["x"].as_i64().unwrap_or(0) as i32, c["y"].as_i64().unwrap_or(0) as i32, c["w"].as_i64().unwrap_or(1920) as i32, c["h"].as_i64().unwrap_or(1080) as i32);
+                inp.set_rect(x, y, w, h);
+                *desk::CUR_RECT.lock().unwrap() = (x, y, w.max(1), h.max(1));
+            }
+            "release_all" => inp.release_all(),
+            "displays" => proto::event("displays", json!({ "list": desk::displays() })),
+            "windows" => proto::event("windows", json!({ "list": desk::windows_list() })),
+            "icon" => { let p = c["path"].as_str().unwrap_or(""); proto::event("icon", json!({ "path": p, "png": desk::icon(p) })); }
+            "mode" => proto::event("mode", json!({ "ok": false })), // never change the host's screen mode
+            "mode_restore" => {}
+            "pad_add" => pads.add(c["slot"].as_i64().unwrap_or(1), c["type"].as_str().unwrap_or("x360")),
+            "pad" => pads.state(c["slot"].as_i64().unwrap_or(1), &c),
+            "pad_motion" => pads.motion(c["slot"].as_i64().unwrap_or(1), &c),
+            "pad_del" => pads.remove(c["slot"].as_i64().unwrap_or(1)),
+            "pads_clear" => pads.remove_all(),
+            "audio" => {
+                if c["on"].as_bool().unwrap_or(false) {
+                    aud.start(u("kbps").unwrap_or(128), u("keep").unwrap_or(30), c["exclude"].as_u64().map(|v| v as u32), c["include"].as_u64().map(|v| v as u32));
+                } else { aud.stop(); }
+            }
+            "replay_audio" => { let p = c["path"].as_str().unwrap_or(""); proto::event("replay_audio", json!({ "path": p, "ok": aud.save_wav(p, u("seconds").unwrap_or(30)) })); }
+            "cursor" => desk::cursor(c["on"].as_bool().unwrap_or(false)),
+            "focus" => desk::focus(c["hwnd"].as_i64().unwrap_or(0)),
+            "winprep" => proto::event("winprep", desk::winprep(c["hwnd"].as_i64().unwrap_or(0))),
+            "gpu_prio" => { let pid = u("pid").unwrap_or(0); proto::event("gpu_prio", json!({ "pid": pid, "ok": desk::gpu_priority(pid) })); }
+            "ptt" => desk::ptt(c["vk"].as_i64().unwrap_or(0) as i32),
+            "wincap" | "wincap_stop" => {} // window capture lives in the encoder now
             "start" => {
                 let (key, kind) = match c["hwnd"].as_i64() {
                     Some(h) => (format!("w{h}"), SourceKind::Window(h)),
@@ -94,7 +132,7 @@ fn main() {
                 m.to_stream(id, Cmd::Invalidate { id, frames });
             }
             "stop" => { m.to_stream(id, Cmd::Detach { id }); m.stream_src.remove(&id); }
-            "quit" => break,
+            "quit" => { pads.remove_all(); inp.release_all(); break; }
             _ => {}
         }
     }

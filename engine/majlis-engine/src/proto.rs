@@ -22,6 +22,9 @@ fn send(kind: u8, parts: &[&[u8]]) {
     }
 }
 
+// raw framed payload (2 = opus game audio, 3 = cursor)
+pub fn raw(kind: u8, data: &[u8]) { send(kind, &[data]); }
+
 pub fn event(ev: &str, mut data: serde_json::Value) {
     if let Some(o) = data.as_object_mut() {
         o.insert("ev".into(), ev.into());

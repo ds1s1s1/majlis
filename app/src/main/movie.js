@@ -352,21 +352,24 @@ class Movie extends EventEmitter {
   // New bitrate for the light rendition, swapped in without a gap or a resend: the current one
   // keeps going while the replacement starts up and encodes ahead to a keyframe a little past
   // it; when the current one reaches that frame, the replacement carries on from there.
-  retuneLow(kbps) {
+  // `sentMs`: how far the slowest viewer's line has got; the switch goes a little past that.
+  retuneLow(kbps, sentMs) {
     if (!this.low || this.lowNext || !this.low.last || Math.abs(kbps - this.lowKbps) < this.lowKbps * 0.25) return false;
     this.lowKbps = kbps;
-    this._startLow(true);
+    this._startLow(true, sentMs);
     return true;
   }
 
   dropLow() { this.lowWanted = false; this._stopLow(); }
 
-  async _startLow(swap = false) {
+  async _startLow(swap = false, sentMs = null) {
     if (!this.info || (this.low && !swap) || (swap && this.lowNext)) return;
-    const slot = { startPos: 0, epoch: null, cfg: null, last: 0, kb: this.lowKbps || 3000, pending: null, readyAt: null };
+    const slot = { startPos: 0, epoch: null, cfg: null, last: 0, kb: this.lowKbps || 3000, pending: null, readyAt: null, from: 0 };
     if (swap) this.lowNext = slot; else this.low = slot;
     let from = this.curMs() / 1000;
-    if (swap && this.low) from = (Math.max(this.low.last, this.curMs()) + 2500) / 1000;
+    // (2 s past what's on the wire: time for the replacement to start up and reach it)
+    if (swap && this.low) from = (Math.max(sentMs ?? this.low.last, this.curMs()) + 2000) / 1000;
+    slot.from = from * 1000;
     const kpos = from > 0.5 ? await keyframeBefore(this.ffmpeg, this.state.file, from) : 0;
     if ((swap && this.lowNext !== slot) || (!swap && this.low !== slot)) return;
     const kb = slot.kb;
@@ -383,9 +386,10 @@ class Movie extends EventEmitter {
       if (this.lowNext === slot) {
         // the replacement: hold on to everything from its first keyframe ahead of the current one
         if (slot.pending) { slot.pending.push({ ...f, pts }); this._gate(p, pts, LEAD.low); return; }
-        if (!f.key || !slot.cfg || (this.low && pts <= this.low.last)) return;
+        if (!f.key || !slot.cfg || pts < slot.from - 50) return;
         slot.pending = [{ ...f, pts }]; slot.readyAt = pts;
-        if (!this.low?.proc) this._takeOver(slot);
+        // the current one runs seconds ahead, so it's usually past this point already: swap now
+        if (!this.low?.proc || this.low.last >= pts) this._takeOver(slot);
         return;
       }
       if (this.low !== slot) return;
@@ -406,8 +410,12 @@ class Movie extends EventEmitter {
     const old = this.low;
     this.low = slot; this.lowNext = null;
     try { old?.proc?.stop(); } catch {}
+    // what the old one encoded past the switch is never shown: forget it
+    const swap = old?.epoch != null && slot.readyAt != null;
+    if (swap) this.hist.low = this.hist.low.filter((x) => x.epoch !== old.epoch || x.pts < slot.readyAt);
     const pend = slot.pending || []; slot.pending = null;
     for (const f of pend) this._emitLow(slot, f, f.pts);
+    if (swap) this.emit('lowswap');
   }
 
   _emitLow(slot, f, pts) {

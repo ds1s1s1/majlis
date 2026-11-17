@@ -84,7 +84,7 @@ export const STR = {
     about: 'عن البرنامج', about_text: 'بدون حسابات. رقمك مشتق من مفتاح على جهازك، والبث مشفّر من طرف لطرف. جُرّب على الشبكات السعودية.',
     pyrowave_soon: 'PyroWave (قريبًا)',
 
-    notice_wincap_failed: 'ما قدرنا نلتقط النافذة، رجعنا للشاشة كاملة', notice_encoder_error: 'المرمز وقف', notice_no_ffmpeg: 'ما لقينا ffmpeg. حدد مساره من الإعدادات.', notice_net_failed: 'ما قدرنا نفتح منافذ الشبكة',
+    notice_wincap_failed: 'ما قدرنا نلتقط النافذة، رجعنا للشاشة كاملة', notice_engine_fallback: 'محرك البث ما يقدر على هالشاشة، رجعنا للطريقة العادية', notice_encoder_error: 'المرمز وقف', notice_no_ffmpeg: 'ما لقينا ffmpeg. حدد مساره من الإعدادات.', notice_net_failed: 'ما قدرنا نفتح منافذ الشبكة',
     notice_access_expired: 'انتهت صلاحيتك، صرت متفرج',
     when_now: 'الحين', when_min: 'قبل {n} د', when_hour: 'قبل {n} س', when_day: 'قبل {n} يوم',
     mode_play: 'العب', mode_watch: 'سهرة', mode_label: 'وش بتسوون الليلة؟',
@@ -197,7 +197,7 @@ export const STR = {
     set_integr: 'Integrations', routerlock: 'DS1 Router Lock', routerlock_found: 'Found', routerlock_missing: 'Not found', routerlock_open: 'Open',
     about: 'About', about_text: 'No accounts. Your number comes from a key on this machine, and streams are end-to-end encrypted. Tested on Saudi networks.',
     pyrowave_soon: 'PyroWave (soon)',
-    notice_wincap_failed: "Couldn't capture that window, back to the full screen", notice_encoder_error: 'The encoder stopped', notice_no_ffmpeg: "ffmpeg wasn't found. Set its path in settings.", notice_net_failed: "Couldn't open network ports",
+    notice_wincap_failed: "Couldn't capture that window, back to the full screen", notice_engine_fallback: "The streaming engine can't drive this screen, switched to the standard path", notice_encoder_error: 'The encoder stopped', notice_no_ffmpeg: "ffmpeg wasn't found. Set its path in settings.", notice_net_failed: "Couldn't open network ports",
     notice_access_expired: 'Your access ended, you are a spectator now',
     when_now: 'just now', when_min: '{n} min ago', when_hour: '{n} h ago', when_day: '{n} d ago',
     mode_play: 'Play', mode_watch: 'Watch', mode_label: "What's tonight?",

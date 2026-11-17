@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Play with your friends over the internet. No accounts, just numbers.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
@@ -11,7 +11,8 @@
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "fonts": "node scripts/copy-fonts.js",
-    "dist": "electron-builder --win portable nsis"
+    "dist": "npm run core && electron-builder --win portable nsis",
+    "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\""
   },
   "dependencies": {
     "ws": "^8.18.0"
@@ -27,16 +28,10 @@
     "productName": "Majlis",
     "files": [
       "src/**/*",
+      "native/**/*",
       "package.json"
     ],
     "extraResources": [
-      {
-        "from": "../helper/dist",
-        "to": "helper",
-        "filter": [
-          "**/*"
-        ]
-      },
       {
         "from": "../engine/target/release",
         "to": "engine",
@@ -66,7 +61,10 @@
     "nsis": {
       "artifactName": "Majlis-setup.exe",
       "oneClick": true
-    }
+    },
+    "asarUnpack": [
+      "native/**/*"
+    ]
   },
   "homepage": "https://github.com/ds1s1s1/majlis",
   "repository": {

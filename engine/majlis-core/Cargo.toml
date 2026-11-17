@@ -1,0 +1,29 @@
+[package]
+name = "majlis-core"
+version = "0.6.0"
+edition = "2021"
+description = "Majlis network core: sockets, encryption, FEC, pacing, rate control and NACK, as a Node addon"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { version = "2.16", default-features = false, features = ["napi8"] }
+napi-derive = "2.16"
+aes-gcm = "0.10"
+socket2 = "0.6"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_System_IO",
+  "Win32_NetworkManagement_QoS",
+  "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_Media",
+]
+
+[build-dependencies]
+napi-build = "2"
