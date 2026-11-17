@@ -20,10 +20,16 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   const hwnd = (bw) => Number(bw.getNativeWindowHandle().readBigUInt64LE(0));
   // watch together on everyone's own line: { role: 'host'|'guest', viewer, epoch } while one is on
   let party = null;
-  const addons = () => store.get('addons') || DEFAULT_ADDONS;
+  // Profiles ("who's watching"): each has its own addons, progress, library and ratings. The
+  // default profile uses the plain keys, so what was there before stays.
+  const profile = () => store.get('mediaProfile') || 'default';
+  const pk = (k) => (profile() === 'default' ? k : `${k}@${profile()}`);
+  const pget = (k) => store.get(pk(k));
+  const pset = (k, v) => store.set(pk(k), v);
+  const addons = () => pget('addons') || DEFAULT_ADDONS;
   // up from the start (an idle process), so the first visit to cinema doesn't wait for it
   svc._start().catch(() => {});
-  const progress = () => store.get('mediaProgress') || {};
+  const progress = () => pget('mediaProgress') || {};
   const toOverlay = (m) => { if (overlay && !overlay.isDestroyed()) overlay.webContents.send('ev', m); };
 
   function fit() {
@@ -57,7 +63,7 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
         if (!now.saved || Math.abs(value - now.saved) > 5) {
           now.saved = value;
           if (d && value > d * 0.95) delete p[now.key]; else p[now.key] = { t: value, d, at: Date.now(), meta: now.card };
-          store.set('mediaProgress', p);
+          pset('mediaProgress', p);
         }
       }
     });
@@ -112,13 +118,13 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   ipcMain.handle('media:addon-add', async (e, url) => {
     const m = await svc.call('manifest', { url });
     const list = addons().filter((u) => u !== url);
-    store.set('addons', [...list, url]);
+    pset('addons', [...list, url]);
     return m;
   });
-  ipcMain.handle('media:addon-remove', (e, url) => { store.set('addons', addons().filter((u) => u !== url)); return true; });
+  ipcMain.handle('media:addon-remove', (e, url) => { pset('addons', addons().filter((u) => u !== url)); return true; });
   ipcMain.handle('media:addon-move', (e, { url, dir }) => {
     const l = [...addons()], i = l.indexOf(url), j = i + dir;
-    if (i >= 0 && j >= 0 && j < l.length) { [l[i], l[j]] = [l[j], l[i]]; store.set('addons', l); }
+    if (i >= 0 && j >= 0 && j < l.length) { [l[i], l[j]] = [l[j], l[i]]; pset('addons', l); }
     return l;
   });
   // every catalog that needs no input (search/genre-required ones aren't home rows)
@@ -153,23 +159,32 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   ipcMain.handle('media:stremio-import', async (e, { email, password }) => {
     const r = await imp.stremioImport(email, password); // the login itself isn't kept anywhere
     const list = addons(); for (const u of r.addons) if (!list.includes(u)) list.push(u);
-    store.set('addons', list);
-    const lib = store.get('mediaLibrary') || {}, p = progress();
+    pset('addons', list);
+    const lib = pget('mediaLibrary') || {}, p = progress();
     for (const x of r.library) {
       lib[x.id] = { id: x.id, type: x.type, name: x.name, poster: x.poster, watched: x.watched, at: x.at };
       if (x.t > 30 && x.d && x.t < x.d * 0.95) p[x.video || x.id] = { t: x.t, d: x.d, at: x.at, meta: { name: x.name, poster: x.poster, type: x.type, metaId: x.id } };
     }
-    store.set('mediaLibrary', lib); store.set('mediaProgress', p);
+    pset('mediaLibrary', lib); pset('mediaProgress', p);
     return { addons: r.addons.length, library: r.library.length };
   });
   ipcMain.handle('media:letterboxd-import', async () => {
     const pick = await dialog.showOpenDialog(getWin(), { properties: ['openFile'], filters: [{ name: 'Letterboxd export', extensions: ['zip'] }] });
     if (pick.canceled || !pick.filePaths[0]) return null;
     const lb = imp.letterboxdZip(pick.filePaths[0]);
-    store.set('letterboxd', lb);
+    pset('letterboxd', lb);
     return { films: Object.keys(lb).length };
   });
   ipcMain.handle('media:friends-on', (e, m) => friendsOn(m));
+  ipcMain.handle('media:profiles', () => ({ current: profile(), list: ['default', ...(store.get('mediaProfiles') || [])] }));
+  ipcMain.handle('media:profile-set', (e, name) => {
+    name = String(name || '').trim().slice(0, 24);
+    if (!name) return profile();
+    const list = store.get('mediaProfiles') || [];
+    if (name !== 'default' && !list.includes(name)) store.set('mediaProfiles', [...list, name]);
+    store.set('mediaProfile', name);
+    return name;
+  });
 
   // tonight's vote: through the host when we are one, else through the guest link
   const inRoom = () => (getHost()?.guests?.size ? 'host' : getGuest()?.link ? 'guest' : null);
@@ -183,9 +198,9 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   function activity() {
     if (store.get('shareActivity') === false) return null;
     const out = [];
-    for (const x of Object.values(store.get('mediaLibrary') || {})) if (x.watched) out.push({ id: x.id, name: x.name, watched: true });
+    for (const x of Object.values(pget('mediaLibrary') || {})) if (x.watched) out.push({ id: x.id, name: x.name, watched: true });
     for (const [id, p] of Object.entries(progress())) out.push({ id: p.meta?.metaId || id, name: p.meta?.name, t: Math.round(p.t), d: Math.round(p.d) });
-    for (const x of Object.values(store.get('letterboxd') || {})) if (x.watched || x.rating) out.push({ name: x.name, year: x.year, watched: !!x.watched, rating: x.rating || null, review: x.review || null });
+    for (const x of Object.values(pget('letterboxd') || {})) if (x.watched || x.rating) out.push({ name: x.name, year: x.year, watched: !!x.watched, rating: x.rating || null, review: x.review || null });
     return out.slice(0, 3000);
   }
   // friends who've seen this title: by id, or by name + year (Letterboxd knows no ids)

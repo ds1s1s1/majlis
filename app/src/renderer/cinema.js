@@ -13,6 +13,7 @@ export function initCinema(d) {
       ${C.page !== 'home' ? `<button class="btn ghost" id="cback">${icon('back', 18)}<span>${t('cin_back')}</span></button>` : `<h2>${t('cin_title')}</h2>`}
       <div class="grow"></div>
       <label class="csearch">${icon('search', 16)}<input id="cq" class="input" placeholder="${t('cin_search')}" value="${esc(C.q)}"></label>
+      <button class="btn ghost" id="cprof">${icon('room', 18)}<span>${esc(C.profile === 'default' || !C.profile ? t('prof_default') : C.profile)}</span></button>
       <button class="btn ghost" id="caddons">${icon('set', 18)}<span>${t('cin_addons')}</span></button>
     </div>`;
   }
@@ -153,6 +154,17 @@ export function initCinema(d) {
     const v = $('#view');
     $('#cback') && ($('#cback').onclick = () => { C.page = 'home'; redraw(); });
     $('#caddons').onclick = showAddons;
+    $('#cprof').onclick = async () => {
+      const p = await api.invoke('media:profiles');
+      const m = document.createElement('div'); m.className = 'pal-layer';
+      m.innerHTML = `<div class="palette profs"><h3>${t('prof_who')}</h3><div class="plist">${p.list.map((n) => `<button class="pal-item ${n === p.current ? 'on' : ''}" data-p="${esc(n)}">${icon('room', 18)}<span>${esc(n === 'default' ? t('prof_default') : n)}</span></button>`).join('')}</div>
+        <label class="pal-q">${icon('plus', 18)}<input id="newprof" placeholder="${esc(t('prof_new'))}" maxlength="24"></label></div>`;
+      document.body.append(m);
+      const pick = async (n) => { m.remove(); C.profile = await api.invoke('media:profile-set', n); C.rows = null; C.data.clear(); C.hero = null; C.page = 'home'; C.progress = await api.invoke('media:progress'); redraw(); enter(); };
+      m.querySelectorAll('[data-p]').forEach((b) => (b.onclick = () => pick(b.dataset.p)));
+      m.querySelector('#newprof').onkeydown = (e) => { if (e.key === 'Enter' && e.target.value.trim()) pick(e.target.value.trim()); if (e.key === 'Escape') m.remove(); };
+      m.onclick = (e) => { if (e.target === m) m.remove(); };
+    };
     const q = $('#cq');
     q.onkeydown = (e) => { if (e.key === 'Enter' && q.value.trim()) search(q.value.trim()); };
     wireCards(v);
@@ -198,6 +210,7 @@ export function initCinema(d) {
 
   async function enter() {
     C.room = await api.invoke('vote:room').catch(() => null);
+    if (!C.profile) { C.profile = (await api.invoke('media:profiles')).current; redraw(); }
     C.progress = await api.invoke('media:progress').catch(() => ({}));
     if (!C.rows) { C.rows = await api.invoke('media:rows').catch(() => []); redraw(); }
   }

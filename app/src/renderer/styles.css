@@ -612,3 +612,7 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .th-skip { position: absolute; bottom: 110px; inset-inline-end: 28px; display: flex; gap: 8px; }
 .th-pill { padding: 10px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,.35); background: rgba(20,18,16,.75); color: #f2ece2; font: inherit; font-weight: 600; cursor: pointer; }
 .th-pill:hover { background: var(--acc); color: var(--acc-ink); border-color: var(--acc); }
+
+.profs { padding: 10px; }
+.profs h3 { margin: 6px 10px 10px; }
+.profs .plist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
