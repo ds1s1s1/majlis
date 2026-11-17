@@ -76,6 +76,20 @@ function seekFrom(e) {
   return Math.max(0, Math.min(1, f)) * (P.duration || 0);
 }
 
+// watch together: the button (hosting with friends in the room) and what the party is doing
+async function partyButton() {
+  const i = await api.invoke('party:info');
+  const b = $('#party');
+  b.hidden = !(i.canStart || (i.on && i.role === 'host'));
+  b.innerHTML = `${icon('room', 20)}<span>${t(i.on ? 'th_end_together' : 'th_together')}</span>`;
+}
+function partyState(s) {
+  const el = $('#pstate');
+  if (!s) { el.textContent = ''; partyButton(); return; }
+  el.textContent = s.reason === 'buffering' ? t('th_waiting', { who: (s.waitingFor || []).join('، ') }) : s.reason === 'start' ? t('th_party_starting') : t('th_party_on');
+  partyButton();
+}
+
 async function init() {
   const st = await api.invoke('state');
   setLang(st.settings?.lang);
@@ -83,12 +97,15 @@ async function init() {
   icons(); draw();
   api.on((m) => {
     if (m.type === 'player') { P[m.name] = m.value; draw(); if (m.name === 'pause') { icons(); wake(); } }
-    else if (m.type === 'theater') { $('#title').textContent = m.card?.name || ''; night = false; icons(); wake(); }
+    else if (m.type === 'theater') { $('#title').textContent = m.card?.name || ''; night = false; icons(); wake(); partyButton(); }
+    else if (m.type === 'party') partyState(m.state);
     else if (m.type === 'player-state') $('#state').textContent = m.state === 'recovering' ? t('th_recovering') : m.state === 'failed' ? t('th_failed') : '';
   });
   Object.assign(P, await cmd('state') || {});
   $('#title').textContent = P.now?.card?.name || ''; draw();
   $('#close').onclick = () => cmd('close');
+  $('#party').onclick = async () => { const i = await api.invoke('party:info'); if (i.on && i.role === 'host') await api.invoke('party:end'); else if (!i.on) await api.invoke('party:start'); partyButton(); };
+  partyButton();
   $('#play').onclick = () => cmd('toggle');
   $('#back10').onclick = () => cmd('seek', { to: -10 });
   $('#fwd10').onclick = () => cmd('seek', { to: 10 });

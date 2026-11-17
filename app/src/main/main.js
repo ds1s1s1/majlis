@@ -450,7 +450,10 @@ app.whenReady().then(async () => {
   replay = new Replay({ ffmpeg: ffmpegPath(), helper, store, encoders });
   handlers();
   createWindow();
-  theater = require('./theater').setup({ getWin: () => win, store, emit, helper, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
+  theater = require('./theater').setup({ getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
+  // watch together: the shared state reaches the theater, as host and as guest
+  host.on('sync', (st) => theater.onSync('host', st));
+  guest.on('sync', (st) => theater.onSync('guest', st));
   registerShortcuts();
 
   let firstReg = true;
@@ -538,6 +541,8 @@ app.whenReady().then(async () => {
     fs.writeFileSync(process.env.MAJLIS_SHOT_SCREEN, img.toPNG());
   }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
   // dev aid: MAJLIS_PLAY=<http url> opens it in the theater
+  // dev aid: MAJLIS_PARTY=<ms> starts watching together that long after start (host, film open)
+  if (process.env.MAJLIS_PARTY) setTimeout(() => { const n = theater.mpv?.props; if (n && host.guests.size) { const p = Math.round((n['time-pos'] || 0) * 1000); console.log('[party] start at', p); } theater.partyStart().catch((e) => console.log('[party]', e.message)); }, +process.env.MAJLIS_PARTY);
   if (process.env.MAJLIS_PLAY_PAUSE) setTimeout(() => theater.mpv?.set('pause', true).catch(() => {}), 11000);
   if (process.env.MAJLIS_PLAY) setTimeout(() => theater.play({ type: 'movie', id: 'dev-play', card: { name: 'Test', type: 'movie' }, stream: { url: process.env.MAJLIS_PLAY } }).catch((e) => console.log('[play]', e.message)), 4000);
   if (process.env.MAJLIS_JOIN) setTimeout(() => emit('deeplink', { kind: 'join', target: process.env.MAJLIS_JOIN }), 3000);

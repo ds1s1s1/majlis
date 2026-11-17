@@ -10,6 +10,7 @@ export const STR = {
     cin_addons_sub: 'إضافات Stremio: الصق رابط manifest.json. مجلس ما يجي معه إضافات بث، تضيفها أنت.', cin_add: 'أضف', cin_err: 'صار خطأ: {e}', cin_bad_addon: 'الرابط مو إضافة صالحة: {e}',
     th_buffering: 'يحمّل…', th_subs: 'الترجمة', th_off: 'بدون', th_builtin: 'مدمجة', th_sub_delay: 'تأخير الترجمة', th_sub_size: 'حجم الخط', th_audio: 'الصوت',
     th_speed: 'السرعة', th_recovering: 'يرجّع التشغيل…', th_failed: 'تعذّر التشغيل',
+    th_together: 'شاهدوا معًا', th_end_together: 'أنهِ المشاهدة الجماعية', th_waiting: 'ننتظر {who}…', th_party_starting: 'ينتظر الكل يحمّل…', th_party_on: 'تشاهدون معًا',
     nav_home: 'الرئيسية', nav_room: 'المجلس', nav_net: 'الشبكة', nav_lib: 'المكتبة', nav_set: 'الإعدادات',
     st_online: 'متصل', st_offline: 'غير متصل بالسيرفر', st_connecting: 'يتصل بالسيرفر', st_tcp: 'عبر TCP',
 
@@ -141,6 +142,7 @@ export const STR = {
     cin_addons_sub: 'Stremio addons: paste a manifest.json link. Majlis ships no streaming addons; you add your own.', cin_add: 'Add', cin_err: 'Something went wrong: {e}', cin_bad_addon: 'Not a valid addon: {e}',
     th_buffering: 'Loading…', th_subs: 'Subtitles', th_off: 'Off', th_builtin: 'built-in', th_sub_delay: 'Subtitle delay', th_sub_size: 'Text size', th_audio: 'Audio',
     th_speed: 'Speed', th_recovering: 'Resuming playback…', th_failed: 'Playback failed',
+    th_together: 'Watch together', th_end_together: 'End watching together', th_waiting: 'Waiting for {who}…', th_party_starting: 'Waiting for everyone to load…', th_party_on: 'Watching together',
     nav_home: 'Home', nav_room: 'Room', nav_net: 'Network', nav_lib: 'Library', nav_set: 'Settings',
     st_online: 'Online', st_offline: 'Server unreachable', st_connecting: 'Connecting', st_tcp: 'via TCP',
     your_number: 'Your number', copy: 'Copy', copied: 'Copied', invite: 'Invite link', whatsapp: 'WhatsApp',

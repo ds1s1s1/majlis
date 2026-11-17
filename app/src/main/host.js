@@ -12,6 +12,7 @@ const { Encoder } = require('./encoder');
 const { EngineEncoder } = require('./engine');
 const { makeTx, makeRc } = require('./media');
 const { Movie } = require('./movie');
+const { SyncHost } = require('./sync');
 
 const ROLES = ['watch', 'pad', 'kbm', 'full'];
 
@@ -70,6 +71,7 @@ class Host extends EventEmitter {
     // ---- watch party
     this.mode = store.get('mode') === 'watch' ? 'watch' : 'play';
     this.movie = new Movie(ffmpeg);
+    this.sync = new SyncHost();
     this.movie.on('config', (c) => {
       for (const g of this.guests.values()) this._sendMovieConfig(g);
       if (c.rendition === 'low') return;
@@ -228,6 +230,8 @@ class Host extends EventEmitter {
     if (this.mode === 'watch' && this.movie.info) link.ctrl({ t: 'movie', ...this._movieView() });
     for (const c of this.chatLog.slice(-30)) link.ctrl({ t: 'chat', ...c, old: true });
     for (const s of this.cursorShapes.values()) link.ctrl({ t: 'cursor_shape', ...s });
+    // a watch-together film is on: the newcomer opens it on their own line and falls in step
+    if (this.sync.state) link.ctrl({ t: 'sync_state', ...this.sync.state });
     this._roster();
     link.on('ctrl', (m) => this._onCtrl(g, m));
     link.on('raw', (b) => this._onRaw(g, b));
@@ -270,6 +274,10 @@ class Host extends EventEmitter {
         break;
       }
       case 'ready': g.ready = !!m.on; this.emit('update'); break;
+      // watch together (each on their own line): requests from those who may control, and
+      // everyone's buffer reports
+      case 'sync_req': if (this._canControl(g)) this._syncSend(this.sync.request(m)); break;
+      case 'sync_rep': this._syncSend(this.sync.report(g.sid, m, (id) => this.guests.get(id)?.nick || this.store.get('nick') || '')); break;
       case 'askpause': this.emit('askpause', { name: g.nick }); break;
       case 'movie': if (this._canControl(g)) this.movieCtl(m.op, m.value, g.nick); break;
     }
@@ -346,6 +354,19 @@ class Host extends EventEmitter {
   }
 
   _canControl(g) { return this.store.get('watchControl') === 'all' || g.role === 'full'; }
+
+  // ---- watch together, each viewer on their own line (cinema mode). `src` is what every viewer
+  // resolves and plays themselves: { stream, type, id, card }.
+  syncOpen(src) { const st = this.sync.open(src, src.card); this._syncSend(st); return st; }
+  syncRequest(r) { return this._syncSend(this.sync.request({ epoch: this.sync.state?.epoch, ...r })); }
+  syncReport(r) { return this._syncSend(this.sync.report('host', { epoch: this.sync.state?.epoch, ...r }, () => this.store.get('nick') || '')); }
+  syncClose() { this.sync.state = null; for (const g of this.guests.values()) g.link.ctrl({ t: 'sync_end' }); this.emit('sync', null); }
+  _syncSend(st) {
+    if (!st) return null;
+    for (const g of this.guests.values()) g.link.ctrl({ t: 'sync_state', ...st });
+    this.emit('sync', st);
+    return st;
+  }
 
   async movieOpen(file, { autoplay = false, fresh = false, pos } = {}) {
     if (this.mode !== 'watch') this.setMode('watch');
@@ -893,6 +914,7 @@ class Host extends EventEmitter {
     // keep their seat for a few minutes in case the line just dropped
     if (reason === 'timeout') (this.recentDrops ||= new Map()).set(g.id, { role: g.role, slot: g.slot, pk: g.link.peer.pk, at: now() });
     this.guests.delete(sid);
+    this.sync.leave(sid);
     if (g.slot) this.helper.cmd({ cmd: 'pad_del', slot: g.slot });
     if (CAN.kbm(g.role)) this.helper.cmd({ cmd: 'release_all' });
     if (this.hotseat.holder === sid) this.passBaton();

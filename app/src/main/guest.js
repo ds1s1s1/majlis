@@ -103,12 +103,20 @@ class Guest extends EventEmitter {
         break;
       }
       case 'fclock': this.fclock = m; this._postClock(); break;
+      // watch together on our own line: the host's shared state (or the end of it)
+      case 'sync_state': this.syncEpoch = m.epoch; this.emit('sync', m); break;
+      case 'sync_end': this.syncEpoch = null; this.emit('sync', null); break;
       case 'mode': if (m.mode !== 'watch') this.fclock = null; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;
       case 'kick': this.emit('kicked', { panic: !!m.panic }); break;
       default: this.emit('ctrl', m);
     }
   }
+
+  syncRequest(r) { this.link?.ctrl({ t: 'sync_req', epoch: this.syncEpoch, ...r }); }
+  syncReport(r) { this.link?.ctrl({ t: 'sync_rep', epoch: this.syncEpoch, ...r }); }
+  // the host's clock, by ours (the same offset the film clock uses)
+  hostNow() { return Date.now() + Math.round(this.link?.clockOffset || 0); }
 
   // The film clock in our own time: host time minus how far its clock is ahead of ours. The
   // offset gets sharper as pings come in, so it's sent again when it moves.

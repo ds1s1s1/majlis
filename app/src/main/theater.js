@@ -8,13 +8,16 @@ const { BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 const { Mpv } = require('./mpv');
 const { MediaService, DEFAULT_ADDONS } = require('./mediasvc');
+const { SyncViewer } = require('./sync');
 
 const NIGHT = '@night:dynaudnorm=f=150:g=15:p=0.9';
 
-function setup({ getWin, store, emit, preload, rendererDir, helper }) {
+function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, getGuest }) {
   const svc = new MediaService();
   let overlay = null, mpv = null, now = null, film = 0, shown = false; // now: what's on; film: mpv's window
   const hwnd = (bw) => Number(bw.getNativeWindowHandle().readBigUInt64LE(0));
+  // watch together on everyone's own line: { role: 'host'|'guest', viewer, epoch } while one is on
+  let party = null;
   const addons = () => store.get('addons') || DEFAULT_ADDONS;
   const progress = () => store.get('mediaProgress') || {};
   const toOverlay = (m) => { if (overlay && !overlay.isDestroyed()) overlay.webContents.send('ev', m); };
@@ -60,6 +63,8 @@ function setup({ getWin, store, emit, preload, rendererDir, helper }) {
   function show() { shown = true; overlay.show(); fit(); overlay.focus(); }
 
   function close() {
+    if (party?.role === 'host') getHost()?.syncClose();
+    party = null;
     if (mpv) mpv.command('stop').catch(() => {});
     if (now?.infoHash) svc.call('stop', { infoHash: now.infoHash }).catch(() => {});
     now = null;
@@ -141,13 +146,14 @@ function setup({ getWin, store, emit, preload, rendererDir, helper }) {
 
   // { type, id (the video: tt..:s:e for an episode), card (poster/name for "continue watching"), stream }
   ipcMain.handle('media:play', (e, x) => play(x));
-  async function play({ type, id, card, stream }) {
+  async function play({ type, id, card, stream, pos }) {
     await windows();
     const r = await resolve(stream);
     const p = progress()[id];
     now = { key: id, card, stream, infoHash: r.infoHash, type };
     const opts = { ...r.opts, 'force-media-title': (card?.name || '').replace(/,/g, ' ') };
-    if (p?.t) opts.start = String(Math.max(0, p.t - 3));
+    if (pos != null) opts.start = String(pos / 1000);
+    else if (p?.t) opts.start = String(Math.max(0, p.t - 3));
     show();
     emit('theater', { open: true, id, card });
     toOverlay({ type: 'theater', card, id });
@@ -156,8 +162,29 @@ function setup({ getWin, store, emit, preload, rendererDir, helper }) {
     return { ok: true };
   }
 
+  ipcMain.handle('party:start', () => partyStart());
+  async function partyStart() {
+    const h = getHost();
+    if (!h || !now || !mpv) return null;
+    // everyone opens this same copy on their own line, paused where we are; it starts by itself
+    // once all of them have it buffered
+    const pos = Math.round((mpv.props['time-pos'] || 0) * 1000);
+    return h.syncOpen({ stream: now.stream, type: now.type, id: now.key, card: now.card, pos });
+  }
+  ipcMain.handle('party:end', () => { if (party?.role === 'host') getHost()?.syncClose(); party = null; toOverlay({ type: 'party', state: null }); return true; });
+  ipcMain.handle('party:info', () => ({ canStart: !!getHost()?.guests?.size, on: !!party, role: party?.role || null }));
+
   ipcMain.handle('player:cmd', async (e, c) => {
     if (!mpv) return null;
+    // in a party, playback is the group's: ask whoever holds the clock instead of acting alone
+    if (party && ['toggle', 'pause', 'seek', 'speed'].includes(c.cmd)) {
+      if (c.cmd === 'speed') return null;
+      const cur = Math.round((mpv.props['time-pos'] || 0) * 1000);
+      const r = c.cmd === 'seek' ? { action: 'seek', pos: c.abs ? Math.round(c.to * 1000) : Math.max(0, cur + Math.round(c.to * 1000)) }
+        : { action: (c.cmd === 'toggle' ? !party.viewer.state?.playing : !c.on) ? 'play' : 'pause' };
+      if (party.role === 'host') getHost()?.syncRequest(r); else getGuest()?.syncRequest(r);
+      return true;
+    }
     switch (c.cmd) {
       case 'toggle': return mpv.set('pause', !mpv.props.pause);
       case 'pause': return mpv.set('pause', !!c.on);
@@ -179,7 +206,40 @@ function setup({ getWin, store, emit, preload, rendererDir, helper }) {
     return null;
   });
 
-  return { play, close, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
+  // A state from the party (ours as host, or the host's as guest). A new film: open it here on
+  // our own line (unless it's what's already playing). null: the party is over.
+  async function onSync(role, st) {
+    if (!st) { if (party?.role === role) { party = null; toOverlay({ type: 'party', state: null }); } return; }
+    if (!party || party.epoch !== st.epoch) {
+      party = { role, viewer: new SyncViewer(), epoch: st.epoch };
+      const src = st.src || {};
+      if (!(now && now.key === src.id && mpv)) {
+        try { await play({ type: src.type, id: src.id, card: src.card, stream: src.stream, pos: st.pos }); }
+        catch (e) { toOverlay({ type: 'player-state', state: 'failed', detail: e.message }); }
+      }
+    }
+    party.viewer.accept(st);
+    toOverlay({ type: 'party', state: { reason: st.reason, waitingFor: st.waitingFor || [], playing: st.playing, role } });
+  }
+
+  // keep this player on the party clock, and tell the host how our buffer is doing
+  let tick = 0;
+  setInterval(() => {
+    if (!party || !mpv?.props) return;
+    const p = mpv.props;
+    const local = Math.round((p['time-pos'] || 0) * 1000);
+    const hostNow = party.role === 'host' ? Date.now() : getGuest()?.hostNow() ?? Date.now();
+    const o = party.viewer.step(local, hostNow, !!p.pause, p.speed ?? 1);
+    if (o.pause != null) mpv.set('pause', o.pause).catch(() => {});
+    if (o.seek != null) mpv.command('seek', o.seek / 1000, 'absolute+exact').catch(() => {});
+    if (o.speed != null) mpv.set('speed', o.speed).catch(() => {});
+    if (process.env.MAJLIS_DEBUG && tick % 8 === 0) { const { expected } = require('./sync'); console.log('[sync]', JSON.stringify({ role: party.role, local, drift: Math.round(local - expected(party.viewer.state, hostNow)), speed: party.viewer.speed, playing: party.viewer.state?.playing, reason: party.viewer.state?.reason })); }
+    if (++tick % 2) return;
+    const r = { stalled: !!p['paused-for-cache'] || (party.viewer.state?.playing && p['time-pos'] == null), cache: p['demuxer-cache-duration'] || 0 };
+    if (party.role === 'host') getHost()?.syncReport(r); else getGuest()?.syncReport(r);
+  }, 250);
+
+  return { play, partyStart, close, onSync, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
 }
 
 module.exports = { setup };

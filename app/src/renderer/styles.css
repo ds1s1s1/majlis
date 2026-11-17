@@ -584,3 +584,5 @@ body.theater.idle .th-top, body.theater.idle .th-bottom { opacity: 0; }
 .th-pair button { flex: 1; text-align: center; }
 /* text from catalogs is mostly English: each piece takes its own direction inside the Arabic page */
 .hero-meta span, .ep b, .ep small, .pname, .sname, .dtext .sub, .crow h3, .arow b, .arow small, .th-title { unicode-bidi: plaintext; }
+.th-party { margin-inline-start: 14px; font-size: 13px; color: var(--acc); }
+.th-together { display: flex; gap: 6px; align-items: center; font-size: 13px; padding: 6px 12px; border: 1px solid rgba(255,255,255,.2); }
