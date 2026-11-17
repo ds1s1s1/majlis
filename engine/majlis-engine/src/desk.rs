@@ -199,7 +199,11 @@ pub fn place(hwnd: i64, owner: i64, x: i32, y: i32, w: i32, h: i32, show: bool, 
             SetWindowLongPtrW(hw, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize));
         }
         let flags = SWP_NOACTIVATE | SWP_FRAMECHANGED | if show { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW } | if top { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOZORDER };
+        // physical pixels as given: this thread is DPI-unaware, and Windows would scale them
+        // again for mpv's (DPI-aware) window: on a 150% screen it landed offset and 1.5x too big
+        let was = windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = SetWindowPos(hw, if top { Some(HWND_TOP) } else { None }, x, y, w, h, flags);
+        windows::Win32::UI::HiDpi::SetThreadDpiAwarenessContext(was);
     }
 }
 

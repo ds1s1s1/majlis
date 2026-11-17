@@ -54,6 +54,7 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     // every (re)start of mpv is a new window: take it over again
     mpv.on('ready', async () => { try { film = Number(await mpv.get('window-id')); fit(); } catch {} });
     mpv.on('prop', (name, value) => {
+      if (name === 'duration' && value && shown) { fit(); setTimeout(fit, 500); }
       toOverlay({ type: 'player', name, value });
       emit('player', { name, value });
       if (name === 'eof-reached' && value === true && now?.type === 'series' && store.get('autoNext') !== false && (!party || party.role === 'host')) nextEpisode().catch(() => {});
@@ -71,7 +72,9 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     await mpv.start();
   }
 
-  function show() { shown = true; overlay.show(); fit(); overlay.focus(); }
+  // mpv sizes and places its own window once its video output starts (after we placed it), so
+  // place it again then, and a few times while it settles; each pass also raises the controls
+  function show() { shown = true; overlay.show(); fit(); overlay.focus(); for (const ms of [300, 1000, 2500]) setTimeout(fit, ms); }
 
   function close() {
     if (party?.role === 'host') getHost()?.syncClose();
