@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Play with your friends over the internet. No accounts, just numbers.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
@@ -12,7 +12,8 @@
     "test": "node --test test/*.test.js",
     "fonts": "node scripts/copy-fonts.js",
     "dist": "npm run core && electron-builder --win portable nsis",
-    "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\""
+    "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\"",
+    "verify-release": "node scripts/check-release.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
@@ -64,7 +65,14 @@
     },
     "asarUnpack": [
       "native/**/*"
-    ]
+    ],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeCliInspectArguments": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "onlyLoadAppFromAsar": true,
+      "enableEmbeddedAsarIntegrityValidation": true
+    }
   },
   "homepage": "https://github.com/ds1s1s1/majlis",
   "repository": {

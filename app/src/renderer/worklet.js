@@ -3,7 +3,7 @@
 // If a ring falls far behind it skips ahead instead of letting delay pile up.
 // Ducking: while someone talks, the game/film dips so you can hear them.
 class Ring {
-  constructor(size) { this.l = new Float32Array(size); this.r = new Float32Array(size); this.w = 0; this.rd = 0; this.size = size; this.started = false; this.last = 0; }
+  constructor(size) { this.l = new Float32Array(size); this.r = new Float32Array(size); this.w = 0; this.rd = 0; this.size = size; this.started = false; this.last = 0; this.fix = 0; }
   get avail() { return (this.w - this.rd + this.size) % this.size; }
   silence(n) { for (let i = 0; i < n; i++) { this.l[this.w] = 0; this.r[this.w] = 0; this.w = (this.w + 1) % this.size; } }
   // Keep the queued audio at `want` samples (±25 ms) so this chunk plays when the picture
@@ -12,14 +12,14 @@ class Ring {
   // cutting out on shaky lines). Drift is corrected a few ms at a time instead.
   align(want) {
     const avail = this.avail, tol = 3840; // 80 ms of slack before doing anything
-    if (avail > want + tol) this.rd = (this.rd + Math.min(avail - want - tol / 2, 480)) % this.size;
+    if (avail > want + tol) { this.rd = (this.rd + Math.min(avail - want - tol / 2, 480)) % this.size; this.fix++; }
     else if (avail + tol < want && !this.started) this.silence(Math.min(24000, want - avail));
-    else if (avail + tol < want) this.silence(Math.min(480, want - avail));
+    else if (avail + tol < want) { this.silence(Math.min(480, want - avail)); this.fix++; }
     this.started = true;
   }
   push(l, r, max, keep) {
     for (let i = 0; i < l.length; i++) { this.l[this.w] = l[i]; this.r[this.w] = r[i]; this.w = (this.w + 1) % this.size; }
-    if (this.avail > max) this.rd = (this.w - keep + this.size) % this.size;
+    if (this.avail > max) { this.rd = (this.w - keep + this.size) % this.size; this.fix++; }
     this.last = currentTime;
   }
 }
@@ -42,6 +42,8 @@ class Mixer extends AudioWorkletProcessor {
       } else if (m.t === 'gain') { this.gain = { ...this.gain, ...m.g }; if (m.per) this.per = { ...this.per, ...m.per }; }
       else if (m.t === 'target') this.target = Math.round(48000 * m.ms / 1000);
       else if (m.t === 'duck') this.duck = !!m.on;
+      // diagnostics: corrections and underruns of the film/game ring since the last ask
+      else if (m.t === 'astat') { const g = this.rings.get('game'); this.port.postMessage({ t: 'astat', fix: g?.fix || 0, under: this.under || 0, avail: g?.avail || 0 }); if (g) g.fix = 0; this.under = 0; }
       else if (m.t === 'flush') { const r = this.rings.get(m.k); if (r) { r.rd = r.w; r.started = false; } }
     };
   }
@@ -58,7 +60,7 @@ class Mixer extends AudioWorkletProcessor {
       const g = k === 'game' ? this.gain.game * this.duckLevel : this.gain.voice * (this.per[k] ?? 1);
       const n = Math.min(L.length, ring.avail);
       for (let i = 0; i < n; i++) { L[i] += ring.l[ring.rd] * g; R[i] += ring.r[ring.rd] * g; ring.rd = (ring.rd + 1) % ring.size; }
-      if (n < L.length) ring.started = false; // underrun: rebuild a small cushion
+      if (n < L.length) { ring.started = false; if (k === 'game') this.under = (this.under || 0) + 1; } // underrun: rebuild a small cushion
     }
     return true;
   }

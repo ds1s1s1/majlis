@@ -434,22 +434,32 @@ class Host extends EventEmitter {
     // (only when this guest is new to this rendition: a replaced light film carries on from
     // exactly where the old one stopped, so there's nothing to resend)
     const run = this.movie.clock.run;
-    const fresh = g.feed?.run !== run || g.feed?.rendition !== g.rendition;
+    const old = g.feed?.rendition;
+    const fresh = g.feed?.run !== run || old !== g.rendition;
     const switched = fresh && g.feed?.run === run;
     g.feed = { run, rendition: g.rendition };
-    // switching rendition: what's still queued of the other one is no use any more
-    if (switched) g.tx.flush();
-    const catchUp = fresh ? this.movie.replay(g.rendition) : [];
+    let catchUp = fresh ? this.movie.replay(g.rendition) : [];
+    if (switched) {
+      // Switching rendition: hand over at the first keyframe of the new one a second past the
+      // picture (time to get there), and fill the old one up to it if it isn't all sent yet: the
+      // guest plays the old one until then. Restarting from the keyframe before the picture sent
+      // stale frames first, and the picture froze for 1-2 s.
+      const s = g.tx.sentPts, h = this.movie.hist[g.rendition];
+      const k = s == null ? -1 : h.findIndex((f) => f.key && f.pts > this.movie.curMs() + 1000);
+      if (k >= 0) catchUp = [...this.movie.hist[old].filter((f) => f.pts > s && f.pts < h[k].pts), ...h.slice(k)];
+      g.tx.flush();
+    }
+    if (process.env.MAJLIS_DEBUG && fresh) console.log('[film-tx]', JSON.stringify({ t: Date.now() % 1e6, rendition: g.rendition, switched, catchUp: catchUp.length, from: catchUp[0]?.pts - this.movie.curMs(), lan: !!g.link.pathInfo()?.lan, target: Math.round(g.rc?.target || 0) }));
     const epochs = new Set([...catchUp.map((f) => f.epoch), c.epoch]);
     for (const e of epochs) { const cc = this.movie.configs.get(e); if (cc) g.link.ctrl(movieConfigMsg(cc)); }
     g.configSent = { movie: c.epoch };
     g.link.ctrl({ t: 'fclock', ...this.movie.clockMsg() });
-    for (const f of catchUp) g.tx.send(f);
-    // the film's audio for what's buffered ahead (audio is the same whichever rendition)
-    if (switched || g.audioRun !== this.movie.clock.run) { // (a switch flushed the queued audio too; the guest drops repeats by pts)
-      g.audioRun = this.movie.clock.run;
-      for (const a of this.movie.replayAudio()) g.tx.sendRaw(audioPacket(a.data, 1, a.epoch, a.pts));
-    }
+    // The film's audio for what's buffered ahead (the same whichever rendition) goes in step with
+    // the picture: sent after all of it, it landed seconds late on a slow line. A switch flushed
+    // the queued audio too; the guest drops repeats by pts.
+    const audio = switched || g.audioRun !== run ? this.movie.replayAudio().map((a) => ({ a, pts: a.pts })) : [];
+    g.audioRun = run;
+    for (const x of [...catchUp, ...audio].sort((p, q) => p.pts - q.pts)) x.a ? g.tx.sendRaw(audioPacket(x.a.data, 1, x.a.epoch, x.a.pts)) : g.tx.send(x);
   }
 
   // Start (or after a seek, restart) the film once every viewer has ~1.5 s of it delivered, so
@@ -867,7 +877,9 @@ class Host extends EventEmitter {
   _sendAudio(b) {
     const prev = this.prevAudio;
     this.prevAudio = b;
-    for (const g of this.guests.values()) { g.link.send(b); if (prev) g.link.send(prev); }
+    // the previous packet again only where packets get lost (as the film's audio does): on a
+    // clean line it just doubled the sound's share of the upload
+    for (const g of this.guests.values()) { g.link.send(b); if (prev && (g.rc?.lossEw || 0) > 0.003) g.link.send(prev); }
   }
 
   _roster() {

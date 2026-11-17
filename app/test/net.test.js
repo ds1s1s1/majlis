@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { Store } = require('../src/main/store');
-const { Net } = require('../src/main/net');
+const { Net, v6Prefix } = require('../src/main/net');
 
 const PORT = 17700;
 function startServer() {
@@ -67,4 +67,10 @@ test('unknown numbers look the same as offline ones', async (t) => {
   await G.net.start(); await reg;
   await assert.rejects(G.net.connect('123456789'), (e) => e.code === 'offline');
   G.net.stop();
+});
+
+test('IPv6 /64 prefix survives :: compression and zone ids', () => {
+  assert.strictEqual(v6Prefix('2001:db8:1:2::1'), v6Prefix('2001:0db8:0001:0002:aaaa:bbbb:cccc:dddd'));
+  assert.strictEqual(v6Prefix('2001:db8::1%12'), '8193:3512:0:0');
+  assert.notStrictEqual(v6Prefix('2001:db8:1:2::1'), v6Prefix('2001:db8:1:3::1'));
 });

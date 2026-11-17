@@ -48,6 +48,8 @@ impl Capture {
     pub fn tex(&self) -> &ID3D11Texture2D { match self { Capture::Display(d) => &d.tex, Capture::Window(w) => &w.tex } }
     pub fn size(&self) -> (u32, u32) { match self { Capture::Display(d) => (d.w, d.h), Capture::Window(w) => (w.w, w.h) } }
     pub fn content(&self) -> (u32, u32) { match self { Capture::Display(d) => (d.w, d.h), Capture::Window(w) => (w.cw, w.ch) } }
+    // bumped when the copy texture is replaced by a bigger one (window grew): converters rebuild
+    pub fn gen(&self) -> u32 { match self { Capture::Display(_) => 0, Capture::Window(w) => w.gen } }
 }
 
 // ------------------------------------------------------------------ desktop duplication
@@ -121,6 +123,7 @@ pub struct Wgc {
     pub h: u32,
     pub cw: u32,
     pub ch: u32,
+    pub gen: u32,
     _token: i64,
 }
 
@@ -152,12 +155,13 @@ impl Wgc {
             Ok(())
         }))?;
         session.StartCapture()?;
-        Ok(Wgc { pool, session, event, tex, w, h: hh, cw: w, ch: hh, _token: token })
+        Ok(Wgc { pool, session, event, tex, w, h: hh, cw: w, ch: hh, gen: 0, _token: token })
     }
 
     fn next(&mut self, gpu: &Gpu, timeout_ms: u32) -> Result<bool> {
         if unsafe { WaitForSingleObject(self.event, timeout_ms) } != WAIT_OBJECT_0 { return Ok(false); }
         let mut got = false;
+        let mut resized = None;
         // drain to the newest frame
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             let cs = frame.ContentSize()?;
@@ -169,13 +173,23 @@ impl Wgc {
             self.ch = (cs.Height as u32).min(d.Height).min(self.h) & !1;
             let b = D3D11_BOX { left: 0, top: 0, front: 0, right: self.cw.max(2), bottom: self.ch.max(2), back: 1 };
             unsafe { gpu.ctx.CopySubresourceRegion(&self.tex, 0, 0, 0, 0, &t, 0, Some(&b)) };
-            // the window was resized: let the pool follow (our copy keeps its size, the
-            // converter fits the new content into the stream)
-            if cs.Width as u32 != d.Width || cs.Height as u32 != d.Height {
-                let _ = self.pool.Recreate(&CreateDirect3D11DeviceFromDXGIDeviceSafe(gpu)?, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
-            }
+            if cs.Width as u32 != d.Width || cs.Height as u32 != d.Height { resized = Some(cs); }
             let _ = frame.Close();
             got = true;
+        }
+        // The window was resized: let the pool follow, once, after the drain (recreating it
+        // mid-drain dropped frames). Grown past our copy: a bigger copy, so nothing gets cut off
+        // (the converter fits whatever the content is into the stream).
+        if let Some(cs) = resized {
+            let _ = self.pool.Recreate(&CreateDirect3D11DeviceFromDXGIDeviceSafe(gpu)?, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
+            let (nw, nh) = ((cs.Width as u32 & !1).max(64), (cs.Height as u32 & !1).max(64));
+            if nw > self.w || nh > self.h {
+                let (nw, nh) = (nw.max(self.w), nh.max(self.h));
+                self.tex = gpu.texture(nw, nh, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)?;
+                self.w = nw; self.h = nh;
+                self.gen = self.gen.wrapping_add(1);
+                got = false; // the frame we have was cut to the old size: wait for the next one
+            }
         }
         Ok(got)
     }

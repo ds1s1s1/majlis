@@ -1165,4 +1165,6 @@ setInterval(() => {
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);
+  // test aid: the host opens its own view of the film once it's playing
+  if (q.get('local')) { const iv = setInterval(() => { const b = $('#watchnow'); if (b) { clearInterval(iv); b.click(); } }, 500); }
 })();

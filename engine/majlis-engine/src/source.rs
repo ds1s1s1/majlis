@@ -32,6 +32,10 @@ struct Stream {
     recent: std::collections::VecDeque<(u32, u64)>,
     buf: Vec<u8>,
     kick: bool, // encode right away (keyframe / recovery asked for)
+    // a new picture came in since this stream last encoded: it goes out at the stream's next slot
+    // even if no newer one arrives by then (24/30 fps video on a 60 Hz desktop lost frames)
+    dirty: bool,
+    gen: u32, // capture texture generation the converter was built for
 }
 
 pub fn run(kind: SourceKind, rx: Receiver<Cmd>) {
@@ -83,7 +87,7 @@ pub fn run(kind: SourceKind, rx: Receiver<Cmd>) {
             Err(e) => { proto::event("source_error", json!({ "msg": e.to_string() })); std::thread::sleep(std::time::Duration::from_millis(100)); false }
         };
         let now = proto::now_us();
-        if fresh { last_new_us = now; have_picture = true; }
+        if fresh { last_new_us = now; have_picture = true; for s in streams.values_mut() { s.dirty = true; } }
         if !have_picture { continue; }
         // a still screen costs almost nothing: no new picture = no new frame, except a beat
         // every second so the stream (and its rolling refresh) stays alive
@@ -92,9 +96,18 @@ pub fn run(kind: SourceKind, rx: Receiver<Cmd>) {
         for (id, s) in streams.iter_mut() {
             let due_now = now + 1500 >= s.last_us + s.interval_us; // within 1.5 ms of its slot
             if !due_now && !s.kick { continue; }
-            if !fresh && !(heartbeat && now - s.last_us >= 1_000_000) && !s.kick { continue; }
+            if !s.dirty && !(heartbeat && now - s.last_us >= 1_000_000) && !s.kick { continue; }
             s.last_us = now;
             s.kick = false;
+            s.dirty = false;
+            // the window grew and the capture copy with it: a converter for the new input size
+            if s.gen != cap.gen() {
+                let (sw, sh) = cap.size();
+                match Converter::new(&gpu, sw, sh, &s.enc.input, s.enc.p.w, s.enc.p.h) {
+                    Ok(c) => { s.conv = c; s.gen = cap.gen(); }
+                    Err(e) => { proto::error("converter", *id as i64, format!("{e}")); s.gen = cap.gen(); }
+                }
+            }
             if let Err(e) = s.conv.convert(cap.tex(), cw, ch) { proto::error("convert", *id as i64, format!("{e}")); continue; }
             let ts = now;
             match s.enc.encode(ts, &mut s.buf) {
@@ -122,7 +135,7 @@ fn handle(c: Cmd, gpu: &Gpu, cap: &Capture, streams: &mut HashMap<u8, Stream>) {
                 let conv = Converter::new(gpu, sw, sh, &input, w, h).map_err(|e| format!("converter: {e}"))?;
                 let codec = Codec::parse(&codec);
                 let enc = Encoder::new(&gpu.device, input, Params { codec, w, h, fps: fps.clamp(10, 240), kbps: kbps.max(200), quality, ten_bit })?;
-                Ok(Stream { enc, conv, interval_us: 1_000_000 / fps.clamp(10, 240) as u64, last_us: 0, started_us: proto::now_us(), recent: Default::default(), buf: Vec::with_capacity(1 << 20), kick: true })
+                Ok(Stream { enc, conv, interval_us: 1_000_000 / fps.clamp(10, 240) as u64, last_us: 0, started_us: proto::now_us(), recent: Default::default(), buf: Vec::with_capacity(1 << 20), kick: true, dirty: true, gen: cap.gen() })
             };
             match make() {
                 Ok(s) => {

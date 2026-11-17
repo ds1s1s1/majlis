@@ -57,6 +57,27 @@ function parseServer(s) {
   return { host, port };
 }
 
+// First 64 bits of an IPv6 address ('2001:db8::1%3' -> '8193:3512:0:0'): the network part.
+function v6Prefix(a) {
+  const s = a.split('%')[0].toLowerCase();
+  const [h, t] = s.split('::');
+  const head = h ? h.split(':') : [], tail = t ? t.split(':') : [];
+  const full = t === undefined ? head : [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail];
+  return full.slice(0, 4).map((x) => parseInt(x || '0', 16)).join(':');
+}
+
+// A global IPv6 address in the same /64 as one of ours is on our home network: a v6 path to it
+// is as local as a 192.168 one (two devices in one house otherwise flip between "LAN" and "v6"
+// and the film switches rendition with every flip).
+function sameLan6(addr) {
+  if (!addr || !addr.includes(':')) return false;
+  const want = v6Prefix(addr);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) if (a.family === 'IPv6' && !a.internal && /^[23]/.test(a.address) && v6Prefix(a.address) === want) return true;
+  }
+  return false;
+}
+
 function localCandidates(p4, p6) {
   const out = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
@@ -228,7 +249,7 @@ class Link extends EventEmitter {
   pathInfo() {
     const p = this.active;
     if (!p) return null;
-    return { kind: p.kind, fam: p.fam || null, lan: p.k === 'lan' && !NOLAN, label: p.label, rtt: p.rtt == null ? null : Math.round(p.rtt * 10) / 10 };
+    return { kind: p.kind, fam: p.fam || null, lan: (p.k === 'lan' || (p.kind === 'direct' && p.fam === 'v6' && sameLan6(p.addr))) && !NOLAN, label: p.label, rtt: p.rtt == null ? null : Math.round(p.rtt * 10) / 10 };
   }
 
   allPaths() {
@@ -931,4 +952,4 @@ class Net extends EventEmitter {
   }
 }
 
-module.exports = { Net, Link, localCandidates, parseServer };
+module.exports = { Net, Link, localCandidates, parseServer, core, v6Prefix };

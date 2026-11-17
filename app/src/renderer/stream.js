@@ -44,7 +44,7 @@ export class Player {
     this.active = true;
     this.refreshMs = 1000 / 60;
     this.mouseMode = 'abs';
-    this.cinema = false; this.cinemaDelay = 180; this.queue = [];
+    this.cinema = false; this.cinemaDelay = 180; this.queue = []; this.fstat = { late: 0, lateKey: 0, qdrop: 0, clk: 0 };
     this.anchor = null;            // watch mode: local time = anchor.base + media pts
     this.latEw = 40; this.aJit = 0; this.aLast = 0;
     this.ameta = [];               // per audio chunk: timing info, consumed in decode order
@@ -117,7 +117,7 @@ export class Player {
   // (send time + fixed delay), so network jitter never shows as stutter.
   setCinema(on, delayMs = 180) {
     this.cinema = !!on; this.cinemaDelay = delayMs; this.anchor = null;
-    this.mixer?.port.postMessage({ t: 'target', ms: on ? delayMs : 30 });
+    this.mixer?.port.postMessage({ t: 'target', ms: this._mixTarget() });
     if (on && !this.rafOn) { this.rafOn = true; const loop = () => { if (!this.rafOn) return; this._present(); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
     // the film keeps going (decode + sound) even while the window is minimised and rAF stops
     if (on && !this.filmTimer) this.filmTimer = setInterval(() => this._filmPump(), 10);
@@ -134,7 +134,7 @@ export class Player {
       const disp = this._filmPos(now) + this.refreshMs / 2;
       let pick = null;
       while (this.queue.length && this.queue[0].pts <= disp) { if (pick) pick.frame.close(); pick = this.queue.shift(); }
-      if (this.queue.length > 40) { while (this.queue.length > 8) this.queue.shift().frame.close(); }
+      if (this.queue.length > 40) { while (this.queue.length > 8) { this.queue.shift().frame.close(); this.fstat.qdrop++; } }
       if (pick) this._draw(pick.frame);
       return;
     }
@@ -147,7 +147,10 @@ export class Player {
   _output(frame) {
     const s = this.submit.get(frame.timestamp);
     if (s) { this.submit.delete(frame.timestamp); this.stats.dec.push(performance.now() - s.t); this.stats.enc.push(s.enc); this.stats.net.push(s.net); }
-    if (this.film?.clock && s?.film) { this.queue.push({ frame, pts: s.pts }); return; }
+    if (this.film?.clock && s?.film) {
+      if (s.pts < this._filmPos(performance.now())) { this.fstat.late++; if (s.key) this.fstat.lateKey++; }
+      this.queue.push({ frame, pts: s.pts }); return;
+    }
     if (this.cinema) {
       const at = s && s.pts != null ? this._present_at(s) : performance.now() + this.cinemaDelay;
       this.queue.push({ frame, at });
@@ -164,12 +167,30 @@ export class Player {
   // of freezing the picture, and every screen shows the same frame at the same moment.
   _filmClock(m) {
     const f = (this.film ||= { eps: new Map(), order: 0, cur: null, audio: [], fed: [], dead: new Set(), known: new Set(), aSeen: new Set(), run: null, clock: null });
-    if (f.run !== null && m.run !== f.run) this._filmFlush(); // seek / restart: all of it is stale
+    const same = f.run !== null && m.run === f.run;
+    if (f.run !== null && !same) this._filmFlush(); // seek / restart: all of it is stale
+    this.fstat.clk++;
     f.run = m.run;
     const was = f.clock;
-    f.clock = { pos: m.pos, at: m.at ? m.at - (Date.now() - performance.now()) : 0, playing: !!m.playing };
+    const next = { pos: m.pos, at: m.at ? m.at - (Date.now() - performance.now()) : 0, playing: !!m.playing };
+    // The same clock re-anchored while playing (our estimate of the host's clock moved, e.g. when
+    // the best ping drops out of its window): glide there instead of jumping, or a jump of a few
+    // hundred ms makes the frames in hand late and the picture freezes for a second.
+    if (same && was?.playing && was.at && next.playing && next.at) {
+      const d = (next.at - next.pos) - (was.at - was.pos);
+      if (Math.abs(d) < 1500) { f.slew = (f.slew || 0) + d; this.mixer?.port.postMessage({ t: 'target', ms: this._mixTarget() }); return; }
+    }
+    f.slew = 0;
+    f.clock = next;
+    this.mixer?.port.postMessage({ t: 'target', ms: this._mixTarget() });
     if (was?.playing && !f.clock.playing) this._filmHush();
   }
+
+  // How much sound the mixer keeps queued. The film's sound sits ~500 ms ahead (see _filmAudio),
+  // so its trim ceiling (4x this) must not follow the cinema delay: 70 ms on the host's own view
+  // put the ceiling under the queue and the sound was chopped twice a second. Every place that
+  // sets it goes through here, whichever of film/cinema starts first.
+  _mixTarget() { return !this.cinema ? 30 : this.film?.clock ? Math.max(this.cinemaDelay, 200) : this.cinemaDelay; }
 
   _filmFlush() {
     const f = this.film;
@@ -234,7 +255,7 @@ export class Player {
       if (!fr.key || !this._configure(epoch)) return false;
     }
     const ts = Math.round(fr.pts * 1000);
-    this.submit.set(ts, { t: performance.now(), enc: 0, net: 0, pts: fr.pts, epoch, film: true });
+    this.submit.set(ts, { t: performance.now(), enc: 0, net: 0, pts: fr.pts, epoch, film: true, key: fr.key });
     if (this.submit.size > 240) this.submit.delete(this.submit.keys().next().value);
     try { this.dec.decode(new EncodedVideoChunk({ type: fr.key ? 'key' : 'delta', timestamp: ts, data: fr.data })); return true; }
     catch { this.epoch = -1; return false; }
@@ -243,7 +264,11 @@ export class Player {
   _filmPump() {
     const f = this.film;
     if (!f?.clock) return;
-    const now = performance.now(), disp = this._filmPos(now), AHEAD = 100;
+    // decode this far ahead of the picture: a stall on this thread (UI, GC of big frames)
+    // shorter than that never shows; at 100 ms the host's own view hitched every few seconds
+    // a re-anchored clock: move toward it 0.5 ms per 10 ms (5%, smooth for picture and sound)
+    if (f.slew) { const st = Math.max(-0.5, Math.min(0.5, f.slew)); f.clock.at += st; f.slew -= st; }
+    const now = performance.now(), disp = this._filmPos(now), AHEAD = 300;
     let cur = f.eps.get(f.cur);
     // Which copy to decode: stay on the current one until it runs dry, or until a newer one
     // (the other rendition, a replaced light film) already reaches past the picture, then
@@ -297,7 +322,9 @@ export class Player {
     if (!c.playing || !c.at || !this.adec || this.adec.state !== 'configured') return;
     if (this.ac.state === 'suspended') this.ac.resume();
     const outLat = (this.ac?.outputLatency || 0) * 1000 + 5 - (this.settings.avOffset || 0);
-    while (f.audio.length && f.audio[0].pts <= disp + 200) {
+    // fed well ahead (each chunk still plays at its moment): at 200 ms a short stall here ran
+    // the ring dry and the sound cut out every few seconds
+    while (f.audio.length && f.audio[0].pts <= disp + 500) {
       const a = f.audio.shift();
       if (a.pts < disp - 40) continue; // its moment has passed
       f.fed.push(a); if (f.fed.length > 30) f.fed.shift();
@@ -351,6 +378,14 @@ export class Player {
     this.stats = { dec: [], enc: [], net: [], frames: 0, drops: 0 };
     this.port.postMessage({ t: 'dec', s: { dec: Math.round(out.dec * 10) / 10, fps: out.fps } });
     this.onStats?.(out);
+    // film diagnostics: only when something went wrong (MAJLIS_DEBUG prints renderer warnings)
+    if (this.film?.clock) {
+      const f = this.fstat, a = this.astat || {};
+      const slow = this.codecInfo?.fps && out.fps < this.codecInfo.fps * 0.85;
+      if (f.late || f.qdrop || a.fix || a.under || f.clk > 1 || slow) console.warn('[film] ' + JSON.stringify({ t: Math.round(performance.now()), pos: Math.round(this._filmPos(performance.now())), ...f, aFix: a.fix || 0, under: a.under || 0, aBuf: Math.round((a.avail || 0) / 48), slew: Math.round(this.film.slew || 0), drops: out.drops, fps: out.fps }));
+      this.fstat = { late: 0, lateKey: 0, qdrop: 0, clk: 0 };
+      this.mixer?.port.postMessage({ t: 'astat' });
+    }
   }
 
   // ------------------------------------------------------------------ audio
@@ -359,9 +394,10 @@ export class Player {
     await this.ac.audioWorklet.addModule('worklet.js');
     this.mixer = new AudioWorkletNode(this.ac, 'majlis-mixer', { outputChannelCount: [2] });
     this.mixer.connect(this.ac.destination);
+    this.mixer.port.onmessage = (e) => { if (e.data.t === 'astat') this.astat = e.data; };
     this.setVolumes(this.settings.gameVol ?? 1, this.settings.voiceVol ?? 1);
     this.mixer.port.postMessage({ t: 'duck', on: this.settings.autoDuck !== false });
-    if (this.cinema) this.mixer.port.postMessage({ t: 'target', ms: this.cinemaDelay });
+    this.mixer.port.postMessage({ t: 'target', ms: this._mixTarget() });
     this.adec = new AudioDecoder({ output: (d) => { const meta = this.ameta.shift(); this._pcm('game', d, meta ? this._audioWant(meta) : null); }, error: () => {} });
     this.adec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
     this.aTs = 0;

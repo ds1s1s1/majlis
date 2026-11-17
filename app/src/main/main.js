@@ -6,7 +6,7 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const { Store } = require('./store');
-const { Net } = require('./net');
+const { Net, core } = require('./net');
 const { Helper } = require('./helper');
 const { Engine } = require('./engine');
 const { Host } = require('./host');
@@ -145,7 +145,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER) ? { query: { view: process.env.MAJLIS_VIEW, pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '' } } : undefined);
+  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL) ? { query: { view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
   // dev aid: MAJLIS_SHOT=out.png saves a screenshot of the page after a delay
   if (process.env.MAJLIS_SHOT) {
     setTimeout(async () => {
@@ -430,6 +430,16 @@ function pollPresence() {
 
 // ------------------------------------------------------------------------------- boot
 app.whenReady().then(async () => {
+  // Packaged-build check (the fuses block ELECTRON_RUN_AS_NODE): does the native core load, does
+  // the engine start? Result goes to the file named by MAJLIS_SELFTEST (a GUI exe has no stdout).
+  if (process.env.MAJLIS_SELFTEST) {
+    const done = (r) => { fs.writeFileSync(process.env.MAJLIS_SELFTEST, JSON.stringify(r)); app.exit(r.core && r.engine ? 0 : 1); };
+    const h = new Helper();
+    const t = setTimeout(() => done({ core: core?.version() || null, engine: null }), 15000);
+    h.once('ready', (m) => { clearTimeout(t); h.stop(); done({ core: core?.version() || null, engine: m.version || null }); });
+    if (!h.start()) { clearTimeout(t); done({ core: core?.version() || null, engine: null }); }
+    return;
+  }
   store = new Store(app.getPath('userData'));
   net = new Net(store.identity(), store);
   helper = new Helper();
