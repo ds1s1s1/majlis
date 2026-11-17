@@ -239,7 +239,10 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     if (party.role === 'host') getHost()?.syncReport(r); else getGuest()?.syncReport(r);
   }, 250);
 
-  return { play, partyStart, close, onSync, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
+  // what's on, for presence (Discord)
+  const info = () => (now && mpv?.props ? { name: now.card?.name || '', poster: now.card?.poster || null, pos: mpv.props['time-pos'] || 0, dur: mpv.props.duration || 0, paused: !!mpv.props.pause, together: !!party } : null);
+
+  return { play, partyStart, close, onSync, info, stop: () => { mpv?.stop(); svc.stop(); }, svc, get mpv() { return mpv; } };
 }
 
 module.exports = { setup };

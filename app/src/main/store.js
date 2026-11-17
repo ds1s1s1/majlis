@@ -105,6 +105,8 @@ class Store {
   get(k) {
     const v = this.d.settings[k];
     if (k === 'server' && !v) return BUILD.server || '';
+    // Discord application id: public, so a build may carry a default (build-config.json)
+    if (k === 'discordClientId' && !v) return BUILD.discordClientId || '';
     // On the built-in server the built-in key always wins: a number typed into the key box
     // by mistake (easy to confuse with the room PIN) must never lock you out.
     if (k === 'accessKey' && BUILD.accessKey && this.usingBuiltIn()) return BUILD.accessKey;

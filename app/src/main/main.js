@@ -33,7 +33,7 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 if (process.defaultApp) app.setAsDefaultProtocolClient('majlis', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('majlis');
 
-let win, store, net, helper, engine, host, guest, replay, port, theater;
+let win, store, net, helper, engine, host, guest, replay, port, theater, discord;
 let encoders = [];
 process.on('uncaughtException', (err) => {
   try {
@@ -451,6 +451,20 @@ app.whenReady().then(async () => {
   handlers();
   createWindow();
   theater = require('./theater').setup({ getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
+  // Discord: our profile shows what we're watching / hosting; a friend's "Join" there knocks here
+  const dcId = store.get('discordClientId');
+  if (/^\d{15,22}$/.test(String(dcId || ''))) {
+    const { Discord, activity, joinTarget } = require('./discord');
+    discord = new Discord(String(dcId));
+    discord.on('join', (secret) => { const target = joinTarget(secret); if (target) { emit('deeplink', { kind: 'join', target }); if (win) { if (win.isMinimized()) win.restore(); win.focus(); } } });
+    discord.on('error', (e) => { if (DEBUG) console.log('[discord]', e.message); });
+    discord.start();
+    const since = Date.now();
+    setInterval(() => {
+      const hosting = host?.enabled ? { guests: host.guests.size, max: 8, mode: host.mode, since } : null;
+      discord.set(store.get('discordPresence') === false ? null : activity({ watching: theater.info(), hosting, id: store.identity().id }));
+    }, 5000);
+  }
   // watch together: the shared state reaches the theater, as host and as guest
   host.on('sync', (st) => theater.onSync('host', st));
   guest.on('sync', (st) => theater.onSync('guest', st));
@@ -558,6 +572,6 @@ app.on('open-url', (e, url) => { const l = deepLink([url]); if (l) emit('deeplin
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); } catch {}
+  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); discord?.stop(); } catch {}
   try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
 });
