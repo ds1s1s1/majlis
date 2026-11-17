@@ -13,6 +13,13 @@ export const STR = {
     watched: 'شفته', mark_watched: 'علّم كمشاهَد', mark_unwatched: 'شيل علامة المشاهدة', left: 'باقي {n} د', new: 'جديد', min: '{n} د',
     error_load: 'ما قدرنا نجيبها. جرّب بعد شوي.', retry: 'حاول مرة ثانية', see_all: 'عرض الكل', all: 'الكل', type_movie: 'أفلام', type_series: 'مسلسلات',
     playing: 'يشتغل...', episode_n: 'الحلقة {n}', released_on: 'يعرض {d}',
+    trending_now: 'الرائج الآن', discover_title: 'وش نشوف الليلة؟', discover_sub: 'قيّم كم عمل بإعجاب أو لا، ونرتب لك اختيارات على ذوقك.', tune_q: 'شفته؟ عجبك؟',
+    like: 'عجبني', dislike: 'ما عجبني', not_seen: 'ما شفته', tuned_n: 'قيّمت {n}', surprise: 'فاجئني', marathons: 'ماراثونات', films_n: '{n} أفلام', for_you: '{g} على ذوقك',
+    cal_library: 'مكتبتي', cal_tv: 'التلفزيون', cal_movies: 'أفلام جديدة', today: 'اليوم', this_week: 'هذا الأسبوع', this_month: 'هذا الشهر', history: 'السجل',
+    sort_recent: 'الأحدث', sort_az: 'أ-ي', empty_list: 'ما فيه شي هنا للحين.', empty_history: 'لما تشوف شي يطلع هنا.',
+    collections_sub: 'سلاسل أفلام تنشاف بالترتيب.', needs_tmdb: 'المجموعات تحتاج مفتاح TMDB. حطه من الإعدادات.',
+    addon_added: 'انضافت {name}', addon_link_ph: 'الصق رابط إضافة (manifest.json أو stremio://)', install: 'ثبّت', installed: 'مثبتة', move_up: 'فوق', move_down: 'تحت',
+    configure: 'إعداد', remove: 'شيل', addon_store: 'متجر الإضافات', configure_first: 'تحتاج إعداد أول',
   },
   en: {
     home: 'Home', discover: 'Discover', catalogs: 'Catalogs', movies: 'Movies', shows: 'Shows', anime: 'Anime', calendar: 'Calendar',
@@ -27,6 +34,13 @@ export const STR = {
     watched: 'Watched', mark_watched: 'Mark as watched', mark_unwatched: 'Mark as unwatched', left: '{n} min left', new: 'New', min: '{n} min',
     error_load: "Couldn't load this. Try again in a moment.", retry: 'Try again', see_all: 'See all', all: 'All', type_movie: 'Movies', type_series: 'Shows',
     playing: 'Starting...', episode_n: 'Episode {n}', released_on: 'Airs {d}',
+    trending_now: 'Trending now', discover_title: 'What are we watching tonight?', discover_sub: 'Rate a few titles up or down and the picks below follow your taste.', tune_q: 'Seen it? Liked it?',
+    like: 'Liked it', dislike: "Didn't like it", not_seen: "Haven't seen it", tuned_n: '{n} rated', surprise: 'Surprise me', marathons: 'Marathons', films_n: '{n} films', for_you: '{g} for you',
+    cal_library: 'My library', cal_tv: 'TV', cal_movies: 'New films', today: 'Today', this_week: 'This week', this_month: 'This month', history: 'History',
+    sort_recent: 'Recent', sort_az: 'A-Z', empty_list: 'Nothing here yet.', empty_history: 'What you watch shows up here.',
+    collections_sub: 'Film series to watch in order.', needs_tmdb: 'Collections need a TMDB key. Add one in settings.',
+    addon_added: 'Added {name}', addon_link_ph: 'Paste an addon link (manifest.json or stremio://)', install: 'Install', installed: 'Installed', move_up: 'Up', move_down: 'Down',
+    configure: 'Configure', remove: 'Remove', addon_store: 'Addon store', configure_first: 'Needs setup first',
   },
 } as const;
 

@@ -19,6 +19,8 @@ const { DEFAULT_ADDONS } = require('../mediasvc');
 let BUILD = {};
 try { BUILD = require('../build-config.json'); } catch {}
 const KEY_NAMES = ['tmdb', 'rpdb', 'mdblist', 'fanart', 'trakt', 'opensubtitles'];
+// film series worth a marathon (TMDB collection ids)
+const MARATHONS = [119, 1241, 10, 230, 263, 2344, 264, 84, 295, 87359, 404609, 9485, 8091, 31562, 328, 131635, 726871, 87096, 10194, 748, 1570, 8945, 528, 645];
 
 function setup({ store: st, dataDir, openExternal }) {
   http.init(path.join(dataDir, 'media-cache'));
@@ -98,7 +100,26 @@ function setup({ store: st, dataDir, openExternal }) {
   h('season', ({ tmdbId, n }) => meta.season(tmdbId, n));
 
   // the title page: the first addon that has this id's meta, then TMDB on top
+  // AniList id -> Kitsu (anime addons) or IMDb; new shows without a mapping are found by name in the Kitsu addon
+  async function animeId(id) {
+    const n = id.slice('anilist:'.length);
+    const ids = await meta.animeIds(n).catch(() => ({}));
+    if (ids.kitsu || ids.imdb) return ids.kitsu || ids.imdb;
+    const a = await meta.anilist('query($id:Int){Media(id:$id){title{english romaji}}}', { id: +n }).catch(() => null);
+    const names = [a?.data?.Media?.title?.romaji, a?.data?.Media?.title?.english].filter(Boolean);
+    for (const { url, m } of await manifests()) {
+      for (const c of m.catalogs.filter((c) => c.extra.some((x) => x.name === 'search'))) {
+        for (const name of names) {
+          const r = await client.request(url, { resource: 'catalog', type: c.type, id: c.id, extra: [['search', name]] }).catch(() => null);
+          const hit = r?.metas.find((x) => x.id.startsWith('kitsu:'));
+          if (hit) return hit.id;
+        }
+      }
+    }
+    return null;
+  }
   h('meta', async ({ type, id }) => {
+    if (id.startsWith('anilist:')) { id = await animeId(id); if (!id) throw new Error('this anime is not in any of your addons yet'); }
     const r = await client.all(addons(), { resource: 'meta', type, id });
     const base = r.find((x) => x.result?.meta)?.result.meta || null;
     const item = await meta.details(type, id, base);
@@ -126,6 +147,15 @@ function setup({ store: st, dataDir, openExternal }) {
   h('lib-watched', ({ meta: m, videoId, on }) => library().setWatched(m, videoId, on));
   h('lib-toggle', ({ list, meta: m }) => (['watchlist', 'favorites'].includes(list) ? library().toggleList(list, m) : null));
 
+  // ---- Discover: what the viewer liked and didn't (per profile): { [id]: { v: 1 | -1, genres } }
+  h('tune', () => pget('mediaTune') || {});
+  h('tune-set', ({ id, v, genres }) => {
+    const t = { ...(pget('mediaTune') || {}) };
+    if (v) t[id] = { v: v > 0 ? 1 : -1, genres: (genres || []).slice(0, 6) }; else delete t[id];
+    pset('mediaTune', t); return t;
+  });
+  h('marathons', async () => (meta.tmdbOn() ? (await Promise.all(MARATHONS.map((id) => meta.collection(id).catch(() => null)))).filter(Boolean) : []));
+
   // ---- calendar: { from, to, sources }
   h('calendar', ({ from, to, sources }) => calendar().range(from, to, sources));
 
@@ -151,6 +181,7 @@ function setup({ store: st, dataDir, openExternal }) {
   });
 
   // ---- keys (the user's own; built-in ones are never sent to the page)
+  h('caps', () => ({ tmdb: meta.tmdbOn(), trakt: !!keys().trakt, stremio: !!pget('stremioKey') }));
   h('keys', () => ({ user: userKeys(), builtIn: Object.fromEntries(KEY_NAMES.map((k) => [k, !!BUILD.mediaKeys?.[k]])) }));
   h('keys-set', (patch) => {
     const k = { ...userKeys() };

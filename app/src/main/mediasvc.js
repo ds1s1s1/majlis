@@ -10,6 +10,7 @@ const DEFAULT_ADDONS = [
   'https://v3-cinemeta.strem.io/manifest.json',
   'https://catalog.ers.pw/manifest.json',          // Streaming Catalogs: Netflix, HBO, Disney+... rows
   'https://opensubtitles-v3.strem.io/manifest.json',
+  'https://anime-kitsu.strem.fun/manifest.json',     // anime catalogs and Kitsu ids (what anime stream addons use)
 ];
 
 function exePath() {

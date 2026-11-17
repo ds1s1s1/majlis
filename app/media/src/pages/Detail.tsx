@@ -109,7 +109,7 @@ function Title({ m, route }: { m: Item; route: TitleRoute }) {
                 </button>
               ))}
             </div>
-            <div className="grid gap-2">
+            <div className="grid grid-cols-1 gap-2">
               {eps.filter((v) => v.season === season).map((v) => (
                 <Episode key={v.id} v={v} watched={watchedIds.has(v.id)} progress={st?.video_id === v.id && st.duration ? st.timeOffset / st.duration : 0}
                   onPlay={() => setPick({ id: v.id, auto: false, pos: resumeOf(v.id) })} />

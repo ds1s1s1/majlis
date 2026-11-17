@@ -102,12 +102,12 @@ const cinema = () => (CIN ||= initCinema({ api, t, icon, esc, toast, $, $$ }));
 const PAL = initPalette({ t, icon, esc, commands: () => [
   ...[['home', 'home', 'home'], ['room', 'room', 'room'], ['cinema', 'film', 'cinema movies'], ['net', 'net', 'network'], ['lib', 'lib', 'library games'], ['set', 'set', 'settings']]
     .map(([v, ic, alt]) => ({ id: `go-${v}`, label: t(v === 'set' ? 'nav_set' : `nav_${v}`), alt, icon: ic, run: () => go(v) })),
-  { id: 'addons', label: t('cin_addons'), alt: 'addons stremio', icon: 'plus', run: () => { go('cinema'); cinema().showAddons(); } },
+  { id: 'addons', label: t('cin_addons'), alt: 'addons stremio', icon: 'plus', run: () => { go('cinema'); setTimeout(() => MEDIA?.go('addons'), 0); } },
   { id: 'copy-id', label: t('pal_copy_id'), alt: 'copy my number id', icon: 'copy', run: () => { navigator.clipboard.writeText(S.st?.id || ''); toast(t('pal_copied')); } },
   { id: 'theme', label: t('pal_theme'), alt: 'theme dark light', icon: 'eye', run: async () => { await set({ theme: S.st.settings.theme === 'light' ? 'dark' : 'light' }); applyLook(); } },
   { id: 'lang', label: t('pal_lang'), alt: 'language arabic english', icon: 'chat', run: async () => { await set({ lang: S.st.settings.lang === 'en' ? 'ar' : 'en' }); applyLook(); renderRail(); render(); } },
   { id: 'panic', label: t('pal_panic'), alt: 'kick all panic', icon: 'door', when: !!S.host?.guests?.length, run: () => api.invoke('host:panic') },
-  { id: 'cinema-search-run', when: false, run: (q) => { go('cinema'); cinema().search(q); } },
+  { id: 'cinema-search-run', when: false, run: () => { go('cinema'); setTimeout(() => MEDIA?.go('search'), 0); } },
 ] });
 
 // Cinema is the React app in media/ (built into renderer/media): mounted once into its own node
@@ -1210,6 +1210,8 @@ setInterval(() => {
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
   // test aid: open a title in cinema mode straight away (type:id)
+  // test aid: a Cinema tab straight away (MAJLIS_CTAB=calendar)
+  if (q.get('ctab')) { go('cinema'); setTimeout(() => MEDIA?.go(q.get('ctab')), 1500); }
   if (q.get('title')) { go('cinema'); const [ty, ...id] = q.get('title').split(':'); setTimeout(() => MEDIA?.open({ kind: 'title', type: ty, id: id.join(':') }), 1500); }
   if (q.get('pick')) setTimeout(() => pickWindow(), 600);
   if (q.get('pal')) setTimeout(() => { PAL.open(); const i = document.querySelector('.pal-q input'); if (i) { i.value = q.get('pal'); i.dispatchEvent(new Event('input')); } }, 1200);

@@ -62,3 +62,30 @@ export const yearOf = (p: Preview) => String(p.releaseInfo ?? p.year ?? '').slic
 // open a copy in the player (theater.js): card carries what "continue watching" and next-episode need
 export const play = (a: { type: Type; videoId: string; meta: Preview; stream: Stream; label?: string; pos?: number }) =>
   invoke('media:play', { type: a.type, id: a.videoId, stream: a.stream, pos: a.pos, card: { name: a.label || a.meta.name, seriesName: a.meta.name, poster: a.meta.poster || null, type: a.type, metaId: a.meta.id } });
+
+// ---- M3: browsing, calendar, library tabs, addons
+export interface Manifest { id: string; name: string; version: string; description?: string; logo?: string; background?: string; types: string[]; catalogs: { type: Type; id: string; name: string | null; extra: Extra[] }[]; resources: { name: string }[]; behaviorHints: { configurable?: boolean; configurationRequired?: boolean; adult?: boolean } }
+export interface Installed { url: string; manifest?: Manifest; error?: string }
+export interface StoreAddon { slug: string; manifestUrl: string; page: string; stars: number; categories: string[]; configurable: boolean; configureUrl: string | null; manifest: Manifest | null }
+export interface CalEntry { at: number; day: string; source: string; id: string; type: Type; name: string; title: string; season: number | null; episode: number | null; videoId: string | null; poster: string | null }
+export interface HistoryEntry { id: string; videoId: string; type: Type; name: string; poster: string | null; at: number }
+export interface Marathon { id: number; name: string; background: string | null; parts: Item[] }
+export type Tune = Record<string, { v: 1 | -1; genres: string[] }>;
+
+export const useCaps = () => useQuery({ queryKey: ['caps'], queryFn: () => cin<{ tmdb: boolean; trakt: boolean; stremio: boolean }>('caps'), staleTime: 60000 });
+export const useAnimeTrending = (page = 1) => useQuery({ queryKey: ['anime-trending', page], queryFn: () => cin<Item[]>('anime-trending', { page }), staleTime: H });
+export const useMarathons = (on = true) => useQuery({ queryKey: ['marathons'], queryFn: () => cin<Marathon[]>('marathons'), staleTime: 24 * H, enabled: on });
+export const useTune = () => useQuery({ queryKey: ['tune'], queryFn: () => cin<Tune>('tune'), staleTime: Infinity });
+export const useCalendar = (from: number, to: number, sources: string[]) =>
+  useQuery({ queryKey: ['calendar', from, to, sources], queryFn: () => cin<CalEntry[]>('calendar', { from, to, sources }), staleTime: 30 * 60000 });
+export const useHistory = () => useQuery({ queryKey: ['history'], queryFn: () => cin<{ group: string; items: HistoryEntry[] }[]>('history'), staleTime: 0 });
+export const useLists = () => useQuery({ queryKey: ['lists'], queryFn: () => cin<{ watchlist: HistoryEntry[]; favorites: HistoryEntry[] }>('lists'), staleTime: 0 });
+export const useInstalled = () => useQuery({ queryKey: ['addons'], queryFn: () => cin<Installed[]>('addons'), staleTime: 0 });
+export const useStore = (q: { search?: string; category?: string; page?: number }) =>
+  useQuery({ queryKey: ['store', q], queryFn: () => cin<{ addons: StoreAddon[] }>('store', { ...q, limit: 40 }), staleTime: 30 * 60000 });
+export const useStoreCategories = () => useQuery({ queryKey: ['store-categories'], queryFn: () => cin<{ name: string; slug: string }[]>('store-categories'), staleTime: 24 * H });
+
+// Cinemeta's own catalogs take a genre: the base of the type pages and Discover's picks
+export const CINEMETA = 'https://v3-cinemeta.strem.io/manifest.json';
+export const cinemetaRow = (type: 'movie' | 'series', id: 'top' | 'imdbRating' = 'top'): Row =>
+  ({ addon: CINEMETA, addonName: 'Cinemeta', type, id, name: id, extra: [{ name: 'genre', isRequired: false, options: [], optionsLimit: 1 }] });

@@ -6,10 +6,27 @@ import { Home } from './pages/Home';
 import { Search } from './pages/Search';
 import { Detail } from './pages/Detail';
 import { Collection } from './pages/Collection';
+import { Discover } from './pages/Discover';
+import { Catalogs } from './pages/Catalogs';
+import { TypePage } from './pages/TypePage';
+import { Anime } from './pages/Anime';
+import { Calendar } from './pages/Calendar';
+import { Library } from './pages/Library';
+import { Collections } from './pages/Collections';
+import { Addons } from './pages/Addons';
 
 // the tabs in the pill, in order (each one is a page below)
 const TABS: { id: Tab; label: Key; page: (active: boolean) => ReactNode }[] = [
   { id: 'home', label: 'home', page: () => <Home /> },
+  { id: 'discover', label: 'discover', page: () => <Discover /> },
+  { id: 'catalogs', label: 'catalogs', page: () => <Catalogs /> },
+  { id: 'movies', label: 'movies', page: () => <TypePage type="movie" /> },
+  { id: 'shows', label: 'shows', page: () => <TypePage type="series" /> },
+  { id: 'anime', label: 'anime', page: () => <Anime /> },
+  { id: 'calendar', label: 'calendar', page: () => <Calendar /> },
+  { id: 'library', label: 'library', page: () => <Library /> },
+  { id: 'collections', label: 'collections', page: () => <Collections /> },
+  { id: 'addons', label: 'addons', page: () => <Addons /> },
 ];
 
 export function App() {
@@ -24,9 +41,10 @@ export function App() {
 
   useEffect(() => {
     const h = (e: Event) => open((e as CustomEvent<Route>).detail);
-    bus.addEventListener('open', h);
-    return () => bus.removeEventListener('open', h);
-  }, [open]);
+    const g = (e: Event) => go((e as CustomEvent<Tab>).detail);
+    bus.addEventListener('open', h); bus.addEventListener('go', g);
+    return () => { bus.removeEventListener('open', h); bus.removeEventListener('go', g); };
+  }, [open, go]);
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && stack.length && !(e.target as HTMLElement)?.matches?.('input')) back(); };
@@ -67,10 +85,10 @@ export function App() {
               </button>
             ) : null}
           </div>
-          <nav className="pointer-events-auto mx-auto flex items-center gap-0.5 rounded-full bg-black/40 p-1.5 ring-1 ring-white/10 backdrop-blur-xl">
+          <nav className="hscroll pointer-events-auto mx-auto flex min-w-0 items-center gap-0.5 rounded-full bg-black/40 p-1.5 ring-1 ring-white/10 backdrop-blur-xl">
             {TABS.map((x) => (
               <button key={x.id} onClick={() => go(x.id)}
-                className={`rounded-full px-4 py-1.5 text-[13.5px] font-medium transition ${tab === x.id && !stack.length ? 'bg-fg text-bg' : 'text-fg2 hover:bg-white/10 hover:text-fg'}`}>
+                className={`flex-none rounded-full px-3.5 py-1.5 text-[13.5px] font-medium transition ${tab === x.id && !stack.length ? 'bg-fg text-bg' : 'text-fg2 hover:bg-white/10 hover:text-fg'}`}>
                 {t(x.label)}
               </button>
             ))}
