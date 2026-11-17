@@ -210,6 +210,45 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     return out;
   });
 
+  // ---- profiles and preferences
+  // the look is per profile ({ avatar, accent, theme }); playback and debrid choices are per machine
+  const GLOBAL = { mediaMaxHeight: 'number', mediaVsr: 'boolean', debridService: 'string', debridOnly: 'boolean', autoNext: 'boolean', subLang2: 'string', cinemaOnboarded: 'boolean' };
+  const THEMES = ['majlis', 'oled', 'nord', 'dracula', 'noir'];
+  const looks = () => st.get('mediaLooks') || {};
+  const lookOf = (p) => ({ avatar: null, accent: null, theme: 'majlis', ...(looks()[p] || {}) });
+  const profileList = () => ['default', ...(st.get('mediaProfiles') || [])];
+  h('prefs', () => ({
+    profile: profile(), look: lookOf(profile()), profiles: profileList().map((name) => ({ name, ...lookOf(name) })),
+    ...Object.fromEntries(Object.keys(GLOBAL).map((k) => [k, st.get(k) ?? null])),
+  }));
+  h('prefs-set', (patch) => {
+    for (const [k, type] of Object.entries(GLOBAL)) if (k in patch && (patch[k] === null || typeof patch[k] === type)) st.set(k, patch[k]);
+    if (patch.look) {
+      const l = { ...lookOf(profile()) }, x = patch.look;
+      if (x.theme && THEMES.includes(x.theme)) l.theme = x.theme;
+      if (x.accent === null || /^#[0-9a-f]{6}$/i.test(x.accent || '')) l.accent = x.accent;
+      // a picked emoji or an uploaded picture (already shrunk by the page to a small data URL)
+      if (x.avatar === null || (typeof x.avatar === 'string' && (x.avatar.length <= 16 || (/^data:image\/(png|jpeg|webp);base64,/.test(x.avatar) && x.avatar.length < 200000)))) l.avatar = x.avatar;
+      st.set('mediaLooks', { ...looks(), [profile()]: l });
+    }
+    return true;
+  });
+  h('profile-use', ({ name }) => {
+    name = String(name || '').trim().slice(0, 24);
+    if (!name) return profile();
+    const list = st.get('mediaProfiles') || [];
+    if (name !== 'default' && !list.includes(name)) st.set('mediaProfiles', [...list, name]);
+    st.set('mediaProfile', name);
+    return name;
+  });
+  h('profile-remove', ({ name }) => {
+    if (!name || name === 'default') return false;
+    st.set('mediaProfiles', (st.get('mediaProfiles') || []).filter((x) => x !== name));
+    const l = { ...looks() }; delete l[name]; st.set('mediaLooks', l);
+    if (profile() === name) st.set('mediaProfile', 'default');
+    return true;
+  });
+
   // ---- keys (the user's own; built-in ones are never sent to the page)
   h('caps', () => ({ tmdb: meta.tmdbOn(), trakt: !!keys().trakt, stremio: !!pget('stremioKey'), debrid: debridService()?.name || null }));
   h('keys', () => ({ user: userKeys(), builtIn: Object.fromEntries(KEY_NAMES.map((k) => [k, !!BUILD.mediaKeys?.[k]])) }));

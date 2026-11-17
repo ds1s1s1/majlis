@@ -15,6 +15,11 @@ import { Library } from './pages/Library';
 import { Collections } from './pages/Collections';
 import { Addons } from './pages/Addons';
 import { Downloads } from './pages/Downloads';
+import { Profile, Avatar, usePrefs } from './pages/Profile';
+import { Onboarding } from './pages/Onboarding';
+
+// text on the accent: dark on light colours, light on dark ones
+const inkFor = (hex: string) => { const n = parseInt(hex.slice(1), 16), l = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255; return l > 0.6 ? '#141210' : '#fff8ec'; };
 
 // the tabs in the pill, in order (each one is a page below)
 const TABS: { id: Tab; label: Key; page: (active: boolean) => ReactNode }[] = [
@@ -33,6 +38,8 @@ const TABS: { id: Tab; label: Key; page: (active: boolean) => ReactNode }[] = [
 
 export function App() {
   const host = useHost(), t = useT();
+  const prefs = usePrefs().data;
+  const look = prefs?.look;
   const [tab, setTab] = useState<Tab>('home');
   const [seen, setSeen] = useState<Set<Tab>>(() => new Set(['home']));
   const [stack, setStack] = useState<Route[]>([]);
@@ -58,10 +65,12 @@ export function App() {
   const pages: { id: Tab; node: ReactNode }[] = [
     ...TABS.filter((x) => seen.has(x.id)).map((x) => ({ id: x.id, node: x.page(tab === x.id && !stack.length) })),
     ...(seen.has('search') ? [{ id: 'search' as Tab, node: <Search active={tab === 'search' && !stack.length} /> }] : []),
+    ...(seen.has('profile') ? [{ id: 'profile' as Tab, node: <Profile /> }] : []),
   ];
   return (
     <NavCtx.Provider value={nav}>
-      <div className="cin" data-theme={host.theme} dir={host.lang === 'ar' ? 'rtl' : 'ltr'}>
+      <div className="cin" data-theme={look?.theme || host.theme} dir={host.lang === 'ar' ? 'rtl' : 'ltr'}
+        style={look?.accent ? ({ '--c-acc': look.accent, '--c-acc-ink': inkFor(look.accent) } as React.CSSProperties) : undefined}>
         {/* tabs stay mounted (scroll, loaded rows); only the visible one is interactive */}
         {pages.map((p) => {
           const on = p.id === tab && !stack.length;
@@ -100,8 +109,15 @@ export function App() {
               className={`grid size-10 place-items-center rounded-full ring-1 ring-white/10 backdrop-blur-xl transition ${tab === 'search' && !stack.length ? 'bg-fg text-bg' : 'bg-black/35 hover:bg-white/15'}`}>
               <Icon n="search" s={18} />
             </button>
+            {prefs ? (
+              <button onClick={() => go('profile')} aria-label={t('profile')} title={prefs.profile === 'default' ? t('profile') : prefs.profile}
+                className={`rounded-full ring-2 transition ${tab === 'profile' && !stack.length ? 'ring-fg' : 'ring-transparent hover:ring-white/40'}`}>
+                <Avatar look={prefs.look} name={prefs.profile} size={40} />
+              </button>
+            ) : null}
           </div>
         </header>
+        {prefs && prefs.cinemaOnboarded !== true ? <Onboarding /> : null}
       </div>
     </NavCtx.Provider>
   );

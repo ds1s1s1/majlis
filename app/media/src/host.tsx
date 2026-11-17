@@ -4,7 +4,7 @@ import { translate, type Key, type Lang } from './i18n';
 import type { Type } from './api';
 
 export interface HostApi { lang: Lang; theme: string; toast: (msg: string) => void; leave: () => void }
-export type Tab = 'home' | 'discover' | 'catalogs' | 'movies' | 'shows' | 'anime' | 'calendar' | 'library' | 'collections' | 'downloads' | 'addons' | 'search';
+export type Tab = 'home' | 'discover' | 'catalogs' | 'movies' | 'shows' | 'anime' | 'calendar' | 'library' | 'collections' | 'downloads' | 'addons' | 'search' | 'profile';
 export type Route = { kind: 'title'; type: Type; id: string; autoplay?: string; pos?: number } | { kind: 'collection'; id: number; name: string };
 
 export interface Nav { tab: Tab; go: (t: Tab) => void; open: (r: Route) => void; back: () => void; depth: number }

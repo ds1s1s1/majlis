@@ -72,7 +72,7 @@ export interface HistoryEntry { id: string; videoId: string; type: Type; name: s
 export interface Marathon { id: number; name: string; background: string | null; parts: Item[] }
 export type Tune = Record<string, { v: 1 | -1; genres: string[] }>;
 
-export const useCaps = () => useQuery({ queryKey: ['caps'], queryFn: () => cin<{ tmdb: boolean; trakt: boolean; stremio: boolean }>('caps'), staleTime: 60000 });
+export const useCaps = () => useQuery({ queryKey: ['caps'], queryFn: () => cin<{ tmdb: boolean; trakt: boolean; stremio: boolean; debrid: string | null }>('caps'), staleTime: 60000 });
 export const useAnimeTrending = (page = 1) => useQuery({ queryKey: ['anime-trending', page], queryFn: () => cin<Item[]>('anime-trending', { page }), staleTime: H });
 export const useMarathons = (on = true) => useQuery({ queryKey: ['marathons'], queryFn: () => cin<Marathon[]>('marathons'), staleTime: 24 * H, enabled: on });
 export const useTune = () => useQuery({ queryKey: ['tune'], queryFn: () => cin<Tune>('tune'), staleTime: Infinity });
