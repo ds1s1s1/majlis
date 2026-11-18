@@ -23,8 +23,17 @@ pub struct Torrents {
 // Trackers come from the addon's `sources` ("tracker:udp://..."); "dht:" entries need nothing.
 pub fn magnet(info_hash: &str, sources: &[String]) -> String {
     let mut m = format!("magnet:?xt=urn:btih:{info_hash}");
-    for s in sources { if let Some(t) = s.strip_prefix("tracker:") { m.push_str("&tr="); m.push_str(&crate::addons::enc(t)); } }
+    for s in sources { if let Some(t) = s.strip_prefix("tracker:") { m.push_str("&tr="); m.push_str(&enc(t)); } }
     m
+}
+
+// percent-encoding for a tracker URL inside the magnet (what encodeURIComponent keeps, plus ':')
+fn enc(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'():".contains(&b) { o.push(b as char); } else { o.push_str(&format!("%{b:02X}")); }
+    }
+    o
 }
 
 pub fn valid_hash(h: &str) -> bool { h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit()) }

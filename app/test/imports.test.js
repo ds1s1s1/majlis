@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { csv, letterboxdFrom, letterboxdKey, stremioLibrary } = require('../src/main/imports');
+const { csv, letterboxdFrom, letterboxdKey } = require('../src/main/imports');
 
 test('csv: quotes, doubled quotes, commas and newlines inside fields', () => {
   const rows = csv('Date,Name,Year,Review\r\n2024-01-02,"Crouching Tiger, Hidden Dragon",2000,"Said ""wow""\nthen left"\n2024-02-03,Heat,1995,\n');
@@ -23,11 +23,3 @@ test('letterboxd: watched, ratings, diary, reviews and watchlist merge per film'
   assert.strictEqual(lb[letterboxdKey('dune', '2021')].watchlist, true);
 });
 
-test('stremio library: removed items dropped, progress in seconds', () => {
-  const l = stremioLibrary([
-    { _id: 'tt0113277', type: 'movie', name: 'Heat', state: { timeOffset: 600000, duration: 10200000, timesWatched: 1, lastWatched: '2024-01-01T00:00:00Z' } },
-    { _id: 'tt1', type: 'movie', name: 'Gone', removed: true, state: {} },
-  ]);
-  assert.strictEqual(l.length, 1);
-  assert.deepStrictEqual([l[0].t, l[0].d, l[0].watched], [600, 10200, true]);
-});

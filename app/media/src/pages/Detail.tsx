@@ -7,6 +7,7 @@ import { Icon } from '../ui/Icon';
 import { Row } from '../ui/Row';
 import { Poster } from '../ui/Poster';
 import { StreamList } from '../ui/Streams';
+import { FriendsSaw, NominateButton } from '../ui/Social';
 
 type TitleRoute = Extract<Route, { kind: 'title' }>;
 const label = (m: Item, v?: Video | null) => (v && v.season != null ? `${m.name} · S${v.season}E${v.episode}` : m.name);
@@ -85,6 +86,7 @@ function Title({ m, route }: { m: Item; route: TitleRoute }) {
               <Icon n="play" s={20} />{resuming ? t('resume') : t('play')}{series && nextUp ? <span className="font-mono text-sm opacity-70">S{nextUp.season}E{nextUp.episode}</span> : null}
             </button>
             {m.trailer ? <button onClick={() => invoke('open', `https://www.youtube.com/watch?v=${m.trailer}`)} className="flex items-center gap-2 rounded-full bg-white/15 px-5 py-3 font-semibold backdrop-blur-md transition hover:bg-white/25"><Icon n="film" s={18} />{t('trailer')}</button> : null}
+            <NominateButton m={m} />
             <Circle on={inLib} icon={inLib ? 'check' : 'plus'} label={inLib ? t('in_library') : t('add_library')} onClick={toggleLib} />
             <Circle on={onList('watchlist')} icon="bookmark" label={t('watchlist')} onClick={() => toggleList('watchlist')} />
             <Circle on={onList('favorites')} icon="heart" label={t('favorite')} onClick={() => toggleList('favorites')} />
@@ -140,6 +142,8 @@ function Title({ m, route }: { m: Item; route: TitleRoute }) {
           </section>
         ) : null}
       </div>
+
+      <div className="px-12"><FriendsSaw m={m} watchedIt={watchedIds.size > 0 || !!st?.flaggedWatched} /></div>
 
       {m.recommendations?.length ? <div className="-mx-0"><Row title={t('more_like')} items={m.recommendations} width={168} height={262} render={(it) => <Poster item={it} />} /></div> : null}
 

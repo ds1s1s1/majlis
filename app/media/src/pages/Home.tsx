@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { Billboard } from '../ui/Billboard';
 import { ContinueRow } from '../ui/ContinueRow';
+import { VoteRow } from '../ui/Social';
 import { Top10 } from '../ui/Top10';
 import { CatalogRow, useWatched } from '../ui/CatalogRow';
 import { useRows, useTrending } from '../api';
@@ -24,6 +25,7 @@ export function Home() {
       <Billboard items={hero} />
       <div className="relative z-10 -mt-20">
         <ContinueRow />
+        <VoteRow />
         <Top10 title={t('top10_movies')} items={tm.data || []} />
         {(rows.data || []).map((r) => (
           <CatalogRow key={`${r.addon}|${r.type}|${r.id}`} row={r} watched={watched}

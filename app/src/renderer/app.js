@@ -3,7 +3,6 @@ import { icon, mark } from './icons.js';
 import { Player, VoiceHub, decodeCaps, measureHz } from './stream.js';
 import { accelFrom, matchAccel } from './keys.js';
 import { initWatch } from './watch.js';
-import { initCinema } from './cinema.js';
 import { initPalette } from './palette.js';
 
 const api = window.majlis;
@@ -96,9 +95,7 @@ function renderStatus() {
   $('#tbStatus').innerHTML = s;
 }
 
-let CIN = null;
 function go(v) { S.view = v; renderRail(); render(); }
-const cinema = () => (CIN ||= initCinema({ api, t, icon, esc, toast, $, $$ }));
 const PAL = initPalette({ t, icon, esc, commands: () => [
   ...[['home', 'home', 'home'], ['room', 'room', 'room'], ['cinema', 'film', 'cinema movies'], ['net', 'net', 'network'], ['lib', 'lib', 'library games'], ['set', 'set', 'settings']]
     .map(([v, ic, alt]) => ({ id: `go-${v}`, label: t(v === 'set' ? 'nav_set' : `nav_${v}`), alt, icon: ic, run: () => go(v) })),
@@ -1100,7 +1097,7 @@ function handleEvent(m) {
   switch (m.type) {
     case 'registered': S.st.registered = true; S.st.publicAddr = m.publicAddr; S.st.relays = m.relays; S.via = m.via; renderStatus(); if (S.view === 'home') { const st = $('.idstatus'); if (st) render(); } break;
     case 'id-changed': refresh(); break;
-    case 'vote': cinema().setVote(m); break;
+    case 'vote': MEDIA?.setVote(m); break;
     case 'theater': if (!m.open) MEDIA?.refresh(); break;
     case 'downloads': MEDIA?.refresh('downloads'); break;
     case 'trackers': MEDIA?.refresh('trackers'); break;

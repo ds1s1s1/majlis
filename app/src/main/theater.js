@@ -7,7 +7,7 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 const { Mpv } = require('./mpv');
-const { MediaService, DEFAULT_ADDONS } = require('./mediasvc');
+const { MediaService } = require('./mediasvc');
 const { SyncViewer } = require('./sync');
 const { dialog } = require('electron');
 const imp = require('./imports');
@@ -26,7 +26,6 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   const pk = (k) => (profile() === 'default' ? k : `${k}@${profile()}`);
   const pget = (k) => store.get(pk(k));
   const pset = (k, v) => store.set(pk(k), v);
-  const addons = () => pget('addons') || DEFAULT_ADDONS;
   // up from the start (an idle process), so the first visit to cinema doesn't wait for it
   svc._start().catch(() => {});
   const progress = () => pget('mediaProgress') || {};
@@ -150,7 +149,8 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
       const hub = getMediaHub();
       const bh = now?.stream?.behaviorHints || {};
       const extra = [['videoHash', bh.videoHash], ['videoSize', bh.videoSize], ['filename', bh.filename]].filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]);
-      const r = hub ? { subtitles: await hub.subtitles({ type, id, extra }) } : await svc.call('subtitles', { addons: addons(), type, id });
+      if (!hub) return;
+      const r = { subtitles: await hub.subtitles({ type, id, extra }) };
       const pref = ['ara', 'ar', store.get('subLang2') || 'eng', 'en'];
       const pick = [];
       for (const l of pref) for (const s of r.subtitles || []) if (s.lang === l && pick.length < 6 && !pick.includes(s)) pick.push(s);
@@ -158,62 +158,8 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     } catch {}
   }
 
-  ipcMain.handle('media:addons', async () => Promise.all(addons().map(async (url) => {
-    try { return { url, ...(await svc.call('manifest', { url })) }; } catch (e) { return { url, error: e.message }; }
-  })));
-  ipcMain.handle('media:addon-add', async (e, url) => {
-    const m = await svc.call('manifest', { url });
-    const list = addons().filter((u) => u !== url);
-    pset('addons', [...list, url]);
-    return m;
-  });
-  ipcMain.handle('media:addon-remove', (e, url) => { pset('addons', addons().filter((u) => u !== url)); return true; });
-  ipcMain.handle('media:addon-move', (e, { url, dir }) => {
-    const l = [...addons()], i = l.indexOf(url), j = i + dir;
-    if (i >= 0 && j >= 0 && j < l.length) { [l[i], l[j]] = [l[j], l[i]]; pset('addons', l); }
-    return l;
-  });
-  // every catalog that needs no input (search/genre-required ones aren't home rows)
-  // every addon's manifest at once, in the user's order (a dead addon is just skipped)
-  const manifests = () => Promise.all(addons().map((url) => svc.call('manifest', { url }).then((m) => ({ url, m }), () => null))).then((l) => l.filter(Boolean));
-  ipcMain.handle('media:rows', async () => {
-    const rows = [];
-    for (const { url, m } of await manifests()) {
-      for (const c of m.catalogs || []) {
-        if ((c.extra || []).some((x) => x.isRequired) || (c.extraRequired || []).length) continue;
-        rows.push({ addon: url, addonName: m.name, type: c.type, id: c.id, name: c.name || c.id });
-      }
-    }
-    return rows;
-  });
-  ipcMain.handle('media:catalog', (e, q) => svc.call('catalog', q));
-  ipcMain.handle('media:search', async (e, { q }) => {
-    const jobs = [];
-    for (const { url, m } of await manifests()) {
-      for (const c of m.catalogs || []) {
-        if (!(c.extra || []).some((x) => x.name === 'search') && !(c.extraSupported || []).includes('search')) continue;
-        jobs.push(svc.call('catalog', { addon: url, type: c.type, id: c.id, extra: `search=${encodeURIComponent(q)}` }).then((r) => ({ type: c.type, name: c.name, metas: r.metas || [] }), () => null));
-      }
-    }
-    return (await Promise.all(jobs)).filter(Boolean);
-  });
-  ipcMain.handle('media:meta', (e, { type, id }) => svc.call('meta', { addons: addons(), type, id }));
-  ipcMain.handle('media:streams', (e, { type, id }) => svc.call('streams', { addons: addons(), type, id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } }));
-  ipcMain.handle('media:progress', () => progress());
 
   // ---- bringing history in, and what friends have seen
-  ipcMain.handle('media:stremio-import', async (e, { email, password }) => {
-    const r = await imp.stremioImport(email, password); // the login itself isn't kept anywhere
-    const list = addons(); for (const u of r.addons) if (!list.includes(u)) list.push(u);
-    pset('addons', list);
-    const lib = pget('mediaLibrary') || {}, p = progress();
-    for (const x of r.library) {
-      lib[x.id] = { id: x.id, type: x.type, name: x.name, poster: x.poster, watched: x.watched, at: x.at };
-      if (x.t > 30 && x.d && x.t < x.d * 0.95) p[x.video || x.id] = { t: x.t, d: x.d, at: x.at, meta: { name: x.name, poster: x.poster, type: x.type, metaId: x.id } };
-    }
-    pset('mediaLibrary', lib); pset('mediaProgress', p);
-    return { addons: r.addons.length, library: r.library.length };
-  });
   ipcMain.handle('media:letterboxd-import', async () => {
     const pick = await dialog.showOpenDialog(getWin(), { properties: ['openFile'], filters: [{ name: 'Letterboxd export', extensions: ['zip'] }] });
     if (pick.canceled || !pick.filePaths[0]) return null;
@@ -222,15 +168,6 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     return { films: Object.keys(lb).length };
   });
   ipcMain.handle('media:friends-on', (e, m) => friendsOn(m));
-  ipcMain.handle('media:profiles', () => ({ current: profile(), list: ['default', ...(store.get('mediaProfiles') || [])] }));
-  ipcMain.handle('media:profile-set', (e, name) => {
-    name = String(name || '').trim().slice(0, 24);
-    if (!name) return profile();
-    const list = store.get('mediaProfiles') || [];
-    if (name !== 'default' && !list.includes(name)) store.set('mediaProfiles', [...list, name]);
-    store.set('mediaProfile', name);
-    return name;
-  });
 
   // tonight's vote: through the host when we are one, else through the guest link
   const inRoom = () => (getHost()?.guests?.size ? 'host' : getGuest()?.link ? 'guest' : null);
@@ -307,27 +244,26 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
     if (!now || now.type !== 'series' || now.nexting) return null;
     now.nexting = true;
     try {
+      const hub = getMediaHub();
+      if (!hub) return null;
       const metaId = now.card?.metaId || String(now.key).split(':')[0];
-      const { meta } = await svc.call('meta', { addons: addons(), type: 'series', id: metaId });
+      const meta = (await hub.client.all(hub.addons(), { resource: 'meta', type: 'series', id: metaId })).find((x) => x.result?.meta)?.result.meta;
+      if (!meta) return null;
       const eps = (meta.videos || []).filter((v) => v.season > 0).sort((a, b) => a.season - b.season || (a.episode ?? a.number) - (b.episode ?? b.number));
       const i = eps.findIndex((v) => v.id === now.key);
       const nx = i >= 0 ? eps[i + 1] : null;
       if (!nx) return null;
       // stremio-core's rule: the next video from the same addon, same bingeGroup (same release:
       // same subtitle timing, same quality); else the best ranked copy from all addons
-      const hub = getMediaHub(), bg = now.stream?.behaviorHints?.bingeGroup;
+      const bg = now.stream?.behaviorHints?.bingeGroup;
       let pick = null, addon = now.addon;
-      if (hub && addon && bg) {
+      if (addon && bg) {
         const r = await hub.client.request(addon, { resource: 'stream', type: 'series', id: nx.id }).catch(() => null);
         pick = r?.streams.find((s) => s.behaviorHints?.bingeGroup === bg) || null;
       }
-      if (!pick && hub) {
+      if (!pick) {
         const best = (await hub.streams({ type: 'series', id: nx.id, bingeGroup: bg })).streams.find((x) => x.tier > 0);
         pick = best?.stream || null; addon = best?.addon.url || null;
-      }
-      if (!pick && !hub) {
-        const { streams } = await svc.call('streams', { addons: addons(), type: 'series', id: nx.id, prefs: { max_height: store.get('mediaMaxHeight') || 1080, debrid_only: !!store.get('debridOnly'), down_mbps: store.get('downMbps') || 0 } });
-        pick = streams.find((s) => (s.majlis?.score ?? 0) > 0) || null;
       }
       if (!pick) return null;
       const card = { ...now.card, name: `${meta.name} · S${nx.season}E${nx.episode ?? nx.number}` };
@@ -338,15 +274,22 @@ function setup({ getWin, store, emit, preload, rendererDir, helper, getHost, get
   }
   ipcMain.handle('player:next', () => nextEpisode());
 
+  let seekWant = null, seekTimer = null;
   ipcMain.handle('player:cmd', async (e, c) => {
     if (!mpv) return null;
     // in a party, playback is the group's: ask whoever holds the clock instead of acting alone
     if (party && ['toggle', 'pause', 'seek', 'speed'].includes(c.cmd)) {
       if (c.cmd === 'speed') return null;
       const cur = Math.round((mpv.props['time-pos'] || 0) * 1000);
-      const r = c.cmd === 'seek' ? { action: 'seek', pos: c.abs ? Math.round(c.to * 1000) : Math.max(0, cur + Math.round(c.to * 1000)) }
-        : { action: (c.cmd === 'toggle' ? !party.viewer.state?.playing : !c.on) ? 'play' : 'pause' };
-      if (party.role === 'host') getHost()?.syncRequest(r); else getGuest()?.syncRequest(r);
+      const ask = (r) => (party.role === 'host' ? getHost()?.syncRequest(r) : getGuest()?.syncRequest(r));
+      if (c.cmd === 'seek') {
+        const from = seekWant ?? cur;
+        seekWant = c.abs ? Math.round(c.to * 1000) : Math.max(0, from + Math.round(c.to * 1000));
+        clearTimeout(seekTimer);
+        seekTimer = setTimeout(() => { if (party) ask({ action: 'seek', pos: seekWant }); seekWant = null; }, 250);
+        return true;
+      }
+      ask({ action: (c.cmd === 'toggle' ? !party.viewer.state?.playing : !c.on) ? 'play' : 'pause' });
       return true;
     }
     switch (c.cmd) {

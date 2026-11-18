@@ -35,6 +35,8 @@ export const STR = {
     ob_bring: 'جيب اللي عندك', ob_bring_sub: 'مكتبتك وإضافاتك من Stremio، وتقييماتك من Letterboxd.', ob_watch: 'كيف تحب تشاهد', ob_watch_sub: 'الجودة والديبريد والمفاتيح. كله اختياري.',
     ob_skip_all: 'تخطّ', ob_start: 'يلا نبدأ',
     tracker_sub: 'يسجّل اللي تشوفه ويجيب سجلك', enter_code: 'اكتب الرمز {code} في الصفحة', import_history: 'جيب السجل', open_page: 'افتح الصفحة', connect: 'اربط',
+    vote_title: 'تصويت الليلة', vote_count: '{n} صوت', vote_cast: 'صوّت', vote_winner: 'افتح الفائز', vote_clear: 'امسح التصويت', vote_nominate: 'رشّحه للسهرة', vote_nominated: 'انضاف للتصويت.', vote_won: 'الفائز: {n}',
+    friends_saw: 'أخوياك اللي شافوه', friend_watched: 'شافه', friend_progress: 'وصل {p}٪', what_said: 'وش قالوا؟ (ممكن حرق)',
     dl_queued: 'بالانتظار', dl_downloading: 'ينزل', dl_paused: 'موقف', dl_done: 'جاهز', dl_failed: 'فشل', pause: 'وقّف', resume_dl: 'كمّل', delete_file_q: 'تحذف الملف من الجهاز بعد؟',
   },
   en: {
@@ -72,6 +74,8 @@ export const STR = {
     ob_bring: 'Bring what you have', ob_bring_sub: 'Your library and addons from Stremio, your ratings from Letterboxd.', ob_watch: 'How you like to watch', ob_watch_sub: 'Quality, debrid and keys. All optional.',
     ob_skip_all: 'Skip', ob_start: "Let's go",
     tracker_sub: 'Scrobbles what you watch and brings your history', enter_code: 'Enter {code} on the page', import_history: 'Import history', open_page: 'Open page', connect: 'Connect',
+    vote_title: "Tonight's vote", vote_count: '{n} votes', vote_cast: 'Vote', vote_winner: 'Open the winner', vote_clear: 'Clear the vote', vote_nominate: 'Nominate for tonight', vote_nominated: 'Added to the vote.', vote_won: 'Winner: {n}',
+    friends_saw: 'Friends who watched it', friend_watched: 'Watched it', friend_progress: 'At {p}%', what_said: 'What did they say? (may spoil)',
     dl_queued: 'Queued', dl_downloading: 'Downloading', dl_paused: 'Paused', dl_done: 'Ready', dl_failed: 'Failed', pause: 'Pause', resume_dl: 'Resume', delete_file_q: 'Delete the file from this computer too?',
   },
 } as const;
