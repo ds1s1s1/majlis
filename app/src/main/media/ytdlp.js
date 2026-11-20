@@ -28,6 +28,7 @@ function isYouTubeUrl(raw) {
 
 function findYtdlp() {
   for (const p of [
+    process.resourcesPath ? path.join(process.resourcesPath, 'sidecars', 'ytdlp', 'yt-dlp.exe') : null,
     process.resourcesPath ? path.join(process.resourcesPath, 'ytdlp', 'yt-dlp.exe') : null,
     path.join(__dirname, '../../../../engine/vendor/ytdlp/yt-dlp.exe'),
   ]) {

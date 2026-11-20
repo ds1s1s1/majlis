@@ -7,14 +7,26 @@ pub mod crypto;
 pub mod fec;
 pub mod gcc;
 pub mod link;
-pub mod mpv_render;
+pub mod mpv_native;
 pub mod netem;
+pub mod proc_guard;
 pub mod rx;
 pub mod sock;
 pub mod time;
 pub mod tx;
 
-pub use mpv_render::MpvPlayer;
+pub use mpv_native::NativeMpvPlayer;
+
+#[napi]
+pub fn adopt_process(pid: u32) -> bool {
+    proc_guard::adopt_pid(pid)
+}
+
+#[napi]
+pub fn detect_display_hdr(hwnd_str: String) -> bool {
+    let parsed = hwnd_str.trim().parse::<isize>().unwrap_or(0);
+    proc_guard::detect_hdr_for_hwnd(parsed)
+}
 
 use link::{Ev, From, Link, Route};
 use napi::bindgen_prelude::*;

@@ -9,7 +9,7 @@ export interface ComponentItem {
 export const INSTALLER_CONFIG = {
   appNameAr: 'مجلس',
   appNameEn: 'Majlis',
-  version: '0.1.1beta',
+  version: '0.1.2beta',
   links: [
     { key: 'source', url: 'https://github.com/ds1s1s1/majlis' },
     { key: 'bugs', url: 'https://github.com/ds1s1s1/majlis/issues' },
@@ -17,7 +17,7 @@ export const INSTALLER_CONFIG = {
   ] as const,
   changelog: {
     beta: {
-      version: '0.1.1beta',
+      version: '0.1.2beta',
       sections: [
         {
           titleAr: 'طور اللعب — العب',
@@ -35,11 +35,11 @@ export const INSTALLER_CONFIG = {
           titleAr: 'السينما والسهرة',
           titleEn: 'Cinema & Watch Party',
           bulletsAr: [
-            'مشغل libmpv سينمائي مدمج مع توقيت متزامن بين جميع الحاضرين وترجمات عربية تلقائية.',
+            'مشغل libmpv أصلي بعتاد D3D11 مدمج مع خادم stremio-server و FFmpeg و yt-dlp وخطوط عربية مرفقة تلقائياً.',
             'صفحة ملف شخصي كاملة ونظام إعدادات متكامل وتصويت على الأفلام.',
           ],
           bulletsEn: [
-            'Embedded libmpv theater engine with frame-accurate Watch Together sync & Arabic ASS/SRT subs.',
+            'Native D3D11 libmpv theater stage with bundled stremio-server, FFmpeg, yt-dlp & Arabic ASS/SRT fonts.',
             'Complete community profiles, Watch Party voting wheel, and fast addon fan-out.',
           ],
         },
@@ -56,7 +56,7 @@ export const INSTALLER_CONFIG = {
       ],
     },
     stable: {
-      version: '0.1.1-beta',
+      version: '0.1.2-beta',
       sections: [
         {
           titleAr: 'الاستقرار والأداء',

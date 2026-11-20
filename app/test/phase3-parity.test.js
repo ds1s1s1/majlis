@@ -76,11 +76,31 @@ test('phase3: mpv & libmpv options enforce safe custom conf allowlist, hwAccel, 
     toneMapping: 'hable',
     customMpvConf: 'sharpen=0.4\nrun=evil',
   }));
+  assert.equal(emb.vo, 'gpu-next');
+  assert.equal(emb['gpu-api'], 'd3d11');
+  assert.equal(emb['d3d11-flip'], 'yes');
+  assert.equal(emb['video-sync'], 'audio');
+  assert.equal(emb.interpolation, 'no');
+  assert.equal(emb['sub-font'], 'IBM Plex Sans Arabic');
   assert.equal(emb.hwdec, 'no');
   assert.equal(emb['demuxer-max-bytes'], '512MiB');
   assert.equal(emb['tone-mapping'], 'hable');
   assert.equal(emb.sharpen, '0.4');
   assert.equal(emb.run, undefined);
+  assert.ok(!emb['stream-lavf-o'].includes('reconnect_streamed'));
+
+  const smooth = Object.fromEntries(buildLibMpvOptions({
+    fontsDir: null,
+    motionInterpolation: true,
+    renderer: 'gpu',
+    displayHdr: true,
+    hdrMode: 'hdr-embedded',
+  }));
+  assert.equal(smooth.vo, 'gpu');
+  assert.equal(smooth['video-sync'], 'display-resample');
+  assert.equal(smooth.interpolation, 'yes');
+  assert.equal(smooth.tscale, 'oversample');
+  assert.equal(smooth['target-colorspace-hint'], 'yes');
 
   assert.equal(normalizeSubLang2('off'), '');
   assert.equal(normalizeSubLang2('Japanese'), 'jpn');
@@ -186,7 +206,11 @@ test('phase3: KEY_NAMES, i18n parity & hygiene, and preload IPC allowlist hold c
   assert.ok(!/[<>]/.test(arBlock), 'Arabic strings must not contain raw < or > symbols');
 
   const preloadSrc = fs.readFileSync(path.join(__dirname, '../src/preload/preload.js'), 'utf8');
-  for (const ch of ['cin:addon-check-url', 'cin:player-probes', 'cin:p2p-status']) {
+  for (const ch of ['cin:addon-check-url', 'cin:player-probes', 'cin:p2p-status', 'win:start-drag']) {
     assert.ok(preloadSrc.includes(`'${ch}'`), `preload.js missing ${ch}`);
+  }
+  const theaterPreloadSrc = fs.readFileSync(path.join(__dirname, '../src/preload/preload-theater.js'), 'utf8');
+  for (const ch of ['win:start-drag', 'theater:html5-event', 'win:minimize', 'win:close']) {
+    assert.ok(theaterPreloadSrc.includes(`'${ch}'`), `preload-theater.js missing ${ch}`);
   }
 });

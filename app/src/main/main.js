@@ -352,7 +352,6 @@ function setupPort() {
   port = port1;
   port1.on('message', (e) => {
     const m = e.data;
-    if (m?.t === 'thv-ack') { theater?.ackFrame?.(); return; }
     if (m.t === 'hvo') { theater?.onVoice?.(); return host.hostVoice(Buffer.from(m.data)); }
     if (m.t === 'vo') theater?.onVoice?.();
     guest._fromRenderer(m);
@@ -452,6 +451,7 @@ function setMiniMode(want) {
     win.show();
     win.focus();
     win.webContents.focus();
+    if (theaterOpen) theater?.focusOverlay?.();
     pipSettleTimer = setTimeout(() => {
       pipSettleTimer = null;
       if (!win || win.isDestroyed()) return;
@@ -459,6 +459,7 @@ function setMiniMode(want) {
       win.focus();
       win.webContents.focus();
       theater?.setPipMode?.(false);
+      if (theaterOpen) theater?.focusOverlay?.();
     }, 80);
     return false;
   }
@@ -495,7 +496,10 @@ function handlers() {
     const before = store.get('server');
     store.patch(safePatch);
     if (safePatch.theme && win && !win.isDestroyed()) win.setTitleBarOverlay(overlayColors());
-    if ('alwaysOnTop' in safePatch && win && !win.isDestroyed()) win.setAlwaysOnTop(!!safePatch.alwaysOnTop, 'floating');
+    if ('alwaysOnTop' in safePatch && win && !win.isDestroyed()) {
+      win.setAlwaysOnTop(!!safePatch.alwaysOnTop, 'floating');
+      theater?.setPipMode?.(!!normalState);
+    }
     if ('launchOnStartup' in safePatch && app.isPackaged) { try { app.setLoginItemSettings({ openAtLogin: !!safePatch.launchOnStartup }); } catch {} }
     if (('server' in safePatch && safePatch.server !== before) || 'accessKey' in safePatch) { setTimeout(() => { quitting = true; shutdown(); app.relaunch(); app.exit(0); }, 400); }
     if ('panicKey' in safePatch || 'replayKey' in safePatch) registerShortcuts();
@@ -804,6 +808,7 @@ function handlers() {
   });
   ipcMain.handle('win:close', () => { if (win && !win.isDestroyed()) win.close(); return true; });
   ipcMain.handle('win:is-maximized', () => !!(win && !win.isDestroyed() && win.isMaximized()));
+  ipcMain.handle('win:start-drag', () => (win && !win.isDestroyed() ? !!theater?.startDrag?.() : false));
   ipcMain.handle('vigem', () => safeOpenExternal('https://github.com/nefarius/ViGEmBus/releases'));
 }
 
@@ -903,14 +908,6 @@ app.whenReady().then(async () => {
       if (incognitoOn || store.get('deleteCacheAfterWatch')) cacheMgr?.enforce({ aggressive: true }).catch(() => {});
       syncThumbar();
       pushDiscord(true);
-    },
-    onFrame: (f) => {
-      if (port && win && !win.isDestroyed()) {
-        port.postMessage({ t: 'thv', w: f.w, h: f.h, fmt: f.fmt, data: f.buf });
-      }
-    },
-    onFrameClear: () => {
-      if (port && win && !win.isDestroyed()) port.postMessage({ t: 'thv-clear' });
     },
   });
   syncThumbar = () => updateThumbar(win, {

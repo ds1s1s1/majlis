@@ -359,13 +359,13 @@ export function SourcesLibraryPage({ pageId }: { pageId: SettingsPageId }) {
     const p2p = p2pQ.data;
     return (
       <>
-        <SettingSection title={ar ? 'حالة محرك P2P وطوبولوجيا الشبكة' : 'P2P Engine Telemetry & Network Topology'}>
+        <SettingSection title={ar ? 'حالة محرك P2P وخادم البث المدمج' : 'P2P Engine & Bundled Streaming Server'}>
           <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
             {[
-              { lbl: 'Engine Status', val: src.p2p.disableEntirely ? 'Disabled' : p2p?.running ? 'Running' : 'Standby' },
-              { lbl: 'Port', val: p2p?.port ? String(p2p.port) : '—' },
-              { lbl: 'Active Transfers', val: String(p2p?.activeFiles ?? 0) },
-              { lbl: 'NAT / Relay', val: 'TURN Ready' },
+              { lbl: ar ? 'حالة المحرك' : 'Engine Status', val: src.p2p.disableEntirely ? (ar ? 'معطّل' : 'Disabled') : p2p?.running ? (ar ? 'يعمل' : 'Running') : (ar ? 'جاهز بالانتظار' : 'Standby') },
+              { lbl: ar ? 'المنفذ المحلي' : 'Loopback Port', val: p2p?.port ? String(p2p.port) : '11475+' },
+              { lbl: ar ? 'التحويلات النشطة' : 'Active Transfers', val: String(p2p?.activeFiles ?? 0) },
+              { lbl: ar ? 'محرك البث' : 'Backend Stack', val: 'Stremio Server' },
             ].map((c) => (
               <div key={c.lbl} className="rounded-xl bg-black/35 p-3">
                 <div className="text-[10px] uppercase text-[var(--text-muted)]">{c.lbl}</div>

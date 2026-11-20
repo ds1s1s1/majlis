@@ -15,7 +15,13 @@ const path = require('path');
 const hr = () => Number(process.hrtime.bigint() / 1000n) / 1000;
 
 function findFfmpeg(custom) {
-  const cands = [custom, path.join(process.resourcesPath || '', 'ffmpeg', 'ffmpeg.exe'), 'ffmpeg'];
+  const cands = [
+    custom,
+    process.resourcesPath ? path.join(process.resourcesPath, 'sidecars', 'ffmpeg', 'ffmpeg.exe') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe') : null,
+    path.join(__dirname, '../../../engine/vendor/ffmpeg/ffmpeg.exe'),
+    'ffmpeg',
+  ];
   for (const c of cands) if (c && (c === 'ffmpeg' || fs.existsSync(c))) return c;
   return 'ffmpeg';
 }

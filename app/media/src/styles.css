@@ -41,7 +41,7 @@
   .cin[data-theme="forest"], .th-shell[data-theme="forest"] { --c-bg: #0c1410; --c-bg1: #132019; --c-bg2: #192b22; --c-bg3: #22382d; --c-line: rgba(209, 250, 229, .09); --c-fg: #ecfdf5; --c-fg2: #a7c9b8; --c-fg3: #6e9482; }
 
   .cin { position: relative; flex: 1; min-width: 0; height: 100%; overflow: hidden; background: var(--c-bg); color: var(--c-fg); font-family: var(--font-sans); }
-  .th-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: #000; color: var(--c-fg); font-family: var(--font-sans); }
+  .th-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: transparent; color: var(--c-fg); font-family: var(--font-sans); }
   .app-drag { -webkit-app-region: drag; app-region: drag; }
   .app-no-drag, .app-drag button, .app-drag a, .app-drag input, .app-drag select, .app-drag textarea { -webkit-app-region: no-drag; app-region: no-drag; }
   .cin *, .cin ::before, .cin ::after, .th-shell *, .th-shell ::before, .th-shell ::after { box-sizing: border-box; border: 0 solid; margin: 0; padding: 0; }

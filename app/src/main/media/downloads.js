@@ -1,13 +1,14 @@
 'use strict';
 // Downloads: whole files into a folder the viewer keeps (Videos\Majlis unless changed).
-//  - a direct link, or a torrent a debrid service turns into one: fetched here, resumable (Range)
-//  - any other torrent: the torrent engine (majlis-media) in download mode
+//  - a direct link, YouTube URL (resolved via yt-dlp), or Debrid link: fetched resumable (Range)
+//  - any BitTorrent magnet/infoHash: routed through stremio-server localhost stream into resumable file output
 // The list survives restarts; anything that was downloading comes back paused.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { once } = require('events');
 const { isPrivateHost } = require('./http');
+const { isYouTubeUrl, resolveVideoStream } = require('./ytdlp');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clean = (s) => String(s || '').replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'video';
@@ -51,13 +52,7 @@ class Downloads {
   }
 
   _ensureTorrentPoll() {
-    const hasTor = this.items.some((d) => d.kind === 'torrent' && d.state === 'downloading');
-    if (hasTor && !this._torrentPoll) {
-      this._torrentPoll = setInterval(() => {
-        this.list().catch(() => {});
-      }, 3000);
-      this._torrentPoll.unref?.();
-    } else if (!hasTor && this._torrentPoll) {
+    if (this._torrentPoll) {
       clearInterval(this._torrentPoll);
       this._torrentPoll = null;
     }
@@ -70,7 +65,6 @@ class Downloads {
       if (!next) break;
       void this.start(next.id);
     }
-    this._ensureTorrentPoll();
   }
 
   save(force) {
@@ -81,25 +75,13 @@ class Downloads {
     fs.renameSync(`${this.file}.tmp`, this.file);
   }
 
-  // torrents' progress comes from the engine; http ones are counted as they arrive
   async list() {
-    if (this.items.some((d) => d.kind === 'torrent' && d.state === 'downloading')) {
-      const st = await this.svc.call('downloads').catch(() => ({}));
+    if (this.svc?.stats && this.items.some((d) => d.kind === 'torrent' && d.state === 'downloading')) {
       for (const d of this.items.filter((x) => x.kind === 'torrent' && x.state === 'downloading')) {
-        const s = st[`${d.stream.infoHash.toLowerCase()}:${d.stream.fileIdx ?? 0}`];
-        if (!s) continue;
-        d.got = s.progress_bytes || 0; d.total = s.total_bytes || d.total; d.speed = s.live?.download_speed?.mbps ? s.live.download_speed.mbps * 125000 : 0;
-        if (s.file) d.file = s.file;
-        if (s.finished) {
-          d.state = 'done'; d.speed = 0;
-          this._bundleSidecarSubs(d).catch(() => {});
-          this.save(true);
-          this.changed();
-          this._pump();
-        }
+        const s = await this.svc.stats(d.stream.infoHash, d.stream.fileIdx ?? null).catch(() => null);
+        if (s && typeof s.peers === 'number') d.peers = s.peers;
       }
     }
-    this._ensureTorrentPoll();
     return this.items;
   }
 
@@ -122,9 +104,17 @@ class Downloads {
     const ac = new AbortController();
     this.active.set(id, ac);
     d.state = 'downloading'; d.error = null; this.changed();
+    let localStreamHash = null;
     try {
       let url = typeof d.stream.url === 'string' && /^https?:/.test(d.stream.url) ? d.stream.url : null;
       let name = d.stream.behaviorHints?.filename || null;
+      let allowLocalhost = false;
+
+      if (d.stream.ytUrl || (url && isYouTubeUrl(url))) {
+        const yt = await resolveVideoStream(d.stream.ytUrl || url);
+        url = yt.url;
+        name = name || (yt.title ? `${yt.title}.mp4` : null);
+      }
       if (!url && d.stream.infoHash) {
         const deb = this.debrid();
         if (deb) { try { const r = await deb.resolve(d.stream); url = r.url; name = name || r.name.split('/').pop(); } catch {} }
@@ -134,13 +124,29 @@ class Downloads {
         abortErr.name = 'AbortError';
         throw abortErr;
       }
-      if (url) { d.kind = 'http'; await this.http(d, url, name, ac); }
-      else if (d.stream.infoHash) {
+      if (url) {
+        d.kind = 'http';
+        await this.http(d, url, name, ac, { allowLocalhost });
+      } else if (d.stream.infoHash && this.svc?.play) {
         d.kind = 'torrent';
-        await this.svc.call('download', { infoHash: d.stream.infoHash, fileIdx: d.stream.fileIdx ?? 0, sources: d.stream.sources || [], folder: this.folder() });
-        this._ensureTorrentPoll();
-      } else throw new Error('this copy cannot be downloaded');
+        const played = await this.svc.play({
+          infoHash: d.stream.infoHash,
+          fileIdx: d.stream.fileIdx ?? null,
+          sources: d.stream.sources || [],
+          filename: name,
+        });
+        localStreamHash = played.infoHash || d.stream.infoHash;
+        d.stream = { ...d.stream, fileIdx: played.fileIdx };
+        allowLocalhost = true;
+        await this.http(d, played.url, played.filename || name, ac, { allowLocalhost });
+        await this.svc.stopTorrent?.(localStreamHash, { remove: true }).catch(() => {});
+      } else {
+        throw new Error('this copy cannot be downloaded');
+      }
     } catch (e) {
+      if (localStreamHash && this.svc?.stopTorrent) {
+        await this.svc.stopTorrent(localStreamHash, { remove: false }).catch(() => {});
+      }
       if (this.active.get(id) === ac && d.state === 'downloading') {
         d.state = e.name === 'AbortError' ? 'paused' : 'failed';
         d.error = e.name === 'AbortError' ? null : e.message;
@@ -188,10 +194,11 @@ class Downloads {
     }) || null;
   }
 
-  async http(d, url, name, ac = new AbortController()) {
+  async http(d, url, name, ac = new AbortController(), { allowLocalhost = false } = {}) {
     const parsed = new URL(url);
     if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported download URL scheme');
-    if (!this.allowPrivateHosts && isPrivateHost(parsed.hostname)) throw new Error('private_host_blocked');
+    const permitPrivate = this.allowPrivateHosts || allowLocalhost;
+    if (!permitPrivate && isPrivateHost(parsed.hostname)) throw new Error('private_host_blocked');
     this.active.set(d.id, ac);
     const dir = this.folder();
     const baseDir = path.resolve(dir);
@@ -219,7 +226,7 @@ class Downloads {
       if (ac.signal.aborted) break;
       try {
         let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
-        const r = await safeFetch(parsed.toString(), { headers: { ...proxy, 'user-agent': 'Majlis', ...(have ? { range: `bytes=${have}-` } : {}) }, signal: ac.signal }, 0, this.allowPrivateHosts);
+        const r = await safeFetch(parsed.toString(), { headers: { ...proxy, 'user-agent': 'Majlis', ...(have ? { range: `bytes=${have}-` } : {}) }, signal: ac.signal }, 0, permitPrivate);
         if (!r.ok) {
           const err = new Error(`the server answered ${r.status}`);
           if (r.status === 408 || r.status === 429 || r.status >= 500) {
@@ -265,8 +272,9 @@ class Downloads {
     const ac = this.active.get(id);
     if (ac) { this.active.delete(id); ac.abort(); }
     d.state = 'paused'; d.speed = 0;
-    // the engine has no pause: let go of the torrent and keep its pieces; resuming checks them and goes on
-    if (d.kind === 'torrent') await this.svc.call('download-cancel', { infoHash: d.stream.infoHash, fileIdx: d.stream.fileIdx ?? 0, delete: false }).catch(() => {});
+    if (d.kind === 'torrent' && d.stream?.infoHash) {
+      await this.svc?.stopTorrent?.(d.stream.infoHash, { remove: false }).catch(() => {});
+    }
     this.save(true); this.changed();
     this._pump();
   }
@@ -288,10 +296,11 @@ class Downloads {
         const ac = this.active.get(d.id);
         if (ac) { this.active.delete(d.id); ac.abort(); }
         d.state = 'paused'; d.speed = 0;
-        if (d.kind === 'torrent') await this.svc.call('download-cancel', { infoHash: d.stream.infoHash, fileIdx: d.stream.fileIdx ?? 0, delete: false }).catch(() => {});
+        if (d.kind === 'torrent' && d.stream?.infoHash) {
+          await this.svc?.stopTorrent?.(d.stream.infoHash, { remove: false }).catch(() => {});
+        }
       }
     }
-    this._ensureTorrentPoll();
     this.save(true); this.changed();
     return this.items;
   }
@@ -316,7 +325,9 @@ class Downloads {
     if (!d) return;
     d.state = 'removed';
     this.active.get(id)?.abort();
-    if (d.kind === 'torrent') await this.svc.call('download-cancel', { infoHash: d.stream.infoHash, fileIdx: d.stream.fileIdx ?? 0, delete: !!deleteFile }).catch(() => {});
+    if (d.kind === 'torrent' && d.stream?.infoHash) {
+      await this.svc?.stopTorrent?.(d.stream.infoHash, { remove: !!deleteFile }).catch(() => {});
+    }
     if (deleteFile && d.file) for (const f of [d.file, `${d.file}.part`, ...(d.subFiles || [])]) { try { fs.unlinkSync(f); } catch {} }
     this.items = this.items.filter((x) => x.id !== id);
     this.save(true); this.changed();

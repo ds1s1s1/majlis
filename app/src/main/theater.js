@@ -10,14 +10,14 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Mpv, SPDIF_CODECS, rtxFilterFor, subStyleToMpvOpts, normalizeSubLang2, launchExternalPlayer, SAFE_TONE_MAPS } = require('./mpv');
+const { Mpv, SPDIF_CODECS, rtxFilterFor, subStyleToMpvOpts, normalizeSubLang2, launchExternalPlayer, SAFE_TONE_MAPS, subFontsDir } = require('./mpv');
 const { LibMpv, libmpvPath } = require('./libmpv');
 const { core } = require('./net');
 const { validatePlayUrl } = require('./media/http');
 const { resolveVideoStream, isYouTubeUrl } = require('./media/ytdlp');
 const { parseTorrentBuffer } = require('./media/torrent-parse');
 const { prepareSubtitleFile, formatAddonSubTitle, langDisplay, parseSrtCueStarts } = require('./media/sub-rtl');
-const { MediaService } = require('./mediasvc');
+const { StremioServerService } = require('./stremio-server');
 const { SyncViewer, expected } = require('./sync');
 const { findFfmpeg } = require('./encoder');
 const { CinemaDimmer } = require('./dimmer');
@@ -91,13 +91,20 @@ function detectSourceMismatch({ hostDur = 0, localDur = 0, hostFilename = '', lo
   return null;
 }
 
-function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, helper, getHost, getGuest, getMediaHub = () => null, getSocial = () => null, getFfmpeg, getCacheManager = () => null, openExternal = () => {}, onFrame, onFrameClear, onTheaterState, onTheaterClose = () => {}, onPresenceChange = () => {}, isIncognito = () => false, onPlaybackStateChange = () => {} }) {
-  const svc = new MediaService({ getCacheDir: () => getCacheManager?.()?.streamCacheDir?.() || store.get('cachePath') || '' });
+function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, helper, getHost, getGuest, getMediaHub = () => null, getSocial = () => null, getFfmpeg, getCacheManager = () => null, openExternal = () => {}, onTheaterState, onTheaterClose = () => {}, onPresenceChange = () => {}, isIncognito = () => false, onPlaybackStateChange = () => {} }) {
+  const svc = new StremioServerService({
+    getCacheDir: () => getCacheManager?.()?.streamCacheDir?.() || store.get('cachePath') || '',
+    getSettings: () => store?.d,
+    getFfmpeg,
+    adoptProcess: (pid) => { try { core?.adoptProcess?.(pid); } catch {} },
+  });
   const dimmer = new CinemaDimmer();
   let overlay = null, overlayReady = false, mpv = null, now = null, film = 0, shown = false, lastFit = '';
-  let playGen = 0, wakeLockId = null, hudVisible = false, userSubPos = 94, ackSafetyTimer = null;
+  let playGen = 0, wakeLockId = null, hudVisible = false, userSubPos = 94;
   let sleepEof = false, suppressAutoNext = false, partySession = null, pipActive = false;
-  let useEmbedded = false, curPhase = '', curStatusMsg = '', tempSubFiles = [], resizeTimer = null;
+  let curPhase = '', curStatusMsg = '', tempSubFiles = [], resizeTimer = null;
+  let html5Active = false, html5TranscodeId = null, blackScreenTimer = null, html5FallbackTried = false;
+  let virtualProps = {};
   const initTone = store.get('playerToneMapping');
   let curAspect = store.get('playerAspect') || 'fit', curTone = SAFE_TONE_MAPS.has(initTone) ? initTone : 'bt.2446a';
   let curHwAccel = store.get('playerHwAccel') !== false, curSdh = !!store.get('subFilterSdh'), curSubFpsMode = 'reset';
@@ -140,17 +147,27 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     return { mode: curDisplayProfile, effective: eff, detected: detectedDisplayProfile, toneMapping: curTone };
   };
   const hwnd = (bw) => Number(bw.getNativeWindowHandle().readBigUInt64LE(0));
-  const canEmbed = () => !!(core?.MpvPlayer && libmpvPath());
+  const canNativeLibMpv = () => !!(core?.NativeMpvPlayer && libmpvPath());
+  const getProps = () => (html5Active ? virtualProps : (mpv?.props || virtualProps));
+  const clearBlackScreenWatch = () => {
+    if (blackScreenTimer) { clearTimeout(blackScreenTimer); blackScreenTimer = null; }
+  };
+  const isHttpFallbackCandidate = (u) => !!u && /^https?:\/\//i.test(u) && !/^av:/i.test(u);
+  const stopHtml5Fallback = () => {
+    clearBlackScreenWatch();
+    if (html5TranscodeId) { svc.destroyHls(html5TranscodeId).catch(() => {}); html5TranscodeId = null; }
+    if (html5Active) {
+      html5Active = false;
+      toOverlay({ type: 'html5-fallback', active: false });
+    }
+  };
   const subTempDir = () => { try { return path.join(app.getPath('temp'), 'majlis-subs'); } catch { return path.join(os.tmpdir(), 'majlis-subs'); } };
   const cleanupTempSubs = () => { for (const f of tempSubFiles.splice(0)) { try { fs.unlinkSync(f); } catch {} } };
   const trackTempSub = (orig, prepared) => { if (prepared && prepared !== orig && !/^https?:\/\//i.test(prepared) && !tempSubFiles.includes(prepared)) tempSubFiles.push(prepared); return prepared || orig; };
   const pad2 = (n) => String(Math.max(0, Number(n) || 0)).padStart(2, '0');
   const formatEpCode = (s, e) => (s != null && e != null ? `S${pad2(s)}E${pad2(e)}` : '');
   const looksRawId = (v) => /^(tt\d+|(kitsu|anilist|mal):)/i.test(String(v || '').trim());
-  const ackFrame = () => {
-    if (ackSafetyTimer) { clearTimeout(ackSafetyTimer); ackSafetyTimer = null; }
-    try { mpv?.ackFrame?.(); } catch {}
-  };
+  const ackFrame = () => {};
   let party = null;
   let userVol = Math.max(0, Math.min(200, Number(store.get('playerVolume')) || 100)), duckGain = 1, lastVoiceAt = 0;
   const thumbCache = new Map();
@@ -190,10 +207,6 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       curPhase = m.state === 'trying-source' ? 'trying-source' : 'opening';
       curStatusMsg = m.detail || '';
     }
-    if (useEmbedded) {
-      if (m && m.type) emit(m.type, m.type === 'theater' ? { open: shown, ...m } : m);
-      return;
-    }
     if (overlay && !overlay.isDestroyed()) overlay.webContents.send('ev', m);
   };
   const onVoice = () => { lastVoiceAt = Date.now(); };
@@ -230,41 +243,23 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     } catch { return 60; }
   }
 
-  // Keep embedded libmpv FBO sized to the actual physical window viewport so libmpv
-  // upscalers (spline36 / ewa_lanczossharp) and libass vector subtitles render at crisp native DPI.
-  function getRenderSize() {
-    try {
-      const maxW = pipActive ? 960 : 3840;
-      const maxH = pipActive ? 540 : 2160;
-      const w = getWin();
-      if (!w || w.isDestroyed()) return { rw: 1280, rh: 720 };
-      const b = w.getContentBounds();
-      const sf = screen.getDisplayMatching(b)?.scaleFactor || 1;
-      let rw = Math.round((b.width || 1280) * sf);
-      let rh = Math.round((b.height || 720) * sf);
-      if (rw > maxW || rh > maxH) {
-        const s = Math.min(maxW / rw, maxH / rh);
-        rw = Math.round(rw * s);
-        rh = Math.round(rh * s);
-      }
-      return { rw: Math.max(64, rw & ~1), rh: Math.max(64, rh & ~1) };
-    } catch { return { rw: 1280, rh: 720 }; }
-  }
-
   function fit(force = false) {
-    if (useEmbedded) {
-      if (shown && mpv?.isEmbedded && mpv.resize) {
-        const { rw, rh } = getRenderSize();
-        const key = `${rw}x${rh}`;
-        if (force || key !== lastFit) { lastFit = key; mpv.resize(rw, rh); }
-      }
-      return;
-    }
     const w = getWin();
     if (!w || w.isDestroyed() || !overlay || overlay.isDestroyed()) return;
     const min = w.isMinimized();
     const b = w.getContentBounds();
     if (!min && (b.width < 64 || b.height < 64)) return;
+    const vis = shown && !min;
+    if (mpv?.isNative) {
+      mpv.setVideoVisible(!html5Active);
+      mpv.setVisible(vis);
+      if (vis) mpv.syncBounds();
+      return;
+    }
+    if (!min && vis) {
+      try { overlay.setBounds(b); } catch {}
+    }
+    if (!film) return;
     let rx, ry, rw, rh;
     try {
       const pr = screen.dipToScreenRect ? screen.dipToScreenRect(w, b) : null;
@@ -274,16 +269,14 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       const f = screen.getDisplayMatching(b).scaleFactor;
       rx = Math.round(b.x * f); ry = Math.round(b.y * f); rw = Math.round(b.width * f); rh = Math.round(b.height * f);
     }
-    const vis = shown && !min;
-    const key = `${rx},${ry},${rw},${rh},${vis},${film}`;
+    const key = `${rx},${ry},${rw},${rh},${vis},${film},${html5Active}`;
     if (!force && key === lastFit) return;
     lastFit = key;
     if (vis && !helper.p) helper.start();
     const wh = hwnd(w);
-    // the engine works in physical pixels: keep mpv owned by main window, and overlay owned by mpv (or main window while loading)
-    if (film) helper.cmd({ cmd: 'place', hwnd: film, owner: wh, x: rx, y: ry, w: rw, h: rh, show: vis, top: vis });
-    if (!min) overlay.setBounds(b);
-    if (overlayReady) helper.cmd({ cmd: 'place', hwnd: hwnd(overlay), owner: film || wh, x: rx, y: ry, w: rw, h: rh, show: vis, top: vis });
+    // CLI mpv.exe fallback: keep mpv owned by main window, and overlay owned by mpv (or main window while loading)
+    if (film && !html5Active) helper.cmd({ cmd: 'place', hwnd: film, owner: wh, x: rx, y: ry, w: rw, h: rh, show: vis, top: vis });
+    if (overlayReady) helper.cmd({ cmd: 'place', hwnd: hwnd(overlay), owner: (!html5Active && film) || wh, x: rx, y: ry, w: rw, h: rh, show: vis, top: vis });
   }
 
   let winHooksAttached = false;
@@ -292,46 +285,13 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   const resolvedPreload = theaterPreload || path.join(__dirname, '../preload/preload-theater.js');
   async function ensureOverlay() {
     const w = getWin();
-    if (canEmbed()) {
-      useEmbedded = true;
-      if (w && !w.isDestroyed() && !winHooksAttached) {
-        winHooksAttached = true;
-        const onDisplayOrState = () => {
-          if (!shown || !mpv?.isEmbedded) return;
-          try {
-            const d = screen.getDisplayMatching(w.getBounds());
-            if (d && d.id !== lastDisplayId) {
-              lastDisplayId = d.id;
-              if (curDisplayProfile === 'auto') applyDisplayProfile('auto', false);
-              if (curDimmerPct > 0) dimmer.apply({ activeWin: w, opacity: curDimmerPct });
-              fit(true);
-            }
-          } catch {}
-        };
-        for (const ev of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'restore']) {
-          w.on(ev, () => fit(false));
-        }
-        w.on('resize', () => {
-          clearTimeout(resizeTimer);
-          resizeTimer = setTimeout(() => fit(false), 120);
-        });
-        w.on('moved', onDisplayOrState);
-        screen.on('display-metrics-changed', onDisplayOrState);
-        w.once('closed', () => {
-          winHooksAttached = false;
-          clearTimeout(resizeTimer);
-          screen.off('display-metrics-changed', onDisplayOrState);
-        });
-      }
-      return;
-    }
-    useEmbedded = false;
     if (!overlay || overlay.isDestroyed()) {
       overlayReady = false;
       const b = w && !w.isDestroyed() ? w.getContentBounds() : { x: 100, y: 100, width: 1240, height: 800 };
       overlay = new BrowserWindow({
+        parent: w && !w.isDestroyed() ? w : undefined,
         x: b.x, y: b.y, width: Math.max(320, b.width), height: Math.max(200, b.height),
-        frame: false, show: false, skipTaskbar: true, resizable: true, movable: false,
+        frame: false, show: false, skipTaskbar: true, resizable: false, movable: false,
         minimizable: false, maximizable: false, fullscreenable: false,
         hasShadow: false, transparent: true, backgroundColor: '#00000000',
         webPreferences: {
@@ -353,19 +313,291 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     }
     if (w && !w.isDestroyed() && !winHooksAttached) {
       winHooksAttached = true;
+      const onDisplayOrState = () => {
+        if (!shown) return;
+        try {
+          const d = screen.getDisplayMatching(w.getBounds());
+          if (d && d.id !== lastDisplayId) {
+            lastDisplayId = d.id;
+            if (curDisplayProfile === 'auto') applyDisplayProfile('auto', false);
+            if (curDimmerPct > 0) dimmer.apply({ activeWin: w, opacity: curDimmerPct });
+            fit(true);
+          }
+        } catch {}
+      };
       for (const ev of ['move', 'resize', 'enter-full-screen', 'leave-full-screen', 'maximize', 'unmaximize', 'restore', 'minimize']) {
         w.on(ev, () => fit(ev !== 'move' && ev !== 'resize'));
       }
-      w.once('closed', () => { winHooksAttached = false; });
+      w.on('moved', onDisplayOrState);
+      screen.on('display-metrics-changed', onDisplayOrState);
+      w.once('closed', () => {
+        winHooksAttached = false;
+        clearTimeout(resizeTimer);
+        screen.off('display-metrics-changed', onDisplayOrState);
+      });
+    }
+  }
+
+  async function activateHtml5Fallback(reason = 'codec') {
+    if (html5Active || !now?.url || !shown) return false;
+    if (store.get('playerHlsFallback') === false && reason !== 'manual') return false;
+    if (!isHttpFallbackCandidate(now.url)) return false;
+    html5FallbackTried = true;
+    html5Active = true;
+    clearBlackScreenWatch();
+    const resumeSec = Math.max(0, Number(getProps()['time-pos'] || 0) || 0);
+    if (mpv) {
+      if (mpv.isNative) mpv.releaseMedia();
+      else {
+        mpv.clearPlayback();
+        try { mpv.set('pause', true).catch(() => {}); mpv.command('stop').catch(() => {}); } catch {}
+      }
+    }
+    fit(true);
+    const rawUrl = now.url;
+    let playUrl = rawUrl;
+    let hlsId = null;
+    if (!/\.(m3u8|mp4|webm|m4v)(\?|$)/i.test(rawUrl)) {
+      try {
+        const tr = await svc.hlsTranscodeUrl(rawUrl);
+        playUrl = tr.url;
+        hlsId = tr.id;
+      } catch {
+        playUrl = rawUrl;
+      }
+    }
+    if (!shown || !html5Active) {
+      if (hlsId) svc.destroyHls(hlsId).catch(() => {});
+      return false;
+    }
+    html5TranscodeId = hlsId;
+    virtualProps = { ...(virtualProps || {}), pause: false, 'time-pos': resumeSec };
+    if (mpv?.props) { mpv.props.pause = false; mpv.props['time-pos'] = resumeSec; }
+    toOverlay({ type: 'player-state', state: 'trying-source', detail: 'HLSv2' });
+    toOverlay({
+      type: 'html5-fallback',
+      active: true,
+      url: playUrl,
+      startPos: resumeSec,
+      reason,
+      isHls: !!hlsId || /\.m3u8(\?|$)/i.test(playUrl),
+    });
+    return true;
+  }
+
+  function onPlayerProp(name, value) {
+    if (!shown && name !== 'pause') return;
+    if (name === 'time-pos' && Number(value) > 0 && now) {
+      now.hasFirstFrame = true;
+      if (!getProps()['paused-for-cache']) now.stallSince = 0;
+    }
+    if (!html5Active && !html5FallbackTried && now?.url && isHttpFallbackCandidate(now.url) && store.get('playerHlsFallback') !== false) {
+      if (name === 'video-params' && value?.w > 0) {
+        clearBlackScreenWatch();
+      } else if (name === 'time-pos' && Number(value) > 2.5 && !(getProps()['video-params']?.w) && !blackScreenTimer) {
+        const watchGen = playGen;
+        const watchKey = now.key;
+        blackScreenTimer = setTimeout(() => {
+          blackScreenTimer = null;
+          if (shown && watchGen === playGen && now?.key === watchKey && !html5Active && !(getProps()['video-params']?.w) && Number(getProps()['time-pos'] || 0) > 2.5) {
+            activateHtml5Fallback('black-screen').catch(() => {});
+          }
+        }, 3500);
+      }
+    }
+    if (name === 'paused-for-cache' && now) {
+      if (!value) now.stallSince = 0;
+      else if (!now.stallSince) now.stallSince = Date.now();
+    }
+    if (name === 'duration' && value && shown) { fit(true); if (mpv && !mpv.isNative) setTimeout(() => fit(true), 400); }
+    if (name === 'pause') {
+      setWakeLock(!value && shown);
+      onPresenceChange();
+      onPlaybackStateChange();
+    }
+    if (name === 'video-params' && value && mpv && !html5Active) {
+      if (shown) fit(false);
+      if (mpv.vsr || mpv.rtxHdr) {
+        // VSR upscaling is meant for <= 1080p SDR; keep True HDR if only HDR enabled
+        const bypassVsr = mpv.vsr && ((value.h || 0) >= 1440 || (value['sig-peak'] || 1) > 1.5);
+        const vf = rtxFilterFor(bypassVsr ? false : mpv.vsr, mpv.rtxHdr);
+        mpv.command('vf', 'set', vf).catch(() => {});
+      }
+    }
+    if (name === 'pause' && now?.scrobbled) scrob(value ? 'pause' : 'start');
+    if (name === 'duration' && value && now && !now.skipsAsked && getMediaHub()) {
+      now.skipsAsked = true;
+      now.scrobbled = true; scrob('start');
+      onPresenceChange();
+      if (party?.role === 'guest' && party.viewer?.state?.src) {
+        const src = party.viewer.state.src;
+        const localFn = now.stream?.behaviorHints?.filename || now.stream?.title || '';
+        const mismatch = detectSourceMismatch({ hostDur: src.durationSec || 0, localDur: value, hostFilename: src.filename || '', localFilename: localFn });
+        lastMismatch = mismatch;
+        if (mismatch) {
+          if (lastPartyState) lastPartyState = { ...lastPartyState, mismatch };
+          toOverlay({ type: 'party-mismatch', ...mismatch });
+        }
+      }
+      const key = now.key;
+      const syncMultiEp = () => {
+        const dSec = getProps().duration || 0;
+        if (!now || now.key !== key || !dSec || !now.episodes?.length || now.multiChecked) return;
+        now.multiChecked = true;
+        const rtMin = parseInt(now.meta?.runtime || '45', 10) || 45;
+        const fn = now.stream?.behaviorHints?.filename || now.stream?.title || '';
+        const multi = detectDoubleLength({ durationSec: dSec, expectedRuntimeMin: rtMin, filename: fn, episodes: now.episodes, currentVideoId: now.key });
+        if (multi) {
+          now.multiEp = multi;
+          now.nextVideoId = multi.nextAfterId || now.nextVideoId;
+          toOverlay({ type: 'multi-ep', ...multi });
+        }
+      };
+      now.syncMultiEp = syncMultiEp;
+      syncMultiEp();
+      if (now.card?.postCredits && (now.card.postCredits.after || now.card.postCredits.during)) {
+        now.postCredits = { ...now.card.postCredits, ...(now.postCredits || {}) };
+        toOverlay({ type: 'post-credits', ...now.postCredits });
+      }
+      getMediaHub().skips(key, value, now.meta?.imdb_id || now.card?.imdbId || null).then((list) => {
+        if (now?.key !== key || !shown) return;
+        if (!app.isPackaged && process.env.MAJLIS_TEST_SKIPS && (!Array.isArray(list) || !list.length)) {
+          list = [{ kind: 'op', start: 0, end: 12 }];
+        }
+        now.skips = Array.isArray(list) ? list : [];
+        if (now.skips.length) {
+          toOverlay({ type: 'skips', list: now.skips });
+          const ed = now.skips.find((s) => s.kind === 'ed');
+          if (ed && value > 180 && value - ed.end >= 25) {
+            now.postCredits = { after: true, during: false, ...(now.card?.postCredits || {}), ...(now.postCredits || {}), resumeAt: ed.end };
+            toOverlay({ type: 'post-credits', ...now.postCredits });
+          }
+        }
+      }).catch(() => {});
+    }
+    if (name === 'track-list' && Array.isArray(value) && now && !now.audioRestored && now.itemState?.audioLang && !html5Active && mpv) {
+      now.audioRestored = true;
+      const wantLang = String(now.itemState.audioLang).toLowerCase();
+      const hit = value.find((tr) => tr.type === 'audio' && String(tr.lang || '').toLowerCase() === wantLang);
+      if (hit && !hit.selected) mpv.set('aid', hit.id).catch(() => {});
+    }
+    if (name === 'chapter-list' && Array.isArray(value) && now) {
+      const pc = value.find((ch) => /post.?credit|mid.?credit|stinger|بعد التتر|مشهد إضافي/i.test(String(ch?.title || '')));
+      if (pc && Number.isFinite(pc.time)) {
+        now.postCredits = { after: true, during: false, ...(now.card?.postCredits || {}), ...(now.postCredits || {}), resumeAt: pc.time };
+        toOverlay({ type: 'post-credits', ...now.postCredits });
+      }
+    }
+    let shouldEmitProp = true;
+    if (name === 'time-pos') {
+      const tsNow = Date.now();
+      if (now?.hasFirstFrame && Number(value) >= 0.25 && tsNow - lastPosEmitAt < 200) shouldEmitProp = false;
+      else lastPosEmitAt = tsNow;
+    } else if (THROTTLED_STATS.has(name)) {
+      const tsNow = Date.now();
+      if (tsNow - (lastStatEmitAt.get(name) || 0) < 1000) shouldEmitProp = false;
+      else lastStatEmitAt.set(name, tsNow);
+    }
+    const sentVal = name === 'volume' && duckGain < 0.99 ? userVol : value;
+    if (shouldEmitProp) toOverlay({ type: 'player', name, value: sentVal });
+    const markMultiCovered = () => {
+      if (incog() || !now?.multiEp?.coveredIds?.length || now.multiMarked || !now.card?.metaId) return;
+      const lib = getMediaHub()?.library();
+      if (!lib?.setWatched) return;
+      now.multiMarked = true;
+      const allIds = (now.episodes || []).map((v) => v.id).filter(Boolean);
+      const m = { id: now.card.metaId, type: now.type, name: now.card.seriesName || now.card.name, poster: now.card.poster || null };
+      for (const vid of now.multiEp.coveredIds) lib.setWatched(m, vid, true, allIds);
+    };
+    if (name === 'eof-reached' && value === true) {
+      markMultiCovered();
+      if (!incog() && party && partySession && !partySession.ratingOpened) {
+        partySession.ratingOpened = true;
+        getSocial?.()?.openPartyRating?.({
+          sessionId: partySession.id,
+          id: partySession.titleId,
+          type: partySession.type,
+          title: partySession.title,
+          poster: partySession.poster,
+        });
+      }
+      if (sleepEof) {
+        sleepEof = false;
+        suppressAutoNext = true;
+        if (html5Active) toOverlay({ type: 'html5-cmd', op: 'pause', on: true });
+        else mpv?.set('pause', true).catch(() => {});
+        toOverlay({ type: 'sleep-eof-triggered' });
+      } else {
+        advanceAfterEof().catch(() => {});
+      }
+    }
+    if (name === 'time-pos' && now && getMediaHub() && now.card?.metaId && !incog()) {
+      const step = value - (now.libAt ?? value);
+      if (party && partySession) {
+        if (step > 0 && step < 30) partySession.watchedMs += step * 1000;
+        const tName = now.card?.seriesName || now.card?.name;
+        if (tName && !looksRawId(tName)) partySession.title = tName;
+        if (now.card?.poster && !partySession.poster) partySession.poster = now.card.poster;
+        if (now.meta?.genres?.length && !partySession.genres.length) partySession.genres = normalizeGenres(now.meta.genres);
+        const d = getProps().duration || 0;
+        if (!partySession.ratingOpened && d > 120 && value >= d * 0.92) {
+          partySession.ratingOpened = true;
+          getSocial?.()?.openPartyRating?.({
+            sessionId: partySession.id,
+            id: partySession.titleId,
+            type: partySession.type,
+            title: partySession.title,
+            poster: partySession.poster,
+          });
+        }
+      }
+      if (now.libAt == null || Math.abs(step) >= 5) {
+        const d = getProps().duration || 0;
+        const m = {
+          id: now.card.metaId,
+          type: now.type,
+          name: now.card.seriesName || now.card.name,
+          poster: now.card.poster || null,
+          year: now.meta?.year ?? now.card?.year ?? null,
+          genres: Array.isArray(now.meta?.genres) ? now.meta.genres : (now.card?.genres || []),
+          directors: Array.isArray(now.meta?.directors) ? now.meta.directors : (now.meta?.director || now.card?.directors || []),
+          cast: Array.isArray(now.meta?.cast) ? now.meta.cast : (now.card?.cast || []),
+          runtimeMin: now.meta?.runtimeMin ?? now.meta?.runtime ?? now.card?.runtimeMin ?? null,
+          imdbRating: now.meta?.imdbRating ?? now.card?.imdbRating ?? null,
+          tmdbId: now.meta?.tmdbId ?? now.card?.tmdbId ?? null,
+        };
+        // a jump (seek) isn't time watched
+        getMediaHub().library().progress(m, now.key, value * 1000, d * 1000, step > 0 && step < 30 ? step * 1000 : 0);
+        now.libAt = value;
+      }
+    }
+    if (name === 'time-pos' && now && value > 5) {
+      const p = progress(), d = getProps().duration || 0;
+      if (d > 120 && value >= d * 0.9) markMultiCovered();
+      // remember where we were (every ~5 s of film), forget it once the film's nearly done
+      if (!incog() && (!now.saved || Math.abs(value - now.saved) > 5)) {
+        now.saved = value;
+        if (d && value > d * 0.95) delete p[now.key]; else p[now.key] = { t: value, d, at: Date.now(), meta: now.card };
+        pset('mediaProgress', p);
+      }
+      // Smart Next-Episode Preload inside final 10 minutes
+      if (now.type === 'series' && now.nextVideoId && !now.preloadStarted && d > 300 && d - value <= 600) {
+        now.preloadStarted = true;
+        preloadNextEpisode(now.nextVideoId, playGen).catch(() => {});
+      }
     }
   }
 
   async function ensureMpv() {
     await ensureOverlay();
-    const embed = canEmbed();
-    useEmbedded = embed;
-    if (mpv && !mpv.stopped && (embed ? (mpv.isEmbedded && mpv.ready) : (!mpv.isEmbedded && mpv.sock && mpv.p))) {
-      if (!embed && !film) try { film = Number(await mpv.get('window-id')) || 0; } catch {}
+    const useNative = canNativeLibMpv();
+    if (mpv && !mpv.stopped && (useNative ? (mpv.isNative && mpv.ready) : (!mpv.isNative && mpv.sock && mpv.p))) {
+      if (useNative) {
+        const w = getWin();
+        if (w && !w.isDestroyed() && overlay && !overlay.isDestroyed()) mpv.attachWindows(hwnd(w), hwnd(overlay));
+      } else if (!film) {
+        try { film = Number(await mpv.get('window-id')) || 0; } catch {}
+      }
       return;
     }
     try { mpv?.stop(true); } catch {}
@@ -376,7 +608,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     const decoderMode = Number.isInteger(store.get('decoderMode')) ? store.get('decoderMode') : 1;
     const hwAccel = store.get('playerHwAccel') !== false;
     const hdrMode = store.get('playerHdr') === false ? 'sdr' : 'hdr-embedded';
-    const toneMapping = SAFE_TONE_MAPS.has(store.get('playerToneMapping')) ? store.get('playerToneMapping') : 'bt.2446a';
+    const toneMapping = SAFE_TONE_MAPS.has(store.get('playerToneMapping')) ? store.get('playerToneMapping') : 'spline';
     const bufferSize = store.get('playerBufferSize') || 'auto';
     const anime4k = !!store.get('playerAnime4k');
     const anime4kMode = store.get('playerAnime4kMode') || 'A';
@@ -384,26 +616,32 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     const subStyle = store.get('subStyle') || null;
     const subLang2 = store.get('subLang2') || 'eng';
     const customMpvConf = store.get('playerCustomMpvConf') || '';
+    const motionInterpolation = !!store.get('motionInterpolation');
+    const renderer = store.get('playerRenderer') === 'gpu' ? 'gpu' : 'gpu-next';
     let userDataDir = null;
     let shaderCacheDir = null;
     try { userDataDir = app.getPath('userData'); shaderCacheDir = path.join(userDataDir, 'shader-cache'); } catch {}
     const commonOpts = {
-      vsr, rtxHdr, spdif, decoderMode, shaderCacheDir, subFilterSdh,
+      vsr, rtxHdr, spdif, decoderMode, shaderCacheDir, subFilterSdh, fontsDir: subFontsDir(),
       hwAccel, hdrMode, toneMapping, bufferSize, anime4k, anime4kMode, subStyle, subLang2, customMpvConf, userDataDir,
     };
-    if (embed) {
-      const { rw, rh } = getRenderSize();
+    const w = getWin();
+    const mainH = w && !w.isDestroyed() ? hwnd(w) : 0;
+    const hudH = overlay && !overlay.isDestroyed() ? hwnd(overlay) : 0;
+    if (useNative) {
       const maxH = Number(store.get('mediaMaxHeight')) || 1080;
       const videoQualityPreset = maxH >= 2160 ? 'max' : 'balanced';
-      mpv = new LibMpv({ MpvPlayer: core.MpvPlayer, dll: libmpvPath(), ...commonOpts, width: rw, height: rh, videoQualityPreset });
-      mpv.on('frame', (f) => {
-        if (shown && onFrame) {
-          if (ackSafetyTimer) clearTimeout(ackSafetyTimer);
-          ackSafetyTimer = setTimeout(() => ackFrame(), 120);
-          onFrame(f);
-        } else {
-          ackFrame();
-        }
+      const displayHdr = mainH && core?.detectDisplayHdr ? !!core.detectDisplayHdr(String(mainH)) : false;
+      mpv = new LibMpv({
+        NativeMpvPlayer: core.NativeMpvPlayer,
+        dll: libmpvPath(),
+        mainHwnd: mainH,
+        hudHwnd: hudH,
+        displayHdr,
+        motionInterpolation,
+        renderer,
+        ...commonOpts,
+        videoQualityPreset,
       });
     } else {
       mpv = new Mpv({
@@ -414,217 +652,58 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     mpv.on('vsr-fallback', (msg) => {
       toOverlay({ type: 'player-state', state: 'vsr-fallback', detail: msg });
     });
-    // every (re)start of mpv is a new window: take it over again
-    mpv.on('ready', async () => { if (!embed) try { film = Number(await mpv.get('window-id')) || 0; fit(true); } catch {} });
+    mpv.on('ready', async () => {
+      if (useNative) {
+        const winNow = getWin();
+        if (winNow && !winNow.isDestroyed() && overlay && !overlay.isDestroyed()) mpv.attachWindows(hwnd(winNow), hwnd(overlay));
+      } else {
+        try { if (mpv.p?.pid) core?.adoptProcess?.(mpv.p.pid); } catch {}
+        try { film = Number(await mpv.get('window-id')) || 0; fit(true); } catch {}
+      }
+    });
     mpv.on('prop', (name, value) => {
-      if (!shown && name !== 'pause') return;
-      if (name === 'time-pos' && Number(value) > 0 && now) {
-        now.hasFirstFrame = true;
-        if (!mpv?.props?.['paused-for-cache']) now.stallSince = 0;
+      if (!html5Active) onPlayerProp(name, value);
+    });
+    mpv.on('recovering', (x) => { if (!html5Active) toOverlay({ type: 'player-state', state: 'recovering', detail: x }); });
+    mpv.on('recovered', (x) => { if (!html5Active) toOverlay({ type: 'player-state', state: 'recovered', detail: x }); });
+    mpv.on('failed', (x) => {
+      if (html5Active) return;
+      if (!now?.inQuickplay && !html5FallbackTried && isHttpFallbackCandidate(now?.url) && store.get('playerHlsFallback') !== false) {
+        activateHtml5Fallback('mpv-failed').catch(() => toOverlay({ type: 'player-state', state: 'failed', detail: x }));
+        return;
       }
-      if (name === 'paused-for-cache' && now) {
-        if (!value) now.stallSince = 0;
-        else if (!now.stallSince) now.stallSince = Date.now();
-      }
-      if (name === 'duration' && value && shown) { fit(true); if (!embed) setTimeout(() => fit(true), 400); }
-      if (name === 'pause') {
-        setWakeLock(!value && shown);
-        onPresenceChange();
-        onPlaybackStateChange();
-      }
-      if (name === 'video-params' && value && mpv) {
-        if (embed && shown) fit(false);
-        if (!mpv.isEmbedded && (mpv.vsr || mpv.rtxHdr)) {
-          // VSR upscaling is meant for <= 1080p SDR; keep True HDR if only HDR enabled
-          const bypassVsr = mpv.vsr && ((value.h || 0) >= 1440 || (value['sig-peak'] || 1) > 1.5);
-          const vf = rtxFilterFor(bypassVsr ? false : mpv.vsr, mpv.rtxHdr);
-          mpv.command('vf', 'set', vf).catch(() => {});
-        }
-      }
-      if (name === 'pause' && now?.scrobbled) scrob(value ? 'pause' : 'start');
-      if (name === 'duration' && value && now && !now.skipsAsked && getMediaHub()) {
-        now.skipsAsked = true;
-        now.scrobbled = true; scrob('start');
-        onPresenceChange();
-        if (party?.role === 'guest' && party.viewer?.state?.src) {
-          const src = party.viewer.state.src;
-          const localFn = now.stream?.behaviorHints?.filename || now.stream?.title || '';
-          const mismatch = detectSourceMismatch({ hostDur: src.durationSec || 0, localDur: value, hostFilename: src.filename || '', localFilename: localFn });
-          lastMismatch = mismatch;
-          if (mismatch) {
-            if (lastPartyState) lastPartyState = { ...lastPartyState, mismatch };
-            toOverlay({ type: 'party-mismatch', ...mismatch });
-          }
-        }
-        const key = now.key;
-        const syncMultiEp = () => {
-          const dSec = mpv?.props?.duration || 0;
-          if (!now || now.key !== key || !dSec || !now.episodes?.length || now.multiChecked) return;
-          now.multiChecked = true;
-          const rtMin = parseInt(now.meta?.runtime || '45', 10) || 45;
-          const fn = now.stream?.behaviorHints?.filename || now.stream?.title || '';
-          const multi = detectDoubleLength({ durationSec: dSec, expectedRuntimeMin: rtMin, filename: fn, episodes: now.episodes, currentVideoId: now.key });
-          if (multi) {
-            now.multiEp = multi;
-            now.nextVideoId = multi.nextAfterId || now.nextVideoId;
-            toOverlay({ type: 'multi-ep', ...multi });
-          }
-        };
-        now.syncMultiEp = syncMultiEp;
-        syncMultiEp();
-        if (now.card?.postCredits && (now.card.postCredits.after || now.card.postCredits.during)) {
-          now.postCredits = { ...now.card.postCredits, ...(now.postCredits || {}) };
-          toOverlay({ type: 'post-credits', ...now.postCredits });
-        }
-        getMediaHub().skips(key, value, now.meta?.imdb_id || now.card?.imdbId || null).then((list) => {
-          if (now?.key !== key || !shown) return;
-          if (!app.isPackaged && process.env.MAJLIS_TEST_SKIPS && (!Array.isArray(list) || !list.length)) {
-            list = [{ kind: 'op', start: 0, end: 12 }];
-          }
-          now.skips = Array.isArray(list) ? list : [];
-          if (now.skips.length) {
-            toOverlay({ type: 'skips', list: now.skips });
-            const ed = now.skips.find((s) => s.kind === 'ed');
-            if (ed && value > 180 && value - ed.end >= 25) {
-              now.postCredits = { after: true, during: false, ...(now.card?.postCredits || {}), ...(now.postCredits || {}), resumeAt: ed.end };
-              toOverlay({ type: 'post-credits', ...now.postCredits });
-            }
-          }
-        }).catch(() => {});
-      }
-      if (name === 'track-list' && Array.isArray(value) && now && !now.audioRestored && now.itemState?.audioLang) {
-        now.audioRestored = true;
-        const wantLang = String(now.itemState.audioLang).toLowerCase();
-        const hit = value.find((tr) => tr.type === 'audio' && String(tr.lang || '').toLowerCase() === wantLang);
-        if (hit && !hit.selected) mpv.set('aid', hit.id).catch(() => {});
-      }
-      if (name === 'chapter-list' && Array.isArray(value) && now) {
-        const pc = value.find((ch) => /post.?credit|mid.?credit|stinger|بعد التتر|مشهد إضافي/i.test(String(ch?.title || '')));
-        if (pc && Number.isFinite(pc.time)) {
-          now.postCredits = { after: true, during: false, ...(now.card?.postCredits || {}), ...(now.postCredits || {}), resumeAt: pc.time };
-          toOverlay({ type: 'post-credits', ...now.postCredits });
-        }
-      }
-      let shouldEmitProp = true;
-      if (name === 'time-pos') {
-        const tsNow = Date.now();
-        if (now?.hasFirstFrame && Number(value) >= 0.25 && tsNow - lastPosEmitAt < 200) shouldEmitProp = false;
-        else lastPosEmitAt = tsNow;
-      } else if (THROTTLED_STATS.has(name)) {
-        const tsNow = Date.now();
-        if (tsNow - (lastStatEmitAt.get(name) || 0) < 1000) shouldEmitProp = false;
-        else lastStatEmitAt.set(name, tsNow);
-      }
-      const sentVal = name === 'volume' && duckGain < 0.99 ? userVol : value;
-      if (shouldEmitProp) {
-        toOverlay({ type: 'player', name, value: sentVal });
-        if (!useEmbedded) emit('player', { name, value: sentVal });
-      }
-      const markMultiCovered = () => {
-        if (incog() || !now?.multiEp?.coveredIds?.length || now.multiMarked || !now.card?.metaId) return;
-        const lib = getMediaHub()?.library();
-        if (!lib?.setWatched) return;
-        now.multiMarked = true;
-        const allIds = (now.episodes || []).map((v) => v.id).filter(Boolean);
-        const m = { id: now.card.metaId, type: now.type, name: now.card.seriesName || now.card.name, poster: now.card.poster || null };
-        for (const vid of now.multiEp.coveredIds) lib.setWatched(m, vid, true, allIds);
-      };
-      if (name === 'eof-reached' && value === true) {
-        markMultiCovered();
-        if (!incog() && party && partySession && !partySession.ratingOpened) {
-          partySession.ratingOpened = true;
-          getSocial?.()?.openPartyRating?.({
-            sessionId: partySession.id,
-            id: partySession.titleId,
-            type: partySession.type,
-            title: partySession.title,
-            poster: partySession.poster,
-          });
-        }
-        if (sleepEof) {
-          sleepEof = false;
-          suppressAutoNext = true;
-          mpv?.set('pause', true).catch(() => {});
-          toOverlay({ type: 'sleep-eof-triggered' });
-        } else {
-          advanceAfterEof().catch(() => {});
-        }
-      }
-      if (name === 'time-pos' && now && getMediaHub() && now.card?.metaId && !incog()) {
-        const step = value - (now.libAt ?? value);
-        if (party && partySession) {
-          if (step > 0 && step < 30) partySession.watchedMs += step * 1000;
-          const tName = now.card?.seriesName || now.card?.name;
-          if (tName && !looksRawId(tName)) partySession.title = tName;
-          if (now.card?.poster && !partySession.poster) partySession.poster = now.card.poster;
-          if (now.meta?.genres?.length && !partySession.genres.length) partySession.genres = normalizeGenres(now.meta.genres);
-          const d = mpv.props.duration || 0;
-          if (!partySession.ratingOpened && d > 120 && value >= d * 0.92) {
-            partySession.ratingOpened = true;
-            getSocial?.()?.openPartyRating?.({
-              sessionId: partySession.id,
-              id: partySession.titleId,
-              type: partySession.type,
-              title: partySession.title,
-              poster: partySession.poster,
-            });
-          }
-        }
-        if (now.libAt == null || Math.abs(step) >= 5) {
-          const d = mpv.props.duration || 0;
-          const m = {
-            id: now.card.metaId,
-            type: now.type,
-            name: now.card.seriesName || now.card.name,
-            poster: now.card.poster || null,
-            year: now.meta?.year ?? now.card?.year ?? null,
-            genres: Array.isArray(now.meta?.genres) ? now.meta.genres : (now.card?.genres || []),
-            directors: Array.isArray(now.meta?.directors) ? now.meta.directors : (now.meta?.director || now.card?.directors || []),
-            cast: Array.isArray(now.meta?.cast) ? now.meta.cast : (now.card?.cast || []),
-            runtimeMin: now.meta?.runtimeMin ?? now.meta?.runtime ?? now.card?.runtimeMin ?? null,
-            imdbRating: now.meta?.imdbRating ?? now.card?.imdbRating ?? null,
-            tmdbId: now.meta?.tmdbId ?? now.card?.tmdbId ?? null,
-          };
-          // a jump (seek) isn't time watched
-          getMediaHub().library().progress(m, now.key, value * 1000, d * 1000, step > 0 && step < 30 ? step * 1000 : 0);
-          now.libAt = value;
-        }
-      }
-      if (name === 'time-pos' && now && value > 5) {
-        const p = progress(), d = mpv.props.duration || 0;
-        if (d > 120 && value >= d * 0.9) markMultiCovered();
-        // remember where we were (every ~5 s of film), forget it once the film's nearly done
-        if (!incog() && (!now.saved || Math.abs(value - now.saved) > 5)) {
-          now.saved = value;
-          if (d && value > d * 0.95) delete p[now.key]; else p[now.key] = { t: value, d, at: Date.now(), meta: now.card };
-          pset('mediaProgress', p);
-        }
-        // Smart Next-Episode Preload inside final 10 minutes
-        if (now.type === 'series' && now.nextVideoId && !now.preloadStarted && d > 300 && d - value <= 600) {
-          now.preloadStarted = true;
-          preloadNextEpisode(now.nextVideoId, playGen).catch(() => {});
+      toOverlay({ type: 'player-state', state: 'failed', detail: x });
+    });
+    mpv.on('event', (m) => {
+      if (html5Active) return;
+      if (m?.event === 'end-file' && (m.reason === 'error' || m.file_error)) {
+        if (!now?.inQuickplay && !html5FallbackTried && isHttpFallbackCandidate(now?.url) && store.get('playerHlsFallback') !== false) {
+          activateHtml5Fallback('codec-error').catch(() => {});
         }
       }
     });
-    for (const ev of ['recovering', 'recovered', 'failed']) mpv.on(ev, (x) => toOverlay({ type: 'player-state', state: ev, detail: x }));
     await mpv.start();
-    if (!embed && !film) try { film = Number(await mpv.get('window-id')) || 0; } catch {}
+    if (!useNative && !film) try { film = Number(await mpv.get('window-id')) || 0; } catch {}
     fit(true);
   }
 
-  // mpv sizes and places its own window once its video output starts (after we placed it), so
-  // place it again then, and a few times while it settles; overlay is shown only after first paint
   function show() {
     shown = true;
     startActiveTimers();
     onTheaterState?.(true);
     onPlaybackStateChange();
     if (curDimmerPct > 0) dimmer.apply({ activeWin: getWin(), opacity: curDimmerPct });
-    if (useEmbedded) { fit(false); return; }
+    const w = getWin();
+    if (mpv?.isNative && w && !w.isDestroyed() && overlay && !overlay.isDestroyed()) {
+      mpv.attachWindows(hwnd(w), hwnd(overlay));
+      mpv.setVideoVisible(!html5Active);
+      mpv.setVisible(true);
+      if (now?.card?.name) mpv.setTitle(now.card.name);
+    }
     if (overlayReady && overlay && !overlay.isDestroyed()) {
       overlay.show(); fit(true); overlay.focus();
     }
-    for (const ms of [300, 1000, 2500]) setTimeout(() => { if (shown) fit(true); }, ms);
+    for (const ms of [300, 1000]) setTimeout(() => { if (shown) fit(true); }, ms);
   }
 
   // Trakt / Simkl see what's on (progress in %)
@@ -704,7 +783,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     curNight = false;
     dimmer.clear();
     finalizePartySession();
-    if (ackSafetyTimer) { clearTimeout(ackSafetyTimer); ackSafetyTimer = null; }
+    stopHtml5Fallback();
+    virtualProps = {};
     onTheaterState?.(false);
     stopActiveTimers();
     setWakeLock(false);
@@ -714,7 +794,6 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     curPhase = '';
     curStatusMsg = '';
     lastFit = '';
-    onFrameClear?.();
     if (now?.scrobbled) scrob('stop');
     if (party?.role === 'host') getHost()?.syncClose();
     party = null;
@@ -722,16 +801,20 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     thumbProc = null;
     if (mpv) {
       // Clear `want` & pause watchdog synchronously BEFORE sending stop so mpv._watch() NEVER respawns ghost audio
-      mpv.clearPlayback();
-      if (mpv.sock) {
-        mpv.set('pause', true).catch(() => {});
-        mpv.command('stop').catch(() => {});
-        mpv.command('playlist-clear').catch(() => {});
+      if (mpv.isNative) {
+        mpv.releaseMedia();
       } else {
-        // Still booting/connecting: kill immediately so late socket connect cannot play audio
-        mpv.stop(true);
-        mpv = null;
-        film = 0;
+        mpv.clearPlayback();
+        if (mpv.sock) {
+          mpv.set('pause', true).catch(() => {});
+          mpv.command('stop').catch(() => {});
+          mpv.command('playlist-clear').catch(() => {});
+        } else {
+          // Still booting/connecting: kill immediately so late socket connect cannot play audio
+          mpv.stop(true);
+          mpv = null;
+          film = 0;
+        }
       }
     }
     if (now?.infoHash) svc.call('stop', { infoHash: now.infoHash, delete: !!store.get('deleteCacheAfterWatch') }).catch(() => {});
@@ -804,8 +887,13 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       catch (e) { toOverlay({ type: 'player-state', state: 'debrid-miss', detail: e.message }); }
     }
     if (stream.infoHash) {
-      const r = await svc.call('play', { infoHash: stream.infoHash, fileIdx: stream.fileIdx ?? 0, sources: stream.sources || [] });
-      return { url: await svc.url(r.path), opts: {}, infoHash: stream.infoHash };
+      const r = await svc.play({
+        infoHash: stream.infoHash,
+        fileIdx: stream.fileIdx ?? null,
+        sources: stream.sources || [],
+        filename: stream.behaviorHints?.filename || null,
+      });
+      return { url: r.url || await svc.url(r.path), opts: {}, infoHash: stream.infoHash };
     }
     throw new Error('this stream type is not supported');
   }
@@ -826,6 +914,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     args.push('-ss', String(bucket), '-i', now.url, '-frames:v', '1', '-vf', 'scale=240:-2', '-q:v', '5', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1');
     return new Promise((res) => {
       const p = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      try { if (p.pid) core?.adoptProcess?.(p.pid); } catch {}
       thumbProc = p;
       const chunks = [];
       const timer = setTimeout(() => { try { p.kill(); } catch {} res(null); }, 4500);
@@ -956,6 +1045,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     args.push('-ss', winStart.toFixed(2), '-t', String(winDur), '-i', now.url, '-vn', '-af', 'silencedetect=noise=-32dB:d=0.35', '-f', 'null', '-');
     const log = await new Promise((resolveProbe) => {
       const p = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      try { if (p.pid) core?.adoptProcess?.(p.pid); } catch {}
       let txt = '';
       const timer = setTimeout(() => { try { p.kill(); } catch {} resolveProbe(txt); }, 10000);
       p.stderr?.on('data', (d) => { txt += d.toString('utf8'); });
@@ -1086,7 +1176,10 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         return { ok: true, external: true };
       }
     }
-    now = { key: id, card, stream, origStream, url: r.url, infoHash: r.infoHash, type, addon: addon || null, ranked: ranked || null, nextVideoId: null, episodes: null, triedStreams: now?.triedStreams || triedSet, hasFirstFrame: false, stallSince: 0, zeroPeersSince: 0, failoverOffered: false, failoverDismissed: false };
+    stopHtml5Fallback();
+    html5FallbackTried = false;
+    virtualProps = {};
+    now = { key: id, card, stream, origStream, url: r.url, infoHash: r.infoHash, type, addon: addon || null, ranked: ranked || null, nextVideoId: null, episodes: null, triedStreams: now?.triedStreams || triedSet, hasFirstFrame: false, stallSince: 0, zeroPeersSince: 0, failoverOffered: false, failoverDismissed: false, inQuickplay: !!keepCurtain };
     if (type === 'series') {
       const metaId = card?.metaId || String(id).split(':')[0];
       seriesEpisodes(metaId).then(({ meta, episodes }) => {
@@ -1131,16 +1224,10 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     curSdh = !!store.get('subFilterSdh');
     curSubFpsMode = 'reset';
     if (SAFE_TONE_MAPS.has(store.get('playerToneMapping'))) curTone = store.get('playerToneMapping');
-    mpv.set('hwdec', !curHwAccel || store.get('decoderMode') === 2 ? 'no' : (mpv.isEmbedded ? 'd3d11va-copy' : ((vsr || rtxHdr) ? 'd3d11va' : 'auto-safe'))).catch(() => {});
+    mpv.set('hwdec', !curHwAccel || store.get('decoderMode') === 2 ? 'no' : ((vsr || rtxHdr) ? 'd3d11va' : 'auto-safe')).catch(() => {});
     mpv.set('audio-spdif', store.get('audioPassthrough') ? SPDIF_CODECS : '').catch(() => {});
     mpv.set('tone-mapping', curTone).catch(() => {});
-    if (mpv.isEmbedded) {
-      mpv.set('target-colorspace-hint', 'no').catch(() => {});
-      mpv.set('target-prim', 'bt.709').catch(() => {});
-      mpv.set('target-trc', 'srgb').catch(() => {});
-    } else {
-      mpv.set('target-colorspace-hint', store.get('playerHdr') === false ? 'no' : 'yes').catch(() => {});
-    }
+    mpv.set('target-colorspace-hint', store.get('playerHdr') === false ? 'no' : 'yes').catch(() => {});
     mpv.set('sub-filter-sdh', curSdh ? 'yes' : 'no').catch(() => {});
     mpv.set('sub-filter-sdh-harder', curSdh ? 'yes' : 'no').catch(() => {});
     if (store.get('playerAnime4k')) {
@@ -1240,7 +1327,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       };
       const iv = setInterval(() => {
         if (expectedGen !== playGen || !shown || !now || now.key !== expectedKey || !mpv) { cleanup(); rejectStart(new Error('cancelled')); return; }
-        if ((mpv.props.duration || 0) > 0 && ((mpv.props['time-pos'] || 0) > 0 || mpv.props['core-idle'] === false)) {
+        const pr = getProps();
+        if ((pr.duration || 0) > 0 && ((pr['time-pos'] || 0) > 0 || pr['core-idle'] === false || html5Active)) {
           cleanup(); resolveStart(true); return;
         }
         if (Date.now() - t0 >= timeoutMs) { cleanup(); rejectStart(new Error('stream start timed out')); }
@@ -1591,13 +1679,13 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
   let seekWant = null, seekTimer = null;
   async function runControlCmd(cmdName, c = {}) {
-    if (!mpv) return null;
+    if (!mpv && !html5Active) return null;
     if (party && ['toggle', 'pause', 'seek', 'speed'].includes(cmdName)) {
       if (party.role === 'guest' && !getGuest()?.canControl) {
         toOverlay({ type: 'toast', kind: 'remote-locked', text: 'remote-locked' });
         return false;
       }
-      const cur = Math.round((mpv.props['time-pos'] || 0) * 1000);
+      const cur = Math.round((getProps()['time-pos'] || 0) * 1000);
       const ask = (r) => (party.role === 'host' ? getHost()?.syncRequest(r) : getGuest()?.syncRequest(r));
       if (cmdName === 'speed') {
         const rate = Math.min(4, Math.max(0.25, Number(c.v) || 1));
@@ -1616,19 +1704,32 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       ask({ action, seq: party.viewer.ownSeq });
       return true;
     }
-    if (cmdName === 'toggle') return mpv.set('pause', !mpv.props.pause);
-    if (cmdName === 'pause') return mpv.set('pause', !!c.on);
+    if (cmdName === 'toggle') {
+      const nextPause = !getProps().pause;
+      if (html5Active) { toOverlay({ type: 'html5-cmd', op: 'pause', on: nextPause }); return nextPause; }
+      return mpv.set('pause', nextPause);
+    }
+    if (cmdName === 'pause') {
+      if (html5Active) { toOverlay({ type: 'html5-cmd', op: 'pause', on: !!c.on }); return !!c.on; }
+      return mpv.set('pause', !!c.on);
+    }
     if (cmdName === 'seek') {
       lastPosEmitAt = 0;
-      const dur = Number(mpv.props?.duration) || 0;
+      const dur = Number(getProps()?.duration) || 0;
       const target = c.abs && dur > 0
         ? Math.max(0, Math.min(Number(c.to) || 0, Math.max(0, dur - 1)))
         : (Number(c.to) || 0);
-      const res = await mpv.command('seek', target, c.abs ? 'absolute+exact' : 'relative+exact');
+      const res = html5Active
+        ? (toOverlay({ type: 'html5-cmd', op: 'seek', to: target, abs: !!c.abs }), true)
+        : await mpv.command('seek', target, c.abs ? 'absolute+exact' : 'relative+exact');
       setTimeout(() => onPresenceChange(), 180);
       return res;
     }
-    if (cmdName === 'speed') return mpv.set('speed', Math.min(4, Math.max(0.25, Number(c.v) || 1)));
+    if (cmdName === 'speed') {
+      const spd = Math.min(4, Math.max(0.25, Number(c.v) || 1));
+      if (html5Active) { toOverlay({ type: 'html5-cmd', op: 'speed', v: spd }); return spd; }
+      return mpv.set('speed', spd);
+    }
     return null;
   }
 
@@ -1699,8 +1800,9 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         const d = w && !w.isDestroyed() ? screen.getDisplayMatching(w.getBounds()) : screen.getPrimaryDisplay();
         detectedDisplayProfile = detectDisplayProfile(d);
       } catch {}
+      const curPr = getProps();
       return {
-        ...(mpv?.props || {}), volume: userVol, autoDuck: store.get('autoDuck') !== false,
+        ...curPr, volume: userVol, autoDuck: store.get('autoDuck') !== false,
         spdif: !!store.get('audioPassthrough'), vsr: !!store.get('mediaVsr'),
         hwAccel: curHwAccel, sdhFilter: curSdh, subFpsMode: curSubFpsMode,
         night: curNight, voiceClarity: curVoiceClarity, warmTint: curWarmTint,
@@ -1710,8 +1812,10 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         subStyle: { ...(store.get('subStyle') || {}), ...(itemState || {}) },
         ambientGlow: !!store.get('ambientGlow'),
         incognito: incog(),
+        html5Active,
+        videoHwnd: mpv?.videoHwnd?.() || null,
         aspect: curAspect, toneMapping: curTone, partyState: lastPartyState, partyVotes,
-        phase: curPhase, statusMsg: curStatusMsg, loading: shown && !(mpv?.props?.['time-pos'] > 0.01),
+        phase: curPhase, statusMsg: curStatusMsg, loading: shown && !((curPr['time-pos'] || 0) > 0.01),
         loadedSubMap: now?.loadedSubMap || {},
         skips: now?.skips || [],
         bookmarks: getBookmarks(),
@@ -1843,17 +1947,27 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
       return quickplay({ type: it.type || 'movie', id: it.id, videoId: it.videoId, party: !!party, card: { name: it.name, poster: it.poster || null, type: it.type || 'movie', metaId: it.id } });
     }
-    if (!mpv) return null;
+    if (!mpv && !html5Active) return null;
     if (['toggle', 'pause', 'seek', 'speed'].includes(c.cmd)) return runControlCmd(c.cmd, c);
     switch (c.cmd) {
       case 'volume': {
         userVol = Math.min(200, Math.max(0, Math.round(Number(c.v) || 0)));
-        if (mpv.props) mpv.props.volume = userVol;
+        if (mpv?.props) mpv.props.volume = userVol;
+        virtualProps.volume = userVol;
         store.set('playerVolume', userVol);
         if (now?.card?.metaId || now?.key) getMediaHub()?.streamsBucket?.saveItemState?.(now.card?.metaId || now.key, { volume: userVol });
+        if (html5Active) { toOverlay({ type: 'html5-cmd', op: 'volume', v: Math.round(userVol * duckGain) }); return true; }
         return mpv.set('volume', Math.round(userVol * duckGain));
       }
-      case 'mute': return mpv.set('mute', !(await mpv.get('mute')));
+      case 'mute': {
+        if (html5Active) {
+          const nextMute = !getProps().mute;
+          virtualProps.mute = nextMute;
+          toOverlay({ type: 'html5-cmd', op: 'mute', on: nextMute });
+          return nextMute;
+        }
+        return mpv.set('mute', !(await mpv.get('mute')));
+      }
       case 'sub-delay': {
         const next = Math.round(((c.abs ? 0 : (mpv.props['sub-delay'] || 0)) + (Number(c.d) || 0)) * 100) / 100;
         await mpv.set('sub-delay', next);
@@ -1899,8 +2013,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       case 'hwdec-toggle': {
         curHwAccel = c.on !== undefined ? !!c.on : !curHwAccel;
         store.set('playerHwAccel', curHwAccel);
-        const hwVal = !curHwAccel ? 'no' : (mpv.isEmbedded ? 'd3d11va-copy' : ((mpv.vsr || mpv.rtxHdr) ? 'd3d11va' : 'auto-safe'));
-        await mpv.set('hwdec', hwVal).catch(() => {});
+        const hwVal = !curHwAccel ? 'no' : ((mpv?.vsr || mpv?.rtxHdr) ? 'd3d11va' : 'auto-safe');
+        await mpv?.set('hwdec', hwVal).catch(() => {});
         return curHwAccel;
       }
       case 'audio-delay': {
@@ -1910,15 +2024,15 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         if (now?.card?.metaId || now?.key) getMediaHub()?.streamsBucket?.saveItemState?.(now.card?.metaId || now.key, { audioDelay: clamped });
         return clamped;
       }
-      case 'sid': return mpv.set('sid', c.id ?? 'no');
+      case 'sid': return html5Active ? (toOverlay({ type: 'html5-cmd', op: 'sid', id: c.id ?? 'no' }), true) : mpv.set('sid', c.id ?? 'no');
       case 'secondary-sid': return mpv.set('secondary-sid', c.id ?? 'no');
       case 'aid': {
-        const tracks = Array.isArray(mpv.props['track-list']) ? mpv.props['track-list'] : [];
+        const tracks = Array.isArray(getProps()['track-list']) ? getProps()['track-list'] : [];
         const picked = tracks.find((tr) => tr.type === 'audio' && tr.id === c.id);
         if (picked?.lang && (now?.card?.metaId || now?.key)) {
           getMediaHub()?.streamsBucket?.saveItemState?.(now.card?.metaId || now.key, { audioLang: picked.lang });
         }
-        return mpv.set('aid', c.id);
+        return html5Active ? (toOverlay({ type: 'html5-cmd', op: 'aid', id: c.id }), true) : mpv.set('aid', c.id);
       }
       case 'sub-scale': {
         const scale = Math.max(0.4, Math.min(3, Number(c.v) || 1));
@@ -2052,12 +2166,14 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       case 'vsr-toggle': {
         const on = !!c.on;
         store.set('mediaVsr', on);
-        mpv.vsr = on;
-        await mpv.set('hwdec', mpv.isEmbedded ? 'd3d11va-copy' : ((on || mpv.rtxHdr) ? 'd3d11va' : 'auto-safe')).catch(() => {});
-        if (!mpv.isEmbedded) {
-          const vp = mpv.props['video-params'];
-          const bypassVsr = vp && ((vp.h || 0) >= 1440 || (vp['sig-peak'] || 1) > 1.5);
-          await mpv.command('vf', 'set', rtxFilterFor(on && !bypassVsr, mpv.rtxHdr)).catch(() => {});
+        if (mpv) {
+          mpv.vsr = on;
+          await mpv.set('hwdec', (on || mpv.rtxHdr) ? 'd3d11va' : 'auto-safe').catch(() => {});
+          if (!html5Active) {
+            const vp = mpv.props['video-params'];
+            const bypassVsr = vp && ((vp.h || 0) >= 1440 || (vp['sig-peak'] || 1) > 1.5);
+            await mpv.command('vf', 'set', rtxFilterFor(on && !bypassVsr, mpv.rtxHdr)).catch(() => {});
+          }
         }
         return on;
       }
@@ -2147,6 +2263,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         args.push('-ss', startPos.toFixed(2), '-t', actualDur.toFixed(2), '-i', now.url, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outPath);
         const res = await new Promise((resolveClip) => {
           const p = spawn(ff, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+          try { if (p.pid) core?.adoptProcess?.(p.pid); } catch {}
           let errTxt = '';
           const timer = setTimeout(() => { try { p.kill(); } catch {} resolveClip({ ok: false, error: 'clip timed out' }); }, 45000);
           p.stderr?.on('data', (d) => { errTxt = (errTxt + d.toString()).slice(-400); });
@@ -2235,7 +2352,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
       case 'failover-switch': {
         if (!now || !c.candidate?.stream) return false;
-        const posMs = Math.max(0, Math.round(Number(c.posMs ?? ((mpv?.props?.['time-pos'] || 0) * 1000)) || 0));
+        const posMs = Math.max(0, Math.round(Number(c.posMs ?? ((getProps()['time-pos'] || 0) * 1000)) || 0));
         const tried = [...(now.triedStreams || [])];
         toOverlay({ type: 'failover-prompt', clear: true });
         void play({
@@ -2250,8 +2367,47 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         }).catch(() => {});
         return true;
       }
+      case 'switch-engine': {
+        if (!now) return false;
+        if (c.engine === 'html5') return activateHtml5Fallback('manual');
+        if (c.engine === 'mpv' && html5Active) {
+          const posMs = Math.max(0, Math.round(Number(getProps()['time-pos'] || 0) * 1000));
+          stopHtml5Fallback();
+          html5FallbackTried = true;
+          await play({
+            type: now.type,
+            id: now.key,
+            card: now.card,
+            stream: now.stream,
+            addon: now.addon,
+            pos: posMs,
+            ranked: now.ranked,
+          }).catch(() => {});
+          return true;
+        }
+        return false;
+      }
     }
     return null;
+  });
+
+  ipcMain.handle('theater:html5-event', (_e, ev = {}) => {
+    if (!html5Active || !shown) return false;
+    const applyProp = (k, v) => {
+      virtualProps[k] = v;
+      if (mpv?.props) mpv.props[k] = v;
+      onPlayerProp(k, v);
+    };
+    if (ev.props && typeof ev.props === 'object') {
+      for (const [k, v] of Object.entries(ev.props)) applyProp(k, v);
+    } else if (typeof ev.name === 'string') {
+      applyProp(ev.name, ev.value);
+    }
+    if (ev.eof) applyProp('eof-reached', true);
+    if (ev.error) {
+      toOverlay({ type: 'player-error', message: String(ev.error), ranked: now?.ranked || [] });
+    }
+    return true;
   });
 
   // A state from the party (ours as host, or the host's as guest). A new film: open it here on
@@ -2357,8 +2513,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
     if (!syncTimer) {
       syncTimer = setInterval(() => {
-        if (!party || !mpv?.props) return;
-        const p = mpv.props;
+        if (!party || (!mpv?.props && !html5Active)) return;
+        const p = getProps();
         const local = Math.round((p['time-pos'] || 0) * 1000);
         if (party.role === 'host') {
           // Host is the clock authority: NEVER warp host playback speed or self-seek via SyncViewer
@@ -2366,10 +2522,14 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
           const st = h?.sync?.state;
           if (st) {
             const wantPaused = !st.playing;
-            if (p.pause !== undefined && !!p.pause !== wantPaused) mpv.set('pause', wantPaused).catch(() => {});
+            if (p.pause !== undefined && !!p.pause !== wantPaused) {
+              if (html5Active) toOverlay({ type: 'html5-cmd', op: 'pause', on: wantPaused });
+              else mpv.set('pause', wantPaused).catch(() => {});
+            }
             const targetRate = st.rate || 1;
             if (!wantPaused && Math.abs((p.speed ?? 1) - targetRate) > 0.005) {
-              mpv.set('speed', targetRate).catch(() => {});
+              if (html5Active) toOverlay({ type: 'html5-cmd', op: 'speed', v: targetRate });
+              else mpv.set('speed', targetRate).catch(() => {});
             }
             if (st.playing && !p.pause && !p['paused-for-cache'] && p['time-pos'] != null) {
               const hostDrift = local - expected(st, Date.now());
@@ -2390,13 +2550,20 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
             buffering: !!p['paused-for-cache'],
             seeking: Date.now() < (party.seekSettleUntil || 0),
           });
-          if (o.pause != null) mpv.set('pause', o.pause).catch(() => {});
+          if (o.pause != null) {
+            if (html5Active) toOverlay({ type: 'html5-cmd', op: 'pause', on: o.pause });
+            else mpv.set('pause', o.pause).catch(() => {});
+          }
           if (o.seek != null) {
             party.seekSettleUntil = Date.now() + 1200;
             lastPosEmitAt = 0;
-            mpv.command('seek', o.seek / 1000, 'absolute+exact').catch(() => {});
+            if (html5Active) toOverlay({ type: 'html5-cmd', op: 'seek', to: o.seek / 1000, abs: true });
+            else mpv.command('seek', o.seek / 1000, 'absolute+exact').catch(() => {});
           }
-          if (o.speed != null) mpv.set('speed', o.speed).catch(() => {});
+          if (o.speed != null) {
+            if (html5Active) toOverlay({ type: 'html5-cmd', op: 'speed', v: o.speed });
+            else mpv.set('speed', o.speed).catch(() => {});
+          }
           if (!!o.catchUp !== !!party.lastCatchUp) {
             party.lastCatchUp = !!o.catchUp;
             toOverlay({ type: 'party-catchup', active: !!o.catchUp, speed: o.speed || party.viewer.speed, driftMs: o.driftMs || 0 });
@@ -2447,10 +2614,9 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
           now.stallSince = 0;
         }
         if (!reason && now.infoHash && !now.stream?.majlisLocalFile && !now.stream?.majlisDownload) {
-          const stMap = await svc.call('stats').catch(() => null);
-          const st = stMap?.[String(now.infoHash).toLowerCase()];
+          const st = await svc.stats(now.infoHash).catch(() => null);
           if (st && !st.finished) {
-            const livePeers = st.live?.snapshot?.peer_stats?.live ?? st.peer_stats?.live ?? null;
+            const livePeers = st.peers ?? st.live?.snapshot?.peer_stats?.live ?? st.peer_stats?.live ?? null;
             if (livePeers === 0) {
               if (!now.zeroPeersSince) now.zeroPeersSince = curTs;
               else if (curTs - now.zeroPeersSince >= 10000) reason = 'zero-peers';
@@ -2494,7 +2660,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   };
 
   // what's on, for presence (Discord)
-  const info = () => (incog() ? null : (now && mpv?.props ? {
+  const info = () => (incog() ? null : (now && (mpv?.props || html5Active) ? {
     name: now.card?.name || '',
     seriesName: now.card?.seriesName || '',
     type: now.type || now.card?.type || 'movie',
@@ -2504,14 +2670,14 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     epTitle: now.card?.epTitle || '',
     poster: now.card?.poster || null,
     still: now.card?.still || null,
-    pos: mpv.props['time-pos'] || 0,
-    dur: mpv.props.duration || 0,
-    paused: !!mpv.props.pause,
+    pos: getProps()['time-pos'] || 0,
+    dur: getProps().duration || 0,
+    paused: !!getProps().pause,
     together: !!party,
   } : null));
 
   const videoAspect = () => {
-    const vp = mpv?.props?.['video-params'];
+    const vp = getProps()?.['video-params'];
     const w = vp?.dw || vp?.w || 0;
     const h = vp?.dh || vp?.h || 0;
     return w > 0 && h > 0 ? Math.max(0.5, Math.min(2.6, w / h)) : (16 / 9);
@@ -2519,25 +2685,42 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
   const setPipMode = (on) => {
     pipActive = !!on;
+    if (overlay && !overlay.isDestroyed()) {
+      try { overlay.setAlwaysOnTop(pipActive || !!store.get('alwaysOnTop'), 'floating'); } catch {}
+    }
     fit(true);
+    if (!pipActive && shown && overlay && !overlay.isDestroyed()) {
+      try { overlay.show(); overlay.focus(); overlay.webContents.focus(); } catch {}
+    }
   };
 
   return {
     play, quickplay, partyStart, close, onSync, onSyncPeers, onVoice, onPartyEvent, info, activity, saveFriend, ackFrame,
     videoAspect, setPipMode,
-    playbackSnapshot: () => ({ open: shown && !!now, paused: !!mpv?.props?.pause, hasNext: !!now?.nextVideoId }),
+    startDrag: () => !!mpv?.startDrag?.(),
+    focusOverlay: () => {
+      if (shown && overlay && !overlay.isDestroyed()) {
+        try { overlay.show(); overlay.focus(); overlay.webContents.focus(); } catch {}
+      }
+    },
+    syncWindow: () => fit(true),
+    playbackSnapshot: () => ({ open: shown && !!now, paused: !!getProps()?.pause, hasNext: !!now?.nextVideoId }),
     togglePause: () => runControlCmd('toggle'),
     seekBy: (sec) => runControlCmd('seek', { to: Number(sec) || 0 }),
     nextEpisode,
-    pauseIfPlaying: () => { if (shown && mpv && mpv.props?.pause === false) mpv.set('pause', true).catch(() => {}); },
+    pauseIfPlaying: () => {
+      if (!shown) return;
+      if (html5Active) toOverlay({ type: 'html5-cmd', op: 'pause', on: true });
+      else if (mpv && mpv.props?.pause === false) mpv.set('pause', true).catch(() => {});
+    },
     stop: (immediate = false) => {
       clearTimeout(resizeTimer);
+      clearBlackScreenWatch();
       dimmer.clear();
       close();
       setWakeLock(false);
       stopActiveTimers();
       cleanupTempSubs();
-      onFrameClear?.();
       try { if (overlay && !overlay.isDestroyed()) overlay.destroy(); overlay = null; } catch {}
       try { thumbProc?.kill(); } catch {}
       try { mpv?.stop(immediate); } catch {}

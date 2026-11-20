@@ -13,7 +13,7 @@ import { useProfileStore } from '../store/useProfileStore';
 import { usePlayQueueStore, type PlayQueueItem } from '../store/usePlayQueueStore';
 import { configureSfx, playSfx } from '../utils/sfx';
 import { Img } from '../ui/Img';
-import { Nv12Canvas, type AmbientSample } from './Nv12Canvas';
+import { Html5Stage, type Html5Cmd } from './Html5Stage';
 import type {
   AddonSub, BookmarkItem, BrbState, ChatMsg, DrawerKind, EpItem,
   PartyView, RatingRoundView, RatingVoteView, SourceMismatchInfo, TheaterPropsMap, VoiceStateView, VoteItem,
@@ -90,7 +90,9 @@ export function TheaterApp() {
   const [skipHidden, setSkipHidden] = useState(false);
   const autoSkippedRef = useRef(new Set<string>());
   const [ambientGlow, setAmbientGlow] = useState(false);
-  const [ambient, setAmbient] = useState<AmbientSample | null>(null);
+  const [html5State, setHtml5State] = useState<{ active: boolean; url: string; startPos: number; isHls: boolean }>({ active: false, url: '', startPos: 0, isHls: false });
+  const [html5Cmd, setHtml5Cmd] = useState<{ seq: number; cmd: Html5Cmd } | null>(null);
+  const html5CmdSeqRef = useRef(1);
   const [voiceClarity, setVoiceClarity] = useState(false);
   const [displayProfile, setDisplayProfile] = useState('auto');
   const [detectedDisplayProfile, setDetectedDisplayProfile] = useState('ips');
@@ -455,6 +457,7 @@ export function TheaterApp() {
         setCatchUp(null);
         thumbsRef.current.clear();
         if (m.loading) {
+          setHtml5State({ active: false, url: '', startPos: 0, isHls: false });
           setFocusMode(false);
           setHasFirstFrame(false);
           setProps((prev) => ({ ...prev, 'time-pos': undefined, duration: undefined, 'core-idle': undefined }));
@@ -607,6 +610,14 @@ export function TheaterApp() {
       } else if (m.type === 'party-vote') {
         setPartyVotes(Array.isArray(m.items) ? m.items : []);
         playSfx('vote');
+      } else if (m.type === 'html5-fallback') {
+        if (m.active && m.url) {
+          setHtml5State({ active: true, url: String(m.url), startPos: Number(m.startPos) || 0, isHls: !!m.isHls });
+        } else {
+          setHtml5State({ active: false, url: '', startPos: 0, isHls: false });
+        }
+      } else if (m.type === 'html5-cmd') {
+        setHtml5Cmd({ seq: html5CmdSeqRef.current++, cmd: m as Html5Cmd });
       }
     });
     return () => {
@@ -1002,33 +1013,66 @@ export function TheaterApp() {
     ? (Array.isArray(ratingRound.votes) ? ratingRound.votes : Object.values(ratingRound.votes || {}))
     : [];
 
+  const startWinDrag = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (e.button !== 0 || isFullscreen) return;
+    const tgt = e.target as HTMLElement | null;
+    if (tgt?.closest('button,a,input,select,textarea,[data-no-drag]')) return;
+    api.invoke('win:start-drag').catch(() => {});
+  }, [isFullscreen]);
+
+  const winControlsEl = !isFullscreen && !miniOn ? (
+    <div data-no-drag className="app-no-drag pointer-events-auto flex flex-none items-center gap-1 rounded-full bg-black/55 p-1 ring-1 ring-white/15 backdrop-blur-xl">
+      <button type="button" onClick={() => api.invoke('win:minimize').catch(() => {})} aria-label={t('th_win_min')}
+        className="grid size-7 place-items-center rounded-full text-fg2 transition hover:bg-white/15 hover:text-fg">
+        <Minus size={13} strokeWidth={2} />
+      </button>
+      <button type="button" onClick={() => api.invoke('win:maximize').catch(() => {})} aria-label={t('th_win_max')}
+        className="grid size-7 place-items-center rounded-full text-fg2 transition hover:bg-white/15 hover:text-fg">
+        <Maximize size={12} strokeWidth={2} />
+      </button>
+      <button type="button" onClick={() => api.invoke('win:close').catch(() => {})} aria-label={t('close')}
+        className="grid size-7 place-items-center rounded-full text-fg2 transition hover:bg-red-500/80 hover:text-white">
+        <X size={13} strokeWidth={2} />
+      </button>
+    </div>
+  ) : null;
+
   return (
     <div ref={shellRef} dir={lang === 'ar' ? 'rtl' : 'ltr'} onMouseMove={() => wake()} onWheel={onWheel}
       onPointerOver={(e) => { const el = (e.target as HTMLElement).closest?.('[data-tip]') as HTMLElement | null; setTip(el ? { text: el.dataset.tip || '', r: el.getBoundingClientRect() } : null); }}
       onPointerLeave={() => setTip(null)} onPointerDown={() => setTip(null)}
-      className={`th-shell ${idle && !miniOn ? 'cursor-none' : ''} ${miniOn ? 'group/pip ring-1 ring-white/25' : ''}`}
+      className={`th-shell !bg-transparent ${idle && !miniOn ? 'cursor-none' : ''} ${miniOn ? 'group/pip ring-1 ring-white/25' : ''}`}
       data-theme={theme} style={accent ? ({ '--c-acc': accent } as React.CSSProperties) : undefined}>
 
-      {/* Ambient Glow Edge Aura behind Canvas when enabled */}
-      {ambientGlow && hasFirstFrame && ambient && !miniOn ? (
+      {/* Warm Obsidian Gold Edge Aura when enabled */}
+      {ambientGlow && hasFirstFrame && !miniOn ? (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-[1] opacity-40 transition-all duration-700"
+          className="pointer-events-none absolute inset-0 z-[1] opacity-35 transition-all duration-700"
           style={{
-            boxShadow: `inset 0 90px 110px -45px ${ambient.top}, inset 0 -90px 110px -45px ${ambient.bottom}, inset 90px 0 110px -45px ${ambient.left}, inset -90px 0 110px -45px ${ambient.right}`,
+            boxShadow: 'inset 0 80px 100px -45px rgba(217,164,65,0.45), inset 0 -80px 100px -45px rgba(217,164,65,0.35)',
           }}
         />
       ) : null}
 
-      {/* 0. Single-HWND Composited Video Layer (WebGL2 NV12 / RGBA) */}
-      <Nv12Canvas
-        onFirstFrame={() => { setHasFirstFrame(true); setErrorInfo(null); setPhase(''); }}
-        ambientEnabled={ambientGlow && !miniOn}
-        onAmbientColor={setAmbient}
-        warmTint={warmTint}
-        compareActive={compareActive && !miniOn}
-        compareSplit={compareSplit}
-      />
+      {warmTint > 0 && hasFirstFrame ? (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-[2] mix-blend-multiply transition-opacity duration-300"
+          style={{ backgroundColor: '#ff9638', opacity: Math.min(0.42, (warmTint / 100) * 0.42) }}
+        />
+      ) : null}
+
+      {/* 0. Native D3D11 Video shows through transparent stage; mount HTML5 HLSv2/MSE fallback only when active */}
+      {html5State.active && html5State.url ? (
+        <Html5Stage
+          url={html5State.url}
+          startPos={html5State.startPos}
+          isHls={html5State.isHls}
+          cmdSeq={html5Cmd}
+          onFirstFrame={() => { setHasFirstFrame(true); setErrorInfo(null); setPhase(''); }}
+        />
+      ) : null}
 
       {/* Interactive Split-Screen A/B Quality Comparator Divider */}
       {compareActive && !miniOn ? (
@@ -1070,7 +1114,7 @@ export function TheaterApp() {
       {/* 0b. Subtle Top Window Drag Handle when HUD auto-hides (or full drag surface in PiP mini-player) */}
       {miniOn ? (
         <>
-          <div onDoubleClick={() => api.invoke('mini', false).catch(() => {})} className="app-drag absolute inset-0 z-20" />
+          <div onMouseDown={startWinDrag} onDoubleClick={() => api.invoke('mini', false).catch(() => {})} className="absolute inset-0 z-20 cursor-move" />
           <div className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-between bg-gradient-to-t from-black/80 via-transparent to-black/70 p-2.5 opacity-0 transition-opacity group-hover/pip:opacity-100">
             <div className="flex items-center justify-between gap-2">
               <span dir="auto" className="truncate text-[11px] font-bold text-fg drop-shadow">{displayTitle}</span>
@@ -1121,13 +1165,15 @@ export function TheaterApp() {
           </div>
         </>
       ) : (!isFullscreen ? (
-        <div onDoubleClick={() => api.invoke('win:maximize').catch(() => {})} className="app-drag absolute inset-x-0 top-0 z-[15] h-9 pe-[148px]" />
+        <div onMouseDown={startWinDrag} onDoubleClick={() => api.invoke('win:maximize').catch(() => {})} className="absolute inset-x-0 top-0 z-[15] h-10 pe-[116px]" />
       ) : null)}
 
       {/* 1. Blurred ClearLogo Cinematic Curtain before first video frame */}
       <div className={`absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#050507] transition-opacity duration-500 ${showCurtain ? 'opacity-100' : 'pointer-events-none opacity-0'}`}>
         {!isFullscreen ? (
-          <div onDoubleClick={() => api.invoke('win:maximize').catch(() => {})} className="app-drag absolute inset-x-0 top-0 h-11 pe-[148px]" />
+          <div onMouseDown={startWinDrag} onDoubleClick={() => api.invoke('win:maximize').catch(() => {})} className="absolute inset-x-0 top-0 flex h-12 items-center justify-end px-4">
+            {winControlsEl}
+          </div>
         ) : null}
         {bgUrl ? <Img eager srcs={[bgUrl]} className="absolute inset-0 h-full w-full scale-110 object-cover opacity-40 blur-2xl" /> : null}
         <div className="absolute inset-0 bg-gradient-to-t from-[#050507] via-[#050507]/65 to-[#050507]/85" />
@@ -1251,7 +1297,7 @@ export function TheaterApp() {
       ) : null}
       {!miniOn && failoverPrompt ? (
         <div className="pointer-events-auto absolute start-1/2 top-24 z-30 flex max-w-[92vw] -translate-x-1/2 flex-wrap items-center gap-2.5 rounded-2xl bg-[#18120a]/95 px-4 py-2 text-xs font-semibold text-amber-100 ring-1 ring-acc/55 shadow-2xl backdrop-blur-xl fade-in">
-          <span className="text-acc">{failoverPrompt.reason === '0peers' ? t('failover_title_peers') : t('failover_title_stall')}</span>
+          <span className="text-acc">{(failoverPrompt.reason === '0peers' || failoverPrompt.reason === 'zero-peers') ? t('failover_title_peers') : t('failover_title_stall')}</span>
           <span className="max-w-[220px] truncate text-fg2">
             {t('failover_next', { name: failoverPrompt.candidate.stream?.name || failoverPrompt.candidate.stream?.title || failoverPrompt.candidate.addon?.name || 'Source' })}
           </span>
@@ -1448,8 +1494,9 @@ export function TheaterApp() {
       {/* 6. Proportional Decluttered Top Glass Bar */}
       {!miniOn && !focusMode ? (
         <header
+          onMouseDown={startWinDrag}
           onDoubleClick={(e) => { if (e.target === e.currentTarget && !isFullscreen) api.invoke('win:maximize').catch(() => {}); }}
-          className={`shade-t app-drag absolute inset-x-0 top-0 z-20 flex items-center gap-[clamp(10px,1vw,18px)] px-[clamp(18px,2.2vw,36px)] pb-[clamp(24px,3vh,44px)] pt-[clamp(14px,1.8vh,28px)] transition-opacity duration-300 ${!isFullscreen ? 'pe-[148px]' : ''} ${idle && !drawer ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+          className={`shade-t absolute inset-x-0 top-0 z-20 flex items-center gap-[clamp(10px,1vw,18px)] px-[clamp(18px,2.2vw,36px)] pb-[clamp(24px,3vh,44px)] pt-[clamp(14px,1.8vh,28px)] transition-opacity duration-300 ${idle && !drawer ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
         >
           <button onClick={() => cmd('close')} data-tip={t('th_close_player')} className="app-no-drag grid size-[clamp(36px,2.7vw,46px)] flex-none place-items-center rounded-full bg-black/50 text-[#f5efe6] ring-1 ring-white/20 backdrop-blur-xl hover:bg-white/20 hover:text-acc">
             <X size={19} strokeWidth={2} />
@@ -1465,6 +1512,7 @@ export function TheaterApp() {
             )}
             <div className="flex flex-wrap items-center gap-2 text-[clamp(11px,0.85vw,13px)] text-fg2">
               {resTag ? <span dir="ltr" className="rounded bg-white/15 px-1.5 py-0.5 font-mono font-semibold">{resTag}</span> : null}
+              {html5State.active ? <span dir="ltr" className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono font-semibold text-emerald-300 ring-1 ring-emerald-400/35">HLSv2</span> : null}
               {hwTag ? <span dir="ltr" className="rounded bg-white/15 px-1.5 py-0.5 font-mono">{hwTag}</span> : null}
               {vsr ? <span className="rounded bg-acc/20 px-1.5 py-0.5 font-mono font-semibold text-acc">RTX VSR</span> : null}
               {incognito ? <span className="inline-flex items-center gap-1 rounded bg-purple-500/25 px-1.5 py-0.5 text-[11px] font-bold text-purple-200 ring-1 ring-purple-400/40"><EyeOff size={11} />{t('th_incognito_badge')}</span> : null}
@@ -1522,6 +1570,7 @@ export function TheaterApp() {
               <MessageSquare size={17} strokeWidth={2} />
             </button>
           ) : null}
+          {winControlsEl}
         </header>
       ) : null}
 

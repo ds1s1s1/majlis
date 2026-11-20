@@ -46,63 +46,72 @@ function collectFiles(dir, prefix = '') {
 }
 
 const files = collectFiles(rootDir);
-const localChunks = [];
+const stubBuf = fs.readFileSync(baseExe);
+fs.mkdirSync(path.dirname(outExe), { recursive: true });
+const fd = fs.openSync(outExe, 'w');
 const cdRecords = [];
 let offset = 0;
 
-for (const { abs, rel } of files) {
-  const raw = fs.readFileSync(abs);
-  const crc = crc32(raw);
-  const compressed = zlib.deflateRawSync(raw, { level: 6 });
-  const useDeflate = compressed.length < raw.length;
-  const payload = useDeflate ? compressed : raw;
-  const method = useDeflate ? 8 : 0;
-  const nameBuf = Buffer.from(rel, 'utf8');
+try {
+  fs.writeSync(fd, stubBuf);
 
-  const lfh = Buffer.alloc(30);
-  lfh.writeUInt32LE(0x04034b50, 0);
-  lfh.writeUInt16LE(20, 4);
-  lfh.writeUInt16LE(0x0800, 6); // UTF-8 filename flag
-  lfh.writeUInt16LE(method, 8);
-  lfh.writeUInt32LE(crc, 14);
-  lfh.writeUInt32LE(payload.length, 18);
-  lfh.writeUInt32LE(raw.length, 22);
-  lfh.writeUInt16LE(nameBuf.length, 26);
+  for (const { abs, rel } of files) {
+    const raw = fs.readFileSync(abs);
+    const crc = crc32(raw);
+    const compressed = zlib.deflateRawSync(raw, { level: 6 });
+    const useDeflate = compressed.length < raw.length;
+    const payload = useDeflate ? compressed : raw;
+    const method = useDeflate ? 8 : 0;
+    const nameBuf = Buffer.from(rel, 'utf8');
 
-  localChunks.push(lfh, nameBuf, payload);
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4);
+    lfh.writeUInt16LE(0x0800, 6); // UTF-8 filename flag
+    lfh.writeUInt16LE(method, 8);
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(payload.length, 18);
+    lfh.writeUInt32LE(raw.length, 22);
+    lfh.writeUInt16LE(nameBuf.length, 26);
 
-  const cdh = Buffer.alloc(46);
-  cdh.writeUInt32LE(0x02014b50, 0);
-  cdh.writeUInt16LE(20, 4);
-  cdh.writeUInt16LE(20, 6);
-  cdh.writeUInt16LE(0x0800, 8);
-  cdh.writeUInt16LE(method, 10);
-  cdh.writeUInt32LE(crc, 16);
-  cdh.writeUInt32LE(payload.length, 20);
-  cdh.writeUInt32LE(raw.length, 24);
-  cdh.writeUInt16LE(nameBuf.length, 28);
-  cdh.writeUInt32LE(offset, 42);
+    fs.writeSync(fd, lfh);
+    fs.writeSync(fd, nameBuf);
+    fs.writeSync(fd, payload);
 
-  cdRecords.push(cdh, nameBuf);
-  offset += lfh.length + nameBuf.length + payload.length;
+    const cdh = Buffer.alloc(46);
+    cdh.writeUInt32LE(0x02014b50, 0);
+    cdh.writeUInt16LE(20, 4);
+    cdh.writeUInt16LE(20, 6);
+    cdh.writeUInt16LE(0x0800, 8);
+    cdh.writeUInt16LE(method, 10);
+    cdh.writeUInt32LE(crc, 16);
+    cdh.writeUInt32LE(payload.length, 20);
+    cdh.writeUInt32LE(raw.length, 24);
+    cdh.writeUInt16LE(nameBuf.length, 28);
+    cdh.writeUInt32LE(offset, 42);
+
+    cdRecords.push(cdh, nameBuf);
+    offset += lfh.length + nameBuf.length + payload.length;
+  }
+
+  const cdBuf = Buffer.concat(cdRecords);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+
+  const zipLength = BigInt(offset) + BigInt(cdBuf.length) + BigInt(eocd.length);
+  const trailer = Buffer.alloc(24);
+  trailer.writeBigUInt64LE(BigInt(stubBuf.length), 0);
+  trailer.writeBigUInt64LE(zipLength, 8);
+  trailer.write('MJLSSFX1', 16, 'ascii');
+
+  fs.writeSync(fd, cdBuf);
+  fs.writeSync(fd, eocd);
+  fs.writeSync(fd, trailer);
+  console.log(`Built ${outExe} (${files.length} files, ${Math.round(Number(zipLength) / (1024 * 1024))} MB ZIP payload)`);
+} finally {
+  fs.closeSync(fd);
 }
-
-const cdBuf = Buffer.concat(cdRecords);
-const eocd = Buffer.alloc(22);
-eocd.writeUInt32LE(0x06054b50, 0);
-eocd.writeUInt16LE(files.length, 8);
-eocd.writeUInt16LE(files.length, 10);
-eocd.writeUInt32LE(cdBuf.length, 12);
-eocd.writeUInt32LE(offset, 16);
-
-const zipBuf = Buffer.concat([...localChunks, cdBuf, eocd]);
-const stubBuf = fs.readFileSync(baseExe);
-
-const trailer = Buffer.alloc(24);
-trailer.writeBigUInt64LE(BigInt(stubBuf.length), 0);
-trailer.writeBigUInt64LE(BigInt(zipBuf.length), 8);
-trailer.write('MJLSSFX1', 16, 'ascii');
-
-fs.mkdirSync(path.dirname(outExe), { recursive: true });
-fs.writeFileSync(outExe, Buffer.concat([stubBuf, zipBuf, trailer]));
-console.log(`Built ${outExe} (${files.length} files, ${Math.round(zipBuf.length / (1024 * 1024))} MB ZIP payload)`);

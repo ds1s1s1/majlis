@@ -9,6 +9,20 @@ const RELEASES = 'https://api.github.com/repos/FFmpeg-Builds/FFmpeg-Builds/relea
 
 const works = (exe) => new Promise((res) => execFile(exe, ['-hide_banner', '-version'], { windowsHide: true, timeout: 8000 }, (e) => res(!e)));
 
+function sidecarFfmpegCands(exeName, custom, dataDir, resources) {
+  const cands = [
+    custom && path.basename(String(custom)).toLowerCase() === 'ffmpeg.exe' && exeName !== 'ffmpeg.exe'
+      ? path.join(path.dirname(custom), exeName)
+      : custom,
+    resources && path.join(resources, 'sidecars', 'ffmpeg', exeName),
+    resources && path.join(resources, 'ffmpeg', exeName),
+    path.join(__dirname, '../../../engine/vendor/ffmpeg', exeName),
+    dataDir && exeName === 'ffmpeg.exe' ? findIn(path.join(dataDir, 'ffmpeg')) : null,
+    exeName.replace(/\.exe$/i, ''),
+  ];
+  return cands;
+}
+
 function findIn(dir) {
   try {
     // newest build first (an older one may still be sitting next to it)
@@ -22,8 +36,16 @@ function findIn(dir) {
 }
 
 async function resolveFfmpeg({ custom, dataDir, resources }) {
-  const cands = [custom, resources && path.join(resources, 'ffmpeg', 'ffmpeg.exe'), findIn(path.join(dataDir, 'ffmpeg')), 'ffmpeg'];
-  for (const c of cands) if (c && (c === 'ffmpeg' || fs.existsSync(c)) && (await works(c))) return c;
+  for (const c of sidecarFfmpegCands('ffmpeg.exe', custom, dataDir, resources)) {
+    if (c && (c === 'ffmpeg' || fs.existsSync(c)) && (await works(c))) return c;
+  }
+  return null;
+}
+
+async function resolveFfprobe({ custom, dataDir, resources }) {
+  for (const c of sidecarFfmpegCands('ffprobe.exe', custom, dataDir, resources)) {
+    if (c && (c === 'ffprobe' || fs.existsSync(c)) && (await works(c))) return c;
+  }
   return null;
 }
 
@@ -66,4 +88,4 @@ async function downloadFfmpeg(dataDir, onProgress) {
   return exe;
 }
 
-module.exports = { resolveFfmpeg, downloadFfmpeg };
+module.exports = { resolveFfmpeg, resolveFfprobe, downloadFfmpeg };

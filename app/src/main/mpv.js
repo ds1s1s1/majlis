@@ -9,18 +9,23 @@ const path = require('path');
 const fs = require('fs');
 
 function mpvPath() {
-  const packaged = path.join(process.resourcesPath || '', 'mpv', 'mpv.exe');
-  if (fs.existsSync(packaged)) return packaged;
-  const dev = path.join(__dirname, '../../../engine/vendor/mpv/mpv.exe');
-  return fs.existsSync(dev) ? dev : null;
+  for (const p of [
+    process.resourcesPath ? path.join(process.resourcesPath, 'sidecars', 'mpv', 'mpv.exe') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'mpv', 'mpv.exe') : null,
+    path.join(__dirname, '../../../engine/vendor/mpv/mpv.exe'),
+  ]) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
 }
 
 function subFontsDir() {
   const cands = [
-    path.join(process.resourcesPath || '', 'fonts'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'fonts') : null,
+    path.join(__dirname, '../../../engine/vendor/fonts'),
     path.join(__dirname, '../../../engine/vendor/mpv/fonts'),
     path.join(__dirname, '../renderer/fonts'),
-  ];
+  ].filter(Boolean);
   for (const dir of cands) {
     try {
       if (fs.existsSync(dir) && fs.readdirSync(dir).some((f) => /\.(ttf|otf|ttc)$/i.test(f))) return dir;
@@ -32,7 +37,8 @@ function subFontsDir() {
 function findShadersDir(extraDir = null) {
   const cands = [
     extraDir,
-    path.join(process.resourcesPath || '', 'mpv', 'shaders'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'sidecars', 'mpv', 'shaders') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'mpv', 'shaders') : null,
     path.join(__dirname, '../../../engine/vendor/mpv/shaders'),
   ].filter(Boolean);
   for (const dir of cands) {
@@ -46,7 +52,8 @@ function findShadersDir(extraDir = null) {
 function listInstalledShaders(userDataDir = null) {
   const dirs = [
     userDataDir ? path.join(userDataDir, 'shaders') : null,
-    path.join(process.resourcesPath || '', 'mpv', 'shaders'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'sidecars', 'mpv', 'shaders') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'mpv', 'shaders') : null,
     path.join(__dirname, '../../../engine/vendor/mpv/shaders'),
   ].filter(Boolean);
   const files = [];

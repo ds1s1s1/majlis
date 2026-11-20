@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.1.1-beta",
+  "version": "0.1.2-beta",
   "description": "Cinema-first media center with embedded libmpv, Stremio addons, Watch Party, and ultra-low-latency Co-op gaming.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
@@ -10,8 +10,11 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test --test-timeout=20000 test/*.test.js",
-    "fonts": "node scripts/copy-fonts.js",
-    "dist": "npm run media && npm run core && npm run mpv && npm run ytdlp && electron-builder --win dir",
+    "fonts": "node scripts/fetch-fonts.js",
+    "ffmpeg": "node scripts/fetch-ffmpeg.js",
+    "stremio": "node scripts/fetch-stremio-server.js",
+    "sidecars": "npm run mpv && npm run ytdlp && npm run ffmpeg && npm run stremio && npm run fonts",
+    "dist": "npm run media && npm run core && npm run sidecars && electron-builder --win dir",
     "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\"",
     "verify-release": "node scripts/check-release.js",
     "mpv": "node scripts/fetch-mpv.js",
@@ -35,7 +38,9 @@
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^38.0.0",
     "electron-builder": "^26.0.0",
+    "hls.js": "^1.7.4",
     "lucide-react": "^1.76.0",
+    "mpegts.js": "^1.8.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwindcss": "^4.3.5",
@@ -57,26 +62,55 @@
         "from": "../engine/target/release",
         "to": "engine",
         "filter": [
-          "majlis-engine.exe",
-          "majlis-media.exe"
+          "majlis-engine.exe"
+        ]
+      },
+      {
+        "from": "../engine/vendor/stremio",
+        "to": "sidecars/stremio",
+        "filter": [
+          "node.exe",
+          "server.js",
+          "stremio-launcher.js",
+          "LICENSE-*.txt"
         ]
       },
       {
         "from": "../engine/vendor/mpv",
-        "to": "mpv",
+        "to": "sidecars/mpv",
         "filter": [
           "libmpv-2.dll",
+          "mpv.exe",
           "d3dcompiler_43.dll",
           "mpv/fonts.conf",
           "LICENSE-mpv.txt"
         ]
       },
       {
+        "from": "../engine/vendor/ffmpeg",
+        "to": "sidecars/ffmpeg",
+        "filter": [
+          "ffmpeg.exe",
+          "ffprobe.exe",
+          "*.dll",
+          "LICENSE*.txt"
+        ]
+      },
+      {
         "from": "../engine/vendor/ytdlp",
-        "to": "ytdlp",
+        "to": "sidecars/ytdlp",
         "filter": [
           "yt-dlp.exe",
           "LICENSE-ytdlp.txt"
+        ]
+      },
+      {
+        "from": "../engine/vendor/fonts",
+        "to": "fonts",
+        "filter": [
+          "*.ttf",
+          "*.otf",
+          "OFL.txt"
         ]
       }
     ],

@@ -163,7 +163,7 @@ export function PlaybackPage({ pageId }: { pageId: SettingsPageId }) {
             ]}
           />
           <ToggleRow label={ar ? 'التشغيل عبر مشغل mpv الخارجي الخاص بي' : 'Play in my own mpv'} checked={p.externalMpv} onChange={(v) => update((s) => { s.playback.externalMpv = v; })} />
-          <ToggleRow label={ar ? 'دمج نافذة mpv داخل تطبيق مجلس' : 'Embed mpv inside App window'} checked={p.embedMpv} onChange={(v) => update((s) => { s.playback.embedMpv = v; })} />
+          <ToggleRow label={ar ? 'التحويل التلقائي إلى HTML5 / HLSv2 عند تعثر الكوديك' : 'Automatic HLSv2 / HTML5 codec fallback'} checked={p.hlsFallback} onChange={(v) => update((s) => { s.playback.hlsFallback = v; })} />
         </SettingSection>
 
         <SettingSection title="HDR">

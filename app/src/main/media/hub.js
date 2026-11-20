@@ -28,7 +28,7 @@ const ytdlp = require('./ytdlp');
 const { Notifications, CHECK_INTERVAL, dispatchNotificationWebhooks } = require('./notifications');
 const homeServers = require('./home-servers');
 const { searchExternalSubtitles } = require('./sub-search');
-const { DEFAULT_ADDONS, exePath: mediaExePath } = require('../mediasvc');
+const { DEFAULT_ADDONS, sidecarPaths } = require('../stremio-server');
 const { libmpvPath } = require('../libmpv');
 const { findExternalPlayer, listInstalledShaders, mpvPath } = require('../mpv');
 const { encryptProfileBundle, decryptProfileBundle } = require('../profile-bundle');
@@ -1007,14 +1007,21 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     };
   });
   h('p2p-status', async () => {
-    let port = null;
-    try { if (svc?.base) port = Number(new URL(svc.base).port) || null; } catch {}
+    const stInfo = svc?.status?.() || {};
+    let port = stInfo.port || null;
+    if (!port) {
+      try { if (svc?.base) port = Number(new URL(svc.base).port) || null; } catch {}
+    }
     const act = await svc?.active?.().catch(() => null);
     return {
       running: !!svc?.p,
+      ready: !!svc?.base,
       port,
+      base: svc?.base || null,
+      ffmpeg: !!stInfo.ffmpeg,
+      node: !!stInfo.node,
       activeFiles: Array.isArray(act?.files) ? act.files.length : 0,
-      cacheDir: st.get('cachePath') || '',
+      cacheDir: st.get('cachePath') || stInfo.cacheDir || '',
     };
   });
 
@@ -1152,7 +1159,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
   });
 
   h('updater-check', async ({ betaChannel = false } = {}) => {
-    const currentVersion = app?.getVersion?.() || '0.1.1-beta';
+    const currentVersion = app?.getVersion?.() || '0.1.2-beta';
     try {
       const res = await updater.checkForUpdates({ currentVersion, betaChannel: !!betaChannel });
       return { ...res, packaged: !!app?.isPackaged };
@@ -1229,15 +1236,26 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
         };
       })()),
       cap((async () => {
-        const exe = mediaExePath();
-        const exists = !!exe && fs.existsSync(exe);
+        const sp = sidecarPaths(ffPath || null);
+        const exists = !!(sp.nodeExe && sp.serverJs && sp.launcherJs);
         const act = svc?.p ? await svc.active().catch(() => null) : null;
         return {
           id: 'p2p',
-          status: !exists ? 'fail' : (svc?.p && !act) ? 'warn' : 'ok',
-          summary: !exists ? 'majlis-media.exe missing' : svc?.p ? `Running (${Array.isArray(act?.files) ? act.files.length : 0} active)` : 'Standby (on-demand)',
+          status: !exists ? 'fail' : (svc?.p && !svc?.base) ? 'warn' : 'ok',
+          summary: !exists
+            ? 'stremio-server sidecar missing'
+            : svc?.p
+              ? `Running :${svc?.port || '?'} (${Array.isArray(act?.files) ? act.files.length : 0} active)`
+              : 'Standby (on-demand)',
           fixId: 'restart_media_svc',
-          details: { exists, running: !!svc?.p, activeFiles: Array.isArray(act?.files) ? act.files.length : 0 },
+          details: {
+            exists,
+            running: !!svc?.p,
+            port: svc?.port || null,
+            node: !!sp.nodeExe,
+            ffmpeg: !!sp.ffmpegExe,
+            activeFiles: Array.isArray(act?.files) ? act.files.length : 0,
+          },
         };
       })()),
       cap((async () => {
@@ -1319,7 +1337,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     ];
     return scrubDiagnosticsReport({
       checkedAt: Date.now(),
-      version: app?.getVersion?.() || '0.1.1-beta',
+      version: app?.getVersion?.() || '0.1.2-beta',
       platform: process.platform,
       arch: process.arch,
       profile: profile(),
@@ -1392,6 +1410,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     cinemaOnboarded: 'boolean', cinemaHideWatched: 'boolean', cinemaHideUnreleased: 'boolean', cinemaAutoPlayTrailer: 'boolean',
     playerExternalMpv: 'boolean', playerHwAccel: 'boolean', playerHdr: 'boolean', playerToneMapping: 'string',
     playerBufferSize: 'string', playerAnime4k: 'boolean', playerAnime4kMode: 'string', playerCustomMpvConf: 'string',
+    motionInterpolation: 'boolean', playerHlsFallback: 'boolean', playerRenderer: 'string',
     safetyFilter: 'string', resultOrder: 'string', sourceWaitSec: 'number',
     autoSkipIntros: 'boolean', autoSkipRecaps: 'boolean', autoSkipCredits: 'boolean', showSkipButton: 'boolean',
     autoSkipStalled: 'boolean', cinemaPerfMode: 'boolean',

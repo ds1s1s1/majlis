@@ -17,7 +17,7 @@ const ALLOWED_INVOKE = new Set([
   'player:cmd', 'player:next', 'quit', 'react', 'ready:ack', 'ready:check', 'ready:go', 'replay:save',
   'routerlock', 'settings', 'shot', 'show-file', 'sources', 'state', 'vigem',
   'vote:cast', 'vote:clear', 'vote:nominate', 'vote:room', 'vote:winner',
-  'win:close', 'win:is-maximized', 'win:maximize', 'win:minimize', 'windows',
+  'win:close', 'win:is-maximized', 'win:maximize', 'win:minimize', 'win:start-drag', 'windows',
   // Backup & Clipboard/Export helpers
   'backup:create', 'backup:delete', 'backup:list', 'backup:mirror', 'backup:open-dir', 'backup:restore',
   'clipboard:write-image', 'file:save-png',

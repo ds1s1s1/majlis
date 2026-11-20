@@ -141,7 +141,7 @@ export function SystemPage({ pageId }: { pageId: SettingsPageId }) {
         <DropdownRow label={ar ? 'الاحتفاظ بالملفات المؤقتة لمدة' : 'Keep cached files for'} value={sys.keepCachedDays} options={[{ value: 1, label: '1 day' }, { value: 3, label: '3 days' }, { value: 7, label: '7 days' }, { value: 0, label: 'Forever' }]} onChange={(v) => update((s) => { s.system.keepCachedDays = v; })} />
         <DropdownRow label={ar ? 'الحد الأقصى للمساحة (LRU)' : 'Keep at most (LRU cap)'} value={sys.maxCacheGb} options={[{ value: 5, label: '5 GB' }, { value: 10, label: '10 GB' }, { value: 25, label: '25 GB' }, { value: 0, label: 'Unlimited' }]} onChange={(v) => update((s) => { s.system.maxCacheGb = v; })} />
         <ToggleRow label={ar ? 'حذف الكاش فور الانتهاء من المشاهدة' : 'Delete after I finish watching'} checked={sys.deleteCacheAfterWatch} onChange={(v) => update((s) => { s.system.deleteCacheAfterWatch = v; })} />
-        <InputRow label={ar ? 'مسار مجلد الكاش' : 'Cache location'} value={sys.cachePath} placeholder={cacheStats?.streamDir || '%TEMP%\\majlis-media'} onChange={(v) => update((s) => { s.system.cachePath = v; })} />
+        <InputRow label={ar ? 'مسار مجلد الكاش' : 'Cache location'} value={sys.cachePath} placeholder={cacheStats?.streamDir || '%TEMP%\\majlis-stremio-cache'} onChange={(v) => update((s) => { s.system.cachePath = v; })} />
         <ActionRow
           label={ar ? 'الملفات المؤقتة' : 'Temporary stream files'}
           description={`${fmtBytes(streamBytes)}${cacheStats?.streamDir ? ` · ${cacheStats.streamDir}` : ''}`}

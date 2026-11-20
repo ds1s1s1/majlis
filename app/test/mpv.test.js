@@ -38,19 +38,20 @@ test('mpv args: VSR forces d3d11va, default high-quality + bt.2446a, 150/50MiB c
   assert.ok(base.includes('--framedrop=vo'));
 
   const embOpts = Object.fromEntries(buildLibMpvOptions({ vsr: false, decoderMode: 1, displayFps: 144 }));
-  assert.strictEqual(embOpts.vo, 'libmpv');
-  assert.strictEqual(embOpts.hwdec, 'd3d11va-copy');
+  assert.strictEqual(embOpts.vo, 'gpu-next');
+  assert.strictEqual(embOpts['gpu-api'], 'd3d11');
+  assert.strictEqual(embOpts['d3d11-flip'], 'yes');
+  assert.strictEqual(embOpts.hwdec, 'auto-safe');
   assert.strictEqual(embOpts.profile, 'high-quality');
-  assert.strictEqual(embOpts['tone-mapping'], 'bt.2446a');
+  assert.strictEqual(embOpts['tone-mapping'], 'spline');
   assert.strictEqual(embOpts['video-sync'], 'audio');
-  assert.strictEqual(embOpts.interpolation, undefined);
-  assert.strictEqual(embOpts.tscale, undefined);
-  assert.strictEqual(embOpts['display-fps-override'], undefined);
-  assert.strictEqual(embOpts['target-colorspace-hint'], 'no');
-  assert.strictEqual(embOpts['target-prim'], 'bt.709');
-  assert.strictEqual(embOpts['target-trc'], 'srgb');
-  assert.strictEqual(embOpts['sub-pos'], '94');
+  assert.strictEqual(embOpts.interpolation, 'no');
+  assert.strictEqual(embOpts['demuxer-max-bytes'], '128MiB');
+  assert.strictEqual(embOpts['demuxer-max-back-bytes'], '32MiB');
+  assert.strictEqual(embOpts['sub-font'], 'IBM Plex Sans Arabic');
+  assert.strictEqual(embOpts['sub-pos'], '93');
   assert.strictEqual(embOpts['sub-ass-shaper'], 'complex');
+  assert.ok(!embOpts['stream-lavf-o'].includes('reconnect_streamed'));
 
   const vsr = buildMpvArgs({ vsr: true, spdif: true, fontsDir: 'C:\\fonts' });
   assert.ok(vsr.includes('--hwdec=d3d11va'), 'VSR needs d3d11va frames');
@@ -108,40 +109,32 @@ test('mpv: plays, nudges speed, toggles night audio filter, seeks, and comes bac
   }
 });
 
-test('libmpv embedded MpvPlayer: renders non-black oriented frames, emits property changes, and destroys cleanly', {
-  skip: !(core?.MpvPlayer && libmpvPath()) && 'native MpvPlayer or libmpv-2.dll unavailable',
+test('libmpv NativeMpvPlayer + proc_guard: plays headless source, emits property changes, pauses, and destroys cleanly', {
+  skip: !(core?.NativeMpvPlayer && libmpvPath()) && 'native NativeMpvPlayer or libmpv-2.dll unavailable',
 }, async () => {
-  const frames = [];
-  const p = new core.MpvPlayer(
+  assert.strictEqual(typeof core.adoptProcess, 'function');
+  assert.strictEqual(core.detectDisplayHdr('0'), false);
+
+  const props = {};
+  const p = new core.NativeMpvPlayer(
     libmpvPath(),
-    [['vo', 'libmpv'], ['ao', 'null'], ['hwdec', 'no'], ['idle', 'yes'], ['msg-level', 'all=warn']],
-    ['time-pos', 'video-params', 'duration'],
-    128,
-    128,
-    () => {},
-    (w, h, fmt, buf) => {
-      if (frames.length < 4) {
-        let nz = 0;
-        for (let i = 0; i < buf.length; i++) if (buf[i] !== 0) nz++;
-        let top = 0, bot = 0;
-        if (fmt === 'nv12') {
-          for (let x = 0; x < w; x++) top += buf[x];
-          for (let x = 0; x < w; x++) bot += buf[(h - 1) * w + x];
-        } else {
-          for (let x = 0; x < w; x++) top += buf[x * 4 + 1];
-          for (let x = 0; x < w; x++) bot += buf[((h - 1) * w + x) * 4 + 1];
-        }
-        frames.push({ w, h, fmt, nz, top: top / w, bot: bot / w });
-      }
-      p.ackFrame();
+    [['vo', 'null'], ['ao', 'null'], ['hwdec', 'no'], ['idle', 'yes'], ['msg-level', 'all=warn']],
+    ['time-pos', 'duration', 'pause'],
+    '0',
+    '0',
+    (jsonStr) => {
+      try {
+        const ev = JSON.parse(jsonStr);
+        if (ev.event === 'property-change') props[ev.name] = ev.data;
+      } catch {}
     },
   );
   try {
-    p.command(['loadfile', "av://lavfi:color=c=black:s=128x128:d=3,geq=lum='255*(H-Y)/H':cb=128:cr=128"]);
-    await until(() => frames.length >= 3, 8000);
-    const f = frames[frames.length - 1];
-    assert.ok(f.nz > 0, 'frame buffer should be non-black');
-    assert.ok(f.top > 200 && f.bot < 55, `expected top bright (>200) & bot dark (<55), got top=${f.top}, bot=${f.bot}`);
+    p.command(['loadfile', "av://lavfi:color=c=black:s=128x128:d=4"]);
+    await until(() => (props['time-pos'] || 0) > 0.15, 8000);
+    p.setProperty('pause', 'yes');
+    assert.strictEqual(p.getProperty('pause'), 'yes');
+    p.releaseMedia();
   } finally {
     p.destroy();
   }

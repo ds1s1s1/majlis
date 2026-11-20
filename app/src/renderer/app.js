@@ -1489,12 +1489,8 @@ window.addEventListener('message', (e) => {
   if (e.source !== window) return;
   if (e.data === 'majlis-port' && e.ports[0]) {
     S.port = e.ports[0];
-    const sendThAck = () => { try { S.port?.postMessage({ t: 'thv-ack' }); } catch {} };
-    window.__majlisThAck = sendThAck;
-    window.__majlisThSetAck?.(sendThAck);
     S.port.onmessage = (ev) => {
       const d = ev.data;
-      if (d.t === 'thv' || d.t === 'thv-clear') { window.__majlisThFrame?.(d); return; }
       if (S.player) S.player.onMessage(d);
       else if (d.t === 'vo' && S.hub) S.hub.play(d.idx, d.data);
     };

@@ -39,6 +39,7 @@ class Helper extends EventEmitter {
     this.stopped = false;
     const p = spawn(exe, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
     this.p = p;
+    try { if (p.pid) require('./net').core?.adoptProcess?.(p.pid); } catch {}
     p.stdout.on('data', (d) => this._feed(d));
     p.on('exit', (code) => {
       if (this.p !== p) return;

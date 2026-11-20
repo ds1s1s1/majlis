@@ -85,7 +85,7 @@ export interface SettingsState {
     keepSameSourceNext: boolean;
     downloadWholeFile: boolean;
     externalMpv: boolean;
-    embedMpv: boolean;
+    hlsFallback: boolean;
     hdrMode: 'sdr' | 'hdr-window' | 'hdr-embedded';
     displayPanel: 'auto' | 'oled' | 'lcd';
     rtxVideoHdr: boolean;
@@ -589,7 +589,7 @@ export function createDefaultSettings(): SettingsState {
       keepSameSourceNext: true,
       downloadWholeFile: false,
       externalMpv: false,
-      embedMpv: true,
+      hlsFallback: true,
       hdrMode: 'sdr',
       displayPanel: 'auto',
       rtxVideoHdr: false,
@@ -995,6 +995,9 @@ function scheduleBackendSync(next: SettingsState) {
       playerAnime4k: next.playback.anime4kEnabled,
       playerAnime4kMode: next.playback.anime4kMode,
       playerCustomMpvConf: next.playback.customMpvConf,
+      motionInterpolation: !!next.playback.motionSmoothing,
+      playerHlsFallback: next.playback.hlsFallback !== false,
+      playerRenderer: next.playback.renderer || 'gpu-next',
       subLang2: LANG_TO_ISO3[sub2Name] || 'eng',
       subFilterSdh: next.languages.subFilterSdh,
       subAutoSync: next.languages.subAutoSync,
@@ -1089,6 +1092,9 @@ export const useSettingsStore = create<SettingsStore>()(
               next.playback.anime4kMode = prefs.playerAnime4kMode as SettingsState['playback']['anime4kMode'];
             }
             if (typeof prefs.playerCustomMpvConf === 'string' && prefs.playerCustomMpvConf) next.playback.customMpvConf = prefs.playerCustomMpvConf;
+            if (typeof prefs.motionInterpolation === 'boolean') next.playback.motionSmoothing = prefs.motionInterpolation;
+            if (typeof prefs.playerHlsFallback === 'boolean') next.playback.hlsFallback = prefs.playerHlsFallback;
+            if (prefs.playerRenderer === 'gpu' || prefs.playerRenderer === 'gpu-next') next.playback.renderer = prefs.playerRenderer;
             if (typeof prefs.subLang2 === 'string' && ISO_TO_LANG[prefs.subLang2]) {
               next.languages.secondSubtitleLang = ISO_TO_LANG[prefs.subLang2];
             }

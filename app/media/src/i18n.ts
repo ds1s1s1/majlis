@@ -325,6 +325,8 @@ export const STR = {
     fail_bad: 'تعذر إتمام الاتصال بالجلسة',
     upd_available_banner: 'يتوفر إصدار جديد: {tag}',
     upd_view_update: 'عرض التحديث',
+    th_win_min: 'تصغير',
+    th_win_max: 'تكبير / استعادة',
   },
   en: {
     home: 'Home', discover: 'Discover', catalogs: 'Catalogs', movies: 'Movies', shows: 'Shows', anime: 'Anime', calendar: 'Calendar',
@@ -651,6 +653,8 @@ export const STR = {
     fail_bad: 'Session rejected the connection request',
     upd_available_banner: 'New update available: {tag}',
     upd_view_update: 'View Update',
+    th_win_min: 'Minimize',
+    th_win_max: 'Maximize / Restore',
   },
 } as const;
 

@@ -1,6 +1,5 @@
 // Entry: app.js imports this module and mounts Cinema into the page (see mountMedia in app.js).
 import './styles.css';
-import './theater/frameBus';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { HostCtx, bus, type HostApi, type Route, type Tab } from './host';

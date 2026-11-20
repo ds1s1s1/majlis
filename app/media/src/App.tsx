@@ -29,7 +29,6 @@ import { Friends } from './pages/Friends';
 import { Party } from './pages/Party';
 import { Person } from './pages/Person';
 import { EntityBrowse } from './pages/EntityBrowse';
-import { TheaterApp } from './theater/TheaterApp';
 import { CommandPalette } from './ui/CommandPalette';
 import { JoinFriendModal } from './ui/JoinFriendModal';
 import { PosterContextMenuHost } from './ui/PosterContextMenu';
@@ -604,7 +603,6 @@ export function App() {
           </div>
         ) : null}
         {prefs && prefs.cinemaOnboarded !== true ? <Onboarding /> : null}
-        {host.theaterOpen ? <div className="fixed inset-0 z-50 bg-black"><TheaterApp /></div> : null}
       </div>
     </NavCtx.Provider>
   );

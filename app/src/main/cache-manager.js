@@ -84,7 +84,7 @@ class CacheManager {
 
   streamCacheDir() {
     const s = this.getSettings() || {};
-    const def = path.join(this.tempDir, 'majlis-media');
+    const def = path.join(this.tempDir, 'majlis-stremio-cache');
     return resolveEnvPath(s.cachePath, def);
   }
 
@@ -98,8 +98,14 @@ class CacheManager {
       }
     } catch {}
 
+    const streamDir = this.streamCacheDir();
+    const legacyDir = path.join(this.tempDir, 'majlis-media');
+    const streamDirs = normPath(legacyDir) !== normPath(streamDir) && fs.existsSync(legacyDir)
+      ? [streamDir, legacyDir]
+      : [streamDir];
+
     return [
-      { id: 'stream', dirs: [this.streamCacheDir()] },
+      { id: 'stream', dirs: streamDirs },
       { id: 'http', dirs: [path.join(this.dataDir, 'media-cache')] },
       { id: 'shaders', dirs: [path.join(this.dataDir, 'shader-cache')] },
       { id: 'songs', dirs: [path.join(this.dataDir, 'media', 'friend-songs')] },
@@ -183,12 +189,18 @@ class CacheManager {
     let removedFiles = 0;
     let freedBytes = 0;
     const kept = [];
+    const streamDirNorm = normPath(this.streamCacheDir());
 
     // Phase 1: Age expiry (never evict protected/active files)
     for (const f of allFiles) {
       const isProt = this._isProtected(f.norm, prot);
       const expired = maxAgeMs > 0 && (nowMs - f.mtimeMs) > maxAgeMs;
-      const wipeTemp = aggressive && (f.norm.includes('majlis-media') || f.norm.includes('majlis-subs'));
+      const wipeTemp = aggressive && (
+        (streamDirNorm && f.norm.startsWith(streamDirNorm + path.sep))
+        || f.norm.includes('majlis-media')
+        || f.norm.includes('majlis-stremio-cache')
+        || f.norm.includes('majlis-subs')
+      );
       if (!isProt && (expired || wipeTemp)) {
         try {
           fs.unlinkSync(f.path);

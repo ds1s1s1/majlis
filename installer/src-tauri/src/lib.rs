@@ -165,7 +165,7 @@ fn detect_sfx_bounds(exe_path: &Path) -> Option<(u64, u64)> {
 
 fn stop_running_majlis_processes() {
     let mut killed_any = false;
-    for image in ["Majlis.exe", "majlis-engine.exe", "majlis-media.exe"] {
+    for image in ["Majlis.exe", "majlis-engine.exe", "majlis-media.exe", "mpv.exe"] {
         if let Ok(out) = Command::new("taskkill")
             .args(["/F", "/IM", image])
             .creation_flags(CREATE_NO_WINDOW)

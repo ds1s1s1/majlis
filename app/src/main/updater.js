@@ -100,7 +100,7 @@ async function fetchWithAllowlistedRedirects(initialUrl, fetchImpl, headers = {}
 }
 
 async function checkForUpdates({
-  currentVersion = '0.1.1-beta',
+  currentVersion = '0.1.2-beta',
   betaChannel = true,
   fetchImpl = fetch,
   releasesUrl = GITHUB_RELEASES_URL,
