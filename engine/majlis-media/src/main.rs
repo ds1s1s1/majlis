@@ -25,7 +25,7 @@ fn ok(key: &str, k: &str) -> bool { !k.is_empty() && k.len() == key.len() && k.b
 #[derive(Deserialize)]
 struct Play { #[serde(rename = "infoHash")] info_hash: String, #[serde(rename = "fileIdx", default)] file_idx: usize, #[serde(default)] sources: Vec<String> }
 #[derive(Deserialize)]
-struct Stop { #[serde(rename = "infoHash")] info_hash: String }
+struct Stop { #[serde(rename = "infoHash")] info_hash: String, #[serde(default)] delete: bool }
 
 async fn play(State(a): S, Path(k): Path<String>, Json(b): Json<Play>) -> Response {
     if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
@@ -37,7 +37,7 @@ async fn play(State(a): S, Path(k): Path<String>, Json(b): Json<Play>) -> Respon
 
 async fn stop(State(a): S, Path(k): Path<String>, Json(b): Json<Stop>) -> Response {
     if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
-    match a.torrents.stop(&b.info_hash).await { Ok(()) => Json(json!({ "ok": true })).into_response(), Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e) }
+    match a.torrents.stop_with_delete(&b.info_hash, b.delete).await { Ok(()) => Json(json!({ "ok": true })).into_response(), Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e) }
 }
 
 #[derive(serde::Deserialize)]
@@ -65,6 +65,12 @@ async fn downloads(State(a): S, Path(k): Path<String>) -> Response {
 async fn stats(State(a): S, Path(k): Path<String>) -> Response {
     if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
     Json(a.torrents.stats().await).into_response()
+}
+
+async fn active(State(a): S, Path(k): Path<String>) -> Response {
+    if !ok(&a.key, &k) { return err(StatusCode::FORBIDDEN, "key"); }
+    let files = a.torrents.active_files().await;
+    Json(json!({ "dir": a.torrents.cache_dir(), "files": files })).into_response()
 }
 
 // "bytes=a-b" / "bytes=a-" / "bytes=-n" -> (start, end inclusive)
@@ -103,16 +109,35 @@ fn new_key() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+fn resolve_cache_dir(args: &[String], env_dir: Option<String>) -> (std::path::PathBuf, bool) {
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--cache-dir" && i + 1 < args.len() {
+            let p = args[i + 1].trim();
+            if !p.is_empty() { return (std::path::PathBuf::from(p), true); }
+        } else if let Some(rest) = args[i].strip_prefix("--cache-dir=") {
+            let p = rest.trim();
+            if !p.is_empty() { return (std::path::PathBuf::from(p), true); }
+        }
+        i += 1;
+    }
+    if let Some(p) = env_dir.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        return (std::path::PathBuf::from(p), true);
+    }
+    (std::env::temp_dir().join("majlis-media"), false)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let dir = std::env::temp_dir().join("majlis-media");
-    // a fresh cache each run: whatever a previous run left half-downloaded is of no use
-    let _ = std::fs::remove_dir_all(&dir);
+    let args: Vec<String> = std::env::args().collect();
+    let (dir, _is_custom) = resolve_cache_dir(&args, std::env::var("MAJLIS_CACHE_DIR").ok());
+    let _ = std::fs::create_dir_all(&dir);
     let app = Arc::new(App { key: new_key(), torrents: torrent::Torrents::new(dir) });
     let router = Router::new()
         .route("/{k}/play", post(play))
         .route("/{k}/stop", post(stop))
         .route("/{k}/stats", get(stats))
+        .route("/{k}/active", get(active))
         .route("/{k}/download", post(download))
         .route("/{k}/download-cancel", post(cancel))
         .route("/{k}/downloads", get(downloads))
@@ -138,5 +163,11 @@ mod tests {
         assert_eq!(range(Some("bytes=100-"), 100), None);
         assert_eq!(range(Some("items=0-1"), 100), None);
         assert!(ok("abc", "abc") && !ok("abc", "abd") && !ok("abc", ""));
+        let (p1, c1) = resolve_cache_dir(&["majlis-media".into(), "--cache-dir".into(), "C:\\cache".into()], None);
+        assert!(c1 && p1 == std::path::PathBuf::from("C:\\cache"));
+        let (p2, c2) = resolve_cache_dir(&["majlis-media".into()], Some("C:\\env-cache".into()));
+        assert!(c2 && p2 == std::path::PathBuf::from("C:\\env-cache"));
+        let (_, c3) = resolve_cache_dir(&["majlis-media".into()], None);
+        assert!(!c3);
     }
 }

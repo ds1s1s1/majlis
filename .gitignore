@@ -13,3 +13,14 @@ engine/vendor/
 app/native/
 helper/
 app/src/renderer/media/
+installer/dist/
+installer/src-tauri/target/
+antigravity_*.txt
+SESSION_HANDOFF.md
+.agent/
+.claudeignore
+.clineignore
+.clinerules
+.vscode/
+AGENTS.md
+CLAUDE.md

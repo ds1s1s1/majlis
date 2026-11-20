@@ -65,6 +65,8 @@ const P = {
   chevl: '<path d="m14.5 6-6 6 6 6"/>',
   chevr: '<path d="m9.5 6 6 6-6 6"/>',
   sliders: '<path d="M5 6.5h9M18 6.5h1M5 12h3M12 12h7M5 17.5h11M20 17.5h-1"/><circle cx="16" cy="6.5" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17.5" r="2"/>',
+  list: '<path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r=".9" fill="currentColor"/><circle cx="4.8" cy="12" r=".9" fill="currentColor"/><circle cx="4.8" cy="17.5" r=".9" fill="currentColor"/>',
+  folder: '<path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.2h8A1.5 1.5 0 0 1 20.5 9.7v8.8A1.5 1.5 0 0 1 19 20H5a1.5 1.5 0 0 1-1.5-1.5z"/>',
   dice: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="8.5" cy="8.5" r=".9" fill="currentColor"/><circle cx="15.5" cy="15.5" r=".9" fill="currentColor"/><circle cx="12" cy="12" r=".9" fill="currentColor"/><circle cx="15.5" cy="8.5" r=".9" fill="currentColor"/><circle cx="8.5" cy="15.5" r=".9" fill="currentColor"/>',
 };
 

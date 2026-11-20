@@ -2,34 +2,16 @@
 <html lang="ar" dir="rtl" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; connect-src 'none'">
 <title>Majlis Theater</title>
-<link rel="stylesheet" href="styles.css">
+<style>
+  html { font-size: 14px; }
+  html, body, #theaterRoot { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent !important; }
+</style>
+<link rel="stylesheet" href="media/cinema.css">
 </head>
-<body class="theater">
-  <div class="th-top"><span class="th-title" id="title"></span><span class="th-party" id="pstate"></span><div class="grow"></div><button class="th-btn th-together" id="party" hidden></button><button class="th-btn" id="close" aria-label="close"></button></div>
-  <div class="th-center" id="center"></div>
-  <div class="th-said" id="said" hidden></div>
-  <div class="th-skip"><button class="th-pill" id="skipintro" hidden></button><button class="th-pill" id="nextep" hidden></button></div>
-  <div class="th-bottom">
-    <div class="th-seek" id="seek"><div class="th-cache" id="cache"></div><div class="th-fill" id="fill"></div><div class="th-knob" id="knob"></div><div class="th-tip" id="tip" hidden></div></div>
-    <div class="th-row">
-      <button class="th-btn" id="play"></button>
-      <button class="th-btn" id="back10"></button>
-      <button class="th-btn" id="fwd10"></button>
-      <span class="th-time mono" id="time">0:00 / 0:00</span>
-      <div class="grow"></div>
-      <span class="th-state" id="state"></span>
-      <button class="th-btn" id="vol"></button><input type="range" id="volume" min="0" max="150" value="100" class="th-range">
-      <button class="th-btn" id="said-btn"></button>
-      <button class="th-btn" id="subs"></button>
-      <button class="th-btn" id="audio"></button>
-      <button class="th-btn" id="night"></button>
-      <button class="th-btn" id="speed">1×</button>
-      <button class="th-btn" id="full"></button>
-    </div>
-  </div>
-  <div class="th-menu" id="menu" hidden></div>
-  <script type="module" src="theater.js"></script>
+<body class="bg-transparent select-none overflow-hidden text-[14px]">
+  <div id="theaterRoot"></div>
+  <script type="module" src="media/theater.js"></script>
 </body>
 </html>

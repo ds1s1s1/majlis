@@ -31,9 +31,9 @@ export async function measureHz() {
 }
 
 export class Player {
-  constructor({ port, canvas, cursorEl, stage, onStats, onFirstFrame, settings }) {
+  constructor({ port, canvas, cursorEl, stage, onStats, onFirstFrame, onPadState, settings }) {
     this.port = port; this.canvas = canvas; this.cursorEl = cursorEl; this.stage = stage;
-    this.onStats = onStats; this.onFirstFrame = onFirstFrame; this.settings = settings;
+    this.onStats = onStats; this.onFirstFrame = onFirstFrame; this.onPadState = onPadState || null; this.settings = settings;
     this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     this.dec = null; this.configs = new Map(); this.epoch = -1; this.waitKey = true;
     this.submit = new Map(); this.stats = { dec: [], enc: [], net: [], frames: 0, drops: 0 };
@@ -41,7 +41,10 @@ export class Player {
     this.localCursor = { x: 0, y: 0, t: 0 };
     this.hostCursor = { x: 0.5, y: 0.5, v: false, s: 0 };
     this.voiceDec = new Map();
+    this.perGains = {};
+    this._hadPad = false;
     this.active = true;
+    this.destroyed = false;
     this.refreshMs = 1000 / 60;
     this.mouseMode = 'abs';
     this.cinema = false; this.cinemaDelay = 180; this.queue = []; this.fstat = { late: 0, lateKey: 0, qdrop: 0, clk: 0 };
@@ -53,7 +56,7 @@ export class Player {
     this._audio();
     this.statsTimer = setInterval(() => this._report(), 500);
     this.padTimer = setInterval(() => this._pollPads(), 4);
-    measureHz().then((hz) => { this.refreshMs = 1000 / (hz || 60); });
+    measureHz().then((hz) => { if (!this.destroyed) this.refreshMs = 1000 / (hz || 60); });
   }
 
   // ------------------------------------------------------------------ video
@@ -149,7 +152,10 @@ export class Player {
     if (s) { this.submit.delete(frame.timestamp); this.stats.dec.push(performance.now() - s.t); this.stats.enc.push(s.enc); this.stats.net.push(s.net); }
     if (this.film?.clock && s?.film) {
       if (s.pts < this._filmPos(performance.now())) { this.fstat.late++; if (s.key) this.fstat.lateKey++; }
-      this.queue.push({ frame, pts: s.pts }); return;
+      let i = this.queue.length;
+      while (i > 0 && this.queue[i - 1].pts > s.pts) i--;
+      this.queue.splice(i, 0, { frame, pts: s.pts });
+      return;
     }
     if (this.cinema) {
       const at = s && s.pts != null ? this._present_at(s) : performance.now() + this.cinemaDelay;
@@ -190,7 +196,7 @@ export class Player {
   // so its trim ceiling (4x this) must not follow the cinema delay: 70 ms on the host's own view
   // put the ceiling under the queue and the sound was chopped twice a second. Every place that
   // sets it goes through here, whichever of film/cinema starts first.
-  _mixTarget() { return !this.cinema ? 30 : this.film?.clock ? Math.max(this.cinemaDelay, 200) : this.cinemaDelay; }
+  _mixTarget() { return this.film?.clock ? Math.max(this.cinemaDelay, 250) : this.cinema ? this.cinemaDelay : 30; }
 
   _filmFlush() {
     const f = this.film;
@@ -276,7 +282,8 @@ export class Player {
     for (const [e, ep] of f.eps) {
       if (e === f.cur || ep.firstKey == null || (cur && ep.order < cur.order)) continue;
       const dry = !cur || (cur.next >= cur.frames.length && cur.maxPts < disp + AHEAD);
-      const ahead = ep.maxPts >= disp + 600 && ep.firstKey <= disp + AHEAD;
+      const handedOver = !cur || cur.next >= cur.frames.length || cur.frames[cur.next].pts >= ep.firstKey;
+      const ahead = handedOver && ep.maxPts >= disp + 600 && ep.firstKey <= disp + 500;
       if (!dry && !ahead) continue;
       const upto = Math.max(disp + AHEAD, ep.firstKey);
       let k = -1;
@@ -285,7 +292,9 @@ export class Player {
       ep.frames.splice(0, k); ep.next = 0; ep.broken = false; ep.lastId = null;
       for (const [e2, ep2] of f.eps) if (ep2.order < ep.order) f.eps.delete(e2);
       f.cur = e; cur = ep;
-      this._dropDecoded();
+      // Preserve already-decoded frames in queue across clean rendition switches to avoid ~10fps dips
+      if (dry && ep.firstKey < disp - 100) this._dropDecoded();
+      else { try { this.dec?.close(); } catch {} this.dec = null; this.epoch = -1; }
       break;
     }
     if (cur) {
@@ -329,7 +338,7 @@ export class Player {
       if (a.pts < disp - 40) continue; // its moment has passed
       f.fed.push(a); if (f.fed.length > 30) f.fed.shift();
       this.ameta.push({ film: true, want: c.at + (a.pts - c.pos) - now - outLat, at: now });
-      try { this.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (this.aTs += 10000), data: a.data })); } catch { this.ameta.pop(); }
+      try { this.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (this.aTs += 20000), data: a.data })); } catch { this.ameta.pop(); }
     }
   }
 
@@ -390,12 +399,17 @@ export class Player {
 
   // ------------------------------------------------------------------ audio
   async _audio() {
-    this.ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-    await this.ac.audioWorklet.addModule('worklet.js');
-    this.mixer = new AudioWorkletNode(this.ac, 'majlis-mixer', { outputChannelCount: [2] });
-    this.mixer.connect(this.ac.destination);
+    const ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    this.ac = ac;
+    await ac.audioWorklet.addModule('worklet.js');
+    if (this.destroyed || this.ac !== ac) { try { ac.close(); } catch {} return; }
+    this.mixer = new AudioWorkletNode(ac, 'majlis-mixer', { outputChannelCount: [2] });
+    this.mixer.connect(ac.destination);
     this.mixer.port.onmessage = (e) => { if (e.data.t === 'astat') this.astat = e.data; };
     this.setVolumes(this.settings.gameVol ?? 1, this.settings.voiceVol ?? 1);
+    for (const [k, v] of Object.entries(this.perGains)) {
+      this.mixer.port.postMessage({ t: 'gain', g: {}, per: { [`v${k}`]: v } });
+    }
     this.mixer.port.postMessage({ t: 'duck', on: this.settings.autoDuck !== false });
     this.mixer.port.postMessage({ t: 'spatial', on: this.settings.spatialVoice !== false });
     this.mixer.port.postMessage({ t: 'target', ms: this._mixTarget() });
@@ -437,7 +451,10 @@ export class Player {
     try { this.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: (this.aTs += 10000), data: m.data })); } catch { this.ameta.pop(); }
   }
 
-  setVoiceGain(idx, g) { this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } }); }
+  setVoiceGain(idx, g) {
+    this.perGains[idx] = g;
+    this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } });
+  }
 
   _voiceIn(idx, data) {
     this.onSpeak?.(idx);
@@ -557,7 +574,14 @@ export class Player {
     if (!this.active || !this.inputEnabled) return;
     const pads = navigator.getGamepads();
     const p = [...pads].find((x) => x && x.connected);
-    if (!p) return;
+    if (!p) {
+      if (this._hadPad) {
+        this._hadPad = false;
+        this.lastPad = null;
+        this.onPadState?.(null);
+      }
+      return;
+    }
     let bits = 0;
     p.buttons.forEach((b, i) => { if (b.pressed && i < 32) bits |= 1 << i; });
     if (this.settings.padSwapAB) { const sw = (a, c) => { const x = (bits >> a) & 1, y = (bits >> c) & 1; bits = (bits & ~((1 << a) | (1 << c))) | (y << a) | (x << c); }; sw(0, 1); sw(2, 3); }
@@ -569,7 +593,9 @@ export class Player {
     const key = st.join(',');
     const now = performance.now();
     if (key === this.lastPad && now - this.lastPadT < 100) return;
+    this._hadPad = true;
     this.lastPad = key; this.lastPadT = now; this.pad = p;
+    this.onPadState?.({ bits: st[0], lx: st[1] / 32767, ly: st[2] / 32767, rx: st[3] / 32767, ry: st[4] / 32767, lt: lt / 255, rt: rt / 255 });
     const b = new Uint8Array(16), v = new DataView(b.buffer);
     b[0] = 6; b[1] = 0; v.setUint32(2, st[0]); v.setInt16(6, st[1]); v.setInt16(8, st[2]); v.setInt16(10, st[3]); v.setInt16(12, st[4]); b[14] = lt; b[15] = rt;
     this.port.postMessage({ t: 'in', data: b });
@@ -615,28 +641,49 @@ export class Player {
 
   // ------------------------------------------------------------------ voice out
   async startMic(onPacket) {
-    if (this.mic) return;
+    if (this.destroyed || this.mic) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (this.destroyed) { stream.getTracks().forEach((t) => t.stop()); return; }
     const track = stream.getAudioTracks()[0];
     const enc = new AudioEncoder({ output: (chunk) => { const b = new Uint8Array(chunk.byteLength); chunk.copyTo(b); onPacket(b); }, error: () => {} });
     enc.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 32000, opus: { frameDuration: 20000 } });
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-    this.mic = { stream, enc, reader, open: false };
+    const mic = { stream, enc, reader, open: false, gate: false, lastSpeechAt: 0 };
+    this.mic = mic;
+    const speechActive = (audioData) => {
+      if (!mic.gate) return true;
+      const n = audioData.numberOfFrames || 0;
+      if (n <= 0) return false;
+      try {
+        const pcm = new Float32Array(n);
+        audioData.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+        let sum = 0;
+        for (let i = 0; i < pcm.length; i += 4) sum += pcm[i] * pcm[i];
+        const rms = Math.sqrt(sum / Math.max(1, Math.ceil(pcm.length / 4)));
+        const nowTs = performance.now();
+        if (rms > 0.015) mic.lastSpeechAt = nowTs;
+        return nowTs - mic.lastSpeechAt < 350;
+      } catch {
+        return true;
+      }
+    };
     (async () => {
-      while (this.mic) {
+      while (!this.destroyed && this.mic) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (this.mic.open && enc.state === 'configured') enc.encode(value);
+        if (!this.destroyed && this.mic?.open && enc.state === 'configured' && speechActive(value)) enc.encode(value);
         value.close();
       }
     })();
   }
-  setMicOpen(on) { if (this.mic) this.mic.open = !!on; }
-  stopMic() { if (!this.mic) return; this.mic.stream.getTracks().forEach((t) => t.stop()); try { this.mic.enc.close(); } catch {} this.mic = null; }
+  setMicOpen(on, gate) { if (!this.destroyed && this.mic) { this.mic.open = !!on; if (gate !== undefined) this.mic.gate = !!gate; } }
+  stopMic() { if (!this.mic) return; this.mic.stream.getTracks().forEach((t) => t.stop()); try { this.mic.reader?.cancel().catch(() => {}); } catch {} try { this.mic.enc.close(); } catch {} this.mic = null; }
 
   screenshot() { return this.canvas.width ? this.canvas.toDataURL('image/png') : null; }
 
   destroy() {
+    this.destroyed = true;
+    this.onPadState?.(null);
     this.setCinema(false);
     this.active = false;
     this.releaseAll();
@@ -650,8 +697,11 @@ export class Player {
     document.removeEventListener('pointerlockchange', this.h.lock);
     window.removeEventListener('resize', this.h.resize); window.removeEventListener('blur', this.h.blur);
     if (document.pointerLockElement) document.exitPointerLock();
+    try { this.mixer?.disconnect(); } catch {}
     try { this.dec?.close(); this.adec?.close(); this.ac?.close(); } catch {}
+    this.mixer = null; this.dec = null; this.adec = null; this.ac = null;
     for (const d of this.voiceDec.values()) try { d.close(); } catch {}
+    this.voiceDec.clear();
     this.stopMic();
     try { this.hid?.close(); } catch {}
     this.ctx.fillStyle = '#000'; this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -662,16 +712,20 @@ export class VoiceHub {
   constructor({ port, settings, onSpeak }) {
     this.port = port; this.settings = settings; this.onSpeak = onSpeak;
     this.dec = new Map();
+    this.destroyed = false;
     this.ready = (async () => {
-      this.ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-      await this.ac.audioWorklet.addModule('worklet.js');
-      this.mixer = new AudioWorkletNode(this.ac, 'majlis-mixer', { outputChannelCount: [2] });
-      this.mixer.connect(this.ac.destination);
+      const ac = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      this.ac = ac;
+      await ac.audioWorklet.addModule('worklet.js');
+      if (this.destroyed || this.ac !== ac) { try { ac.close(); } catch {} return; }
+      this.mixer = new AudioWorkletNode(ac, 'majlis-mixer', { outputChannelCount: [2] });
+      this.mixer.connect(ac.destination);
       this.mixer.port.postMessage({ t: 'gain', g: { game: 1, voice: settings.voiceVol ?? 1 } });
     })();
   }
 
   play(idx, data) {
+    if (this.destroyed) return;
     this.onSpeak?.(idx);
     let d = this.dec.get(idx);
     if (!d) {
@@ -684,33 +738,57 @@ export class VoiceHub {
   }
 
   _pcm(key, d) {
+    if (this.destroyed) { d.close(); return; }
     const l = new Float32Array(d.numberOfFrames); d.copyTo(l, { planeIndex: 0, format: 'f32-planar' }); d.close();
     this.mixer?.port.postMessage({ t: 'pcm', k: key, l, r: l }, [l.buffer]);
   }
 
-  setGain(idx, g) { this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } }); }
+  setGain(idx, g) { if (!this.destroyed) this.mixer?.port.postMessage({ t: 'gain', g: {}, per: { [`v${idx}`]: g } }); }
 
   async startMic(onPacket) {
-    if (this.mic) return;
+    if (this.destroyed || this.mic) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    if (this.destroyed) { stream.getTracks().forEach((t) => t.stop()); return; }
     const enc = new AudioEncoder({ output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); onPacket(b); }, error: () => {} });
     enc.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1, bitrate: 32000, opus: { frameDuration: 20000 } });
     const reader = new MediaStreamTrackProcessor({ track: stream.getAudioTracks()[0] }).readable.getReader();
-    this.mic = { stream, enc, open: false };
+    const mic = { stream, enc, reader, open: false, gate: false, lastSpeechAt: 0 };
+    this.mic = mic;
+    const speechActive = (audioData) => {
+      if (!mic.gate) return true;
+      const n = audioData.numberOfFrames || 0;
+      if (n <= 0) return false;
+      try {
+        const pcm = new Float32Array(n);
+        audioData.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+        let sum = 0;
+        for (let i = 0; i < pcm.length; i += 4) sum += pcm[i] * pcm[i];
+        const rms = Math.sqrt(sum / Math.max(1, Math.ceil(pcm.length / 4)));
+        const nowTs = performance.now();
+        if (rms > 0.015) mic.lastSpeechAt = nowTs;
+        return nowTs - mic.lastSpeechAt < 350;
+      } catch {
+        return true;
+      }
+    };
     (async () => {
-      while (this.mic) {
+      while (!this.destroyed && this.mic) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (this.mic?.open && enc.state === 'configured') enc.encode(value);
+        if (!this.destroyed && this.mic?.open && enc.state === 'configured' && speechActive(value)) enc.encode(value);
         value.close();
       }
     })();
   }
-  setMicOpen(on) { if (this.mic) this.mic.open = !!on; }
+  setMicOpen(on, gate) { if (!this.destroyed && this.mic) { this.mic.open = !!on; if (gate !== undefined) this.mic.gate = !!gate; } }
 
   destroy() {
-    if (this.mic) { this.mic.stream.getTracks().forEach((t) => t.stop()); try { this.mic.enc.close(); } catch {} this.mic = null; }
+    this.destroyed = true;
+    if (this.mic) { this.mic.stream.getTracks().forEach((t) => t.stop()); try { this.mic.reader?.cancel().catch(() => {}); } catch {} try { this.mic.enc.close(); } catch {} this.mic = null; }
     for (const d of this.dec.values()) try { d.close(); } catch {}
+    this.dec.clear();
+    try { this.mixer?.disconnect(); } catch {}
     try { this.ac?.close(); } catch {}
+    this.mixer = null; this.ac = null;
   }
 }

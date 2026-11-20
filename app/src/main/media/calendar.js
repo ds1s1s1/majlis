@@ -17,20 +17,31 @@ class Calendar {
   // meta: Meta, library: Library, keys(): { trakt }, get: http.json (injectable for tests)
   constructor({ meta, library, keys = () => ({}), get = httpMod.json }) { Object.assign(this, { meta, lib: library, keys, get }); }
 
-  async library(from, to) {
-    const series = this.lib.library().filter((it) => it.type === 'series' && /^tt\d+$/.test(it._id)).slice(0, 200);
+  async calendarVideosIds(from, to) {
+    const seen = new Set();
+    const series = this.lib.library().filter((it) => it.type === 'series' && /^tt\d+$/.test(it._id) && !seen.has(it._id) && seen.add(it._id)).slice(0, 200);
     const out = [];
-    await Promise.all(series.map(async (it) => {
-      const j = await this.get(`${CINEMETA}/meta/series/${it._id}.json`, { ttl: 6 * H }).catch(() => null);
-      for (const v of j?.meta?.videos || []) {
-        const at = Date.parse(v.released || v.firstAired || '');
-        if (at >= from && at < to && v.season) out.push(entry({ at, source: 'library', id: it._id, type: 'series', name: it.name, title: v.name || v.title || '', season: v.season, episode: v.episode ?? v.number, videoId: v.id, poster: it.poster }));
+    const CONCURRENCY = 5;
+    let idx = 0;
+    const worker = async () => {
+      while (idx < series.length) {
+        const it = series[idx++];
+        const j = await this.get(`${CINEMETA}/meta/series/${it._id}.json`, { ttl: 6 * H }).catch(() => null);
+        for (const v of j?.meta?.videos || []) {
+          const at = Date.parse(v.released || v.firstAired || '');
+          if (at >= from && at < to && v.season) out.push(entry({ at, source: 'library', id: it._id, type: 'series', name: it.name, title: v.name || v.title || '', season: v.season, episode: v.episode ?? v.number, videoId: v.id, poster: it.poster }));
+        }
       }
-    }));
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, series.length) }, worker));
     return out;
   }
 
-  // shortcut: one request per day per list (TVMaze allows ~20 per 10 s; misses are skipped), so keep ranges to a few weeks
+  async library(from, to) {
+    return this.calendarVideosIds(from, to);
+  }
+
+  // one request per day per list (throttled in http.js to ~18 req / 10 s for api.tvmaze.com)
   async tv(from, to) {
     const out = [], days = [];
     for (let t = from; t < to && days.length < 35; t += DAY) days.push(ymd(t));

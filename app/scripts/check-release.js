@@ -13,6 +13,7 @@ const { FuseState } = require('@electron/fuses/dist/constants');
 
 const WANT_FUSES = {
   RunAsNode: FuseState.DISABLE,
+  EnableCookieEncryption: FuseState.ENABLE,
   EnableNodeCliInspectArguments: FuseState.DISABLE,
   EnableNodeOptionsEnvironmentVariable: FuseState.DISABLE,
   OnlyLoadAppFromAsar: FuseState.ENABLE,
@@ -30,9 +31,15 @@ function ours(dir) {
 }
 
 async function check(dist, wantConfig) {
-  const dir = path.join(__dirname, '..', dist, 'win-unpacked');
+  const base = path.join(__dirname, '..', dist);
+  const dir = path.join(base, 'win-unpacked');
   const errs = [];
   if (!fs.existsSync(dir)) return [`${dist}: not built`];
+  for (const d of [base, dir]) {
+    for (const f of fs.readdirSync(d)) {
+      if (/portable.*\.exe$/i.test(f)) errs.push(`${dist}: retired portable binary found (${f})`);
+    }
+  }
   const files = asar.listPackage(path.join(dir, 'resources', 'app.asar'));
   const cfg = files.filter((f) => /build-config/.test(f)).length;
   if (cfg !== wantConfig) errs.push(`${dist}: build-config.json found ${cfg}x, want ${wantConfig}`);

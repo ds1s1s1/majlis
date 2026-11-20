@@ -16,6 +16,8 @@ class Guest extends EventEmitter {
     this.inSeq = 0;
     this.configs = new Map();
     this.state = 'idle';
+    this.canControl = false;
+    this.watchControl = { mode: 'host', holderId: null, holderName: null };
   }
 
   async connect(target, caps, { pin, reconnect } = {}) {
@@ -108,8 +110,26 @@ class Guest extends EventEmitter {
       case 'sync_state': this.syncEpoch = m.epoch; this.emit('sync', m); break;
       case 'activity': this.emit('activity', { id: this.hostId, name: this.link?.peer?.nick, items: m.items }); break;
       case 'vote_state': this.emit('vote', Array.isArray(m.items) ? m.items : []); break;
+      case 'party_msg': this.emit('party-msg', m.msg); break;
+      case 'roster':
+        this.roster = m;
+        if (typeof m.canControl === 'boolean') this.canControl = m.canControl;
+        if (m.watchControl) this.watchControl = m.watchControl;
+        this.emit('ctrl', m);
+        break;
+      case 'welcome':
+        this.canControl = !!m.canControl;
+        if (m.watchControl) this.watchControl = m.watchControl;
+        this.emit('ctrl', m);
+        break;
+      case 'watch_control':
+        this.canControl = !!m.canControl;
+        this.watchControl = { mode: m.mode || 'host', holderId: m.holderId || null, holderName: m.holderName || null };
+        this.emit('ctrl', m);
+        break;
       case 'sync_end': this.syncEpoch = null; this.emit('sync', null); break;
-      case 'mode': if (m.mode !== 'watch') this.fclock = null; this.emit('ctrl', m); break;
+      case 'mode': if (m.mode !== 'watch') this.fclock = null; this.canControl = !!m.canControl; if (m.watchControl) this.watchControl = m.watchControl; this.emit('ctrl', m); break;
+      case 'privacy': this.privacy = !!m.on; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;
       case 'kick': this.emit('kicked', { panic: !!m.panic }); break;
       default: this.emit('ctrl', m);

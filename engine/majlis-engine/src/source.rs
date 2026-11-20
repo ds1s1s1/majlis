@@ -100,11 +100,11 @@ pub fn run(kind: SourceKind, rx: Receiver<Cmd>) {
             s.last_us = now;
             s.kick = false;
             s.dirty = false;
-            // the window grew and the capture copy with it: a converter for the new input size
+            // the window resized: rebuild converter for the new input texture/content size + clean IDR
             if s.gen != cap.gen() {
                 let (sw, sh) = cap.size();
                 match Converter::new(&gpu, sw, sh, &s.enc.input, s.enc.p.w, s.enc.p.h) {
-                    Ok(c) => { s.conv = c; s.gen = cap.gen(); }
+                    Ok(c) => { s.conv = c; s.gen = cap.gen(); s.enc.request_idr(); s.kick = true; }
                     Err(e) => { proto::error("converter", *id as i64, format!("{e}")); s.gen = cap.gen(); }
                 }
             }

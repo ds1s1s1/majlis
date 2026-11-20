@@ -12,8 +12,18 @@ const LOGIN = 'https://www.stremio.com/login';
 async function call(method, body) {
   const r = await fetch(`${API}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
-  if (j.error) throw new Error(j.error.message || String(j.error));
-  if (!('result' in j)) throw new Error(`stremio api ${r.status}`);
+  if (j.error) {
+    const msg = j.error.message || String(j.error);
+    const err = new Error(msg);
+    if (j.error.code === 1 || j.error.code === 2 || /auth|session|expired|unauthorized/i.test(msg) || r.status === 401 || r.status === 403) err.expired = true;
+    if (/addons?_?locked/i.test(msg)) err.addonsLocked = true;
+    throw err;
+  }
+  if (!('result' in j)) {
+    const err = new Error(`stremio api ${r.status}`);
+    if (r.status === 401 || r.status === 403) err.expired = true;
+    throw err;
+  }
   return j.result;
 }
 
@@ -43,17 +53,29 @@ class StremioAccount {
   user() { return call('getUser', { type: 'GetUser', authKey: this.authKey }); }
   logout() { return call('logout', { type: 'Logout', authKey: this.authKey }).catch(() => {}); }
 
-  async addons() { return (await call('addonCollectionGet', { type: 'AddonCollectionGet', authKey: this.authKey, update: true })).addons || []; }
-  // the whole list, in order (Stremio replaces it)
-  setAddons(descriptors) { return call('addonCollectionSet', { type: 'AddonCollectionSet', authKey: this.authKey, addons: descriptors }); }
+  async addons() {
+    const r = await call('addonCollectionGet', { type: 'AddonCollectionGet', authKey: this.authKey, update: true });
+    return { addons: r.addons || [], locked: !!r.addonsLocked };
+  }
+  // the whole list, in order (Stremio replaces it unless addonsLocked)
+  async setAddons(descriptors) {
+    const r = await call('addonCollectionSet', { type: 'AddonCollectionSet', authKey: this.authKey, addons: descriptors });
+    return { ...r, locked: !!r?.addonsLocked };
+  }
 
-  // two-way library sync with a Library (library.js); returns { pulled, pushed }
+  // two-way delta library sync with a Library (library.js); returns { pulled, pushed }
   async syncLibrary(lib) {
     const meta = await call('datastoreMeta', { authKey: this.authKey, collection: 'libraryItem' }); // [[id, mtimeMs]]
     const remote = new Map((meta || []).map(([id, m]) => [id, m]));
     const sec = (iso) => Math.floor(Date.parse(iso || 0) / 1000);
     const pull = [...remote.entries()].filter(([id, m]) => { const l = lib.get(id); return !l || Math.floor(m / 1000) > sec(l._mtime); }).map(([id]) => id);
-    if (pull.length) lib.merge(await call('datastoreGet', { authKey: this.authKey, collection: 'libraryItem', ids: pull, all: false }));
+    if (pull.length) {
+      const BATCH = 100;
+      for (let i = 0; i < pull.length; i += BATCH) {
+        const res = await call('datastoreGet', { authKey: this.authKey, collection: 'libraryItem', ids: pull.slice(i, i + BATCH), all: false });
+        if (Array.isArray(res) && res.length) lib.merge(res);
+      }
+    }
     const yearAgo = Date.now() - 365 * 864e5;
     const push = Object.values(lib.items).filter((it) => it.type !== 'other' && !(it.removed && !it.temp && Date.parse(it._mtime) < yearAgo))
       .filter((it) => !remote.has(it._id) || sec(it._mtime) > Math.floor(remote.get(it._id) / 1000));

@@ -1,0 +1,96 @@
+/* Scoped CSS Variables for Majlis Complete Settings System */
+.settings-scope {
+  --bg-canvas: #12100e;
+  --bg-sidebar: #0e0c0a;
+  --bg-surface: #181613;
+  --bg-surface-hover: #201d19;
+  --surface-active: #241d11;
+  --border-subtle: #24211c;
+  --border-strong: #38322a;
+  --accent: #e5a93c;
+  --accent-fg: #12100e;
+  --text-primary: #f6f2eb;
+  --text-secondary: #d4cdc2;
+  --text-muted: #aba396;
+  --danger: #d9534f;
+  --success: #5cb874;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.settings-scope[data-theme-preset='noir'] {
+  --bg-canvas: #0a0a0b;
+  --bg-sidebar: #080809;
+  --bg-surface: #121215;
+  --bg-surface-hover: #1a1a1f;
+  --surface-active: #1f1f24;
+  --border-subtle: #1e1e23;
+  --border-strong: #32323a;
+  --accent: #ffffff;
+  --accent-fg: #0a0a0b;
+}
+
+.settings-scope[data-theme-preset='nord'] {
+  --bg-canvas: #151922;
+  --bg-sidebar: #10141c;
+  --bg-surface: #1c222e;
+  --bg-surface-hover: #232a38;
+  --surface-active: #253042;
+  --border-subtle: #273041;
+  --border-strong: #3a465c;
+  --accent: #88c0d0;
+  --accent-fg: #10141c;
+}
+
+.settings-scope[data-theme-preset='obsidian'] {
+  --bg-canvas: #09090b;
+  --bg-sidebar: #050507;
+  --bg-surface: #111114;
+  --bg-surface-hover: #18181d;
+  --surface-active: #1e1a12;
+  --border-subtle: #202026;
+  --border-strong: #32323c;
+  --accent: #e5a93c;
+  --accent-fg: #12100e;
+}
+
+.settings-scope[data-theme-preset='roast'] {
+  --bg-canvas: #16110d;
+  --bg-sidebar: #100c09;
+  --bg-surface: #201812;
+  --bg-surface-hover: #2a2018;
+  --surface-active: #332417;
+  --border-subtle: #2d231a;
+  --border-strong: #463729;
+  --accent: #d9823b;
+  --accent-fg: #12100e;
+}
+
+.settings-scope[data-theme-preset='dracula'] {
+  --bg-canvas: #191a24;
+  --bg-sidebar: #13141c;
+  --bg-surface: #212230;
+  --bg-surface-hover: #292b3d;
+  --surface-active: #2e2640;
+  --border-subtle: #2e3042;
+  --border-strong: #44475a;
+  --accent: #bd93f9;
+  --accent-fg: #13141c;
+}
+
+.settings-scope[data-theme-preset='forest'] {
+  --bg-canvas: #0c1410;
+  --bg-sidebar: #080f0c;
+  --bg-surface: #132019;
+  --bg-surface-hover: #1a2b22;
+  --surface-active: #173024;
+  --border-subtle: #1f3329;
+  --border-strong: #2f4d3e;
+  --accent: #34d399;
+  --accent-fg: #08120d;
+}
+
+.settings-glass {
+  backdrop-filter: blur(18px) saturate(135%);
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+}

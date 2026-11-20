@@ -302,3 +302,41 @@ pub fn cursor(on: bool) {
         }
     });
 }
+
+// ---------------------------------------------------------------- foreground window watch (privacy curtain)
+static FG_RUN: AtomicBool = AtomicBool::new(false);
+static FG_TARGET: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn watch_fg(hwnd: i64) {
+    if hwnd == 0 {
+        FG_TARGET.store(0, Ordering::Relaxed);
+        FG_RUN.store(false, Ordering::Relaxed);
+        return;
+    }
+    FG_TARGET.store(hwnd as isize, Ordering::Relaxed);
+    if FG_RUN.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let mut last_target: isize = 0;
+        let mut last_active: Option<bool> = None;
+        while FG_RUN.load(Ordering::Relaxed) {
+            let target = FG_TARGET.load(Ordering::Relaxed);
+            if target == 0 { break; }
+            if target != last_target {
+                last_target = target;
+                last_active = None;
+            }
+            let fg = unsafe { GetForegroundWindow() };
+            let h = HWND(target as *mut _);
+            let iconic = unsafe { IsIconic(h) }.as_bool();
+            let active = fg.0 == h.0 && !iconic;
+            if last_active != Some(active) {
+                last_active = Some(active);
+                proto::event("fg", json!({ "hwnd": target as i64, "active": active }));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        FG_RUN.store(false, Ordering::Relaxed);
+    });
+}

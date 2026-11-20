@@ -93,6 +93,7 @@ fn main() {
             "pad_motion" => pads.motion(c["slot"].as_i64().unwrap_or(1), &c),
             "pad_del" => pads.remove(c["slot"].as_i64().unwrap_or(1)),
             "pads_clear" => pads.remove_all(),
+            "pads_reset" => { let r = pads.reset(); proto::event("pads_reset", json!({ "ok": r.is_ok(), "error": r.err() })); }
             "audio" => {
                 if c["on"].as_bool().unwrap_or(false) {
                     aud.start(u("kbps").unwrap_or(128), u("keep").unwrap_or(30), c["exclude"].as_u64().map(|v| v as u32), c["include"].as_u64().map(|v| v as u32));
@@ -105,6 +106,7 @@ fn main() {
             "winprep" => proto::event("winprep", desk::winprep(c["hwnd"].as_i64().unwrap_or(0))),
             "gpu_prio" => { let pid = u("pid").unwrap_or(0); proto::event("gpu_prio", json!({ "pid": pid, "ok": desk::gpu_priority(pid) })); }
             "ptt" => desk::ptt(c["vk"].as_i64().unwrap_or(0) as i32),
+            "watch_fg" => desk::watch_fg(c["hwnd"].as_i64().unwrap_or(0)),
             "wincap" | "wincap_stop" => {} // window capture lives in the encoder now
             "start" => {
                 let (key, kind) = match c["hwnd"].as_i64() {
@@ -133,7 +135,7 @@ fn main() {
                 m.to_stream(id, Cmd::Invalidate { id, frames });
             }
             "stop" => { m.to_stream(id, Cmd::Detach { id }); m.stream_src.remove(&id); }
-            "quit" => { pads.remove_all(); inp.release_all(); break; }
+            "quit" => { desk::watch_fg(0); pads.remove_all(); inp.release_all(); break; }
             _ => {}
         }
     }

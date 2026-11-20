@@ -182,45 +182,188 @@ function parseResponse(body) {
 // ---------------------------------------------------------------- client
 // The installed addons (in the user's order), their manifests, and requests routed like Stremio.
 class AddonClient {
-  constructor() { this.manifests = new Map(); }
+  constructor() { this.manifests = new Map(); this.latencies = new Map(); this.health = new Map(); this.healthMeta = new Map(); }
 
-  async manifest(url) {
+  static isLocal(url) { return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(String(url || '')); }
+
+  isDead(url) {
+    const h = this.health.get(normalizeUrl(url));
+    return !!h && h.deadUntil > Date.now();
+  }
+
+  recordSuccess(url, ms) {
+    url = normalizeUrl(url);
+    this.health.delete(url);
+    this.healthMeta.set(url, { lastCheckedAt: Date.now(), lastError: null });
+    this.recordLatency(url, ms);
+  }
+
+  recordFailure(url, err) {
+    url = normalizeUrl(url);
+    this.healthMeta.set(url, { lastCheckedAt: Date.now(), lastError: String(err?.message || err || 'error').slice(0, 120) });
+    const prev = this.health.get(url) || { fails: 0, deadUntil: 0 };
+    const status = err?.status || 0;
+    const isTransient = !status || status >= 500 || err?.name === 'AbortError' || /timeout|ECONNREFUSED|ENOTFOUND|ECONNRESET/i.test(err?.message || '');
+    if (!isTransient) return;
+    const fails = prev.fails + 1;
+    // Dead localhost servers (e.g. closed local Stremio on 127.0.0.1:11470) trip immediately for 15 min
+    const cooldown = AddonClient.isLocal(url) ? 15 * 60000 : (fails >= 2 ? 5 * 60000 : 0);
+    this.health.set(url, { fails, deadUntil: cooldown ? Date.now() + cooldown : 0 });
+  }
+
+  resetHealth(url) {
+    if (url) {
+      const u = normalizeUrl(url);
+      this.health.delete(u);
+      this.healthMeta.delete(u);
+    } else {
+      this.health.clear();
+      this.healthMeta.clear();
+    }
+  }
+
+  healthSnapshot(url) {
+    const u = normalizeUrl(url);
+    const list = this.latencies.get(u) || [];
+    const avgMs = list.length ? Math.round(list.reduce((a, b) => a + b, 0) / list.length) : null;
+    const p90Ms = this.p90(u);
+    const dead = this.isDead(u);
+    const meta = this.healthMeta.get(u) || { lastCheckedAt: null, lastError: null };
+    const status = dead ? 'down' : ((p90Ms != null && p90Ms >= 2000) || (avgMs != null && avgMs >= 2000)) ? 'slow' : 'up';
+    return {
+      url: u,
+      status,
+      dead,
+      avgMs,
+      p90Ms,
+      lastCheckedAt: meta.lastCheckedAt,
+      lastError: meta.lastError,
+    };
+  }
+
+  async pingAll(urls = []) {
+    const clean = (Array.isArray(urls) ? urls : []).filter((u) => typeof u === 'string' && u.trim());
+    await Promise.allSettled(clean.map((u) => this.manifest(u, { force: true, timeout: 4500 })));
+    return clean.map((u) => this.healthSnapshot(u));
+  }
+
+  recordLatency(url, ms) {
+    url = normalizeUrl(url);
+    const list = this.latencies.get(url) || [];
+    list.push(Math.max(1, Math.round(ms)));
+    if (list.length > 20) list.shift();
+    this.latencies.set(url, list);
+  }
+
+  p90(url) {
+    const list = this.latencies.get(normalizeUrl(url));
+    if (!list?.length) return null;
+    const sorted = [...list].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  }
+
+  // adaptive timeout per addon family: localhost 1200ms, streams up to 10s, catalogs 5.5s
+  timeoutFor(url, resource = null) {
+    if (AddonClient.isLocal(url)) return 1200;
+    const p = this.p90(url);
+    const maxCap = resource === 'stream' ? 10000 : resource === 'catalog' ? 5500 : 8500;
+    return p == null ? Math.min(6500, maxCap) : Math.max(2000, Math.min(maxCap, Math.round(2 * p)));
+  }
+
+  async manifest(url, opts = {}) {
     url = normalizeUrl(url);
     const kind = transportKind(url);
     if (!kind) throw new AddonError('bad-url', 'an addon link ends with /manifest.json');
-    if (this.manifests.has(url)) return this.manifests.get(url);
-    const m = kind === 'legacy'
-      ? fromLegacyManifest((await http.json(`${url.replace(/\/+$/, '')}/q.json?b=${LEGACY_MANIFEST_PARAM}`, { ttl: TTL.manifest })).result)
-      : normManifest(await http.json(url, { ttl: TTL.manifest }));
-    m.transportUrl = url;
-    this.manifests.set(url, m);
-    return m;
+    if (!opts.force && this.manifests.has(url)) return this.manifests.get(url);
+    if (!opts.force && this.isDead(url)) throw new AddonError('dead', 'addon temporarily offline');
+    const t0 = Date.now(), timeout = opts.timeout || this.timeoutFor(url, 'manifest');
+    try {
+      const m = kind === 'legacy'
+        ? fromLegacyManifest((await http.json(`${url.replace(/\/+$/, '')}/q.json?b=${LEGACY_MANIFEST_PARAM}`, { ttl: opts.force ? 0 : TTL.manifest, timeout })).result)
+        : normManifest(await http.json(url, { ttl: opts.force ? 0 : TTL.manifest, timeout }));
+      this.recordSuccess(url, Date.now() - t0);
+      m.transportUrl = url;
+      this.manifests.set(url, m);
+      return m;
+    } catch (err) {
+      this.recordFailure(url, err);
+      throw err;
+    }
   }
 
   // a manifest the user is about to install: refused when it can't work unconfigured
   async check(url) {
-    const m = await this.manifest(url);
+    this.resetHealth(url);
+    const m = await this.manifest(url, { force: true });
     if (m.behaviorHints.configurationRequired) throw new AddonError('needs-config', 'this addon must be configured on its own page first');
     return m;
   }
 
-  async request(url, path) {
+  async request(url, path, opts = {}) {
+    url = normalizeUrl(url);
+    if (!opts.force && this.isDead(url)) throw new AddonError('dead', 'addon temporarily offline');
     const kind = transportKind(url);
     const u = kind === 'legacy' ? legacyUrl(url, path) : resourceUrl(url, path);
-    const body = await http.json(u, { ttl: TTL[path.resource] ?? 300000 });
-    return parseResponse(kind === 'legacy' ? legacyResult(path.resource, body) : body);
+    const t0 = Date.now();
+    const ttlDefault = TTL[path.resource] ?? 300000;
+    try {
+      const body = await http.json(u, { ttl: opts.force ? 0 : ttlDefault, timeout: opts.timeout || this.timeoutFor(url, path.resource) });
+      this.recordSuccess(url, Date.now() - t0);
+      const parsed = parseResponse(kind === 'legacy' ? legacyResult(path.resource, body) : body);
+      if (Number.isFinite(body?.cacheMaxAge)) parsed.cacheMaxAge = Math.max(0, Number(body.cacheMaxAge));
+      if (Number.isFinite(body?.staleRevalidate)) parsed.staleRevalidate = Math.max(0, Number(body.staleRevalidate));
+      if (Number.isFinite(body?.staleError)) parsed.staleError = Math.max(0, Number(body.staleError));
+      return parsed;
+    } catch (err) {
+      if (err?.kind !== 'empty') this.recordFailure(url, err);
+      throw err;
+    }
   }
 
-  // every installed addon that serves `path`, all at once; [{ url, manifest, result | error }]
-  async all(urls, path) {
-    const ms = await Promise.all(urls.map((u) => this.manifest(u).then((m) => m, () => null)));
+  // every installed addon that serves `path`, all at once; [{ url, manifest, addonRank, result | error }]
+  async all(urls, path, onEach, { maxWaitMs = 0 } = {}) {
+    const ms = await Promise.all(urls.map((u) => (this.isDead(u) ? Promise.resolve(null) : this.manifest(u).then((m) => m, () => null))));
     const jobs = urls.map((u, i) => (ms[i] && isResourceSupported(ms[i], path)
-      ? this.request(u, path).then((result) => ({ url: u, manifest: ms[i], result }), (error) => ({ url: u, manifest: ms[i], error }))
+      ? this.request(u, path).then(
+        (result) => { const x = { url: u, manifest: ms[i], addonRank: i, result }; onEach?.(x); return x; },
+        (error) => { const x = { url: u, manifest: ms[i], addonRank: i, error }; onEach?.(x); return x; },
+      )
       : null)).filter(Boolean);
-    return Promise.all(jobs);
+    if (!maxWaitMs || !jobs.length) return Promise.all(jobs);
+    const settled = [];
+    jobs.forEach((p) => p.then((x) => settled.push(x)));
+    await Promise.race([Promise.all(jobs), new Promise((r) => setTimeout(r, maxWaitMs))]);
+    return settled;
   }
 
-  forget(url) { this.manifests.delete(url); http.forget(String(url).replace('/manifest.json', '')); }
+  // resolves with the first batch as soon as at least one addon returns content (plus a short grace
+  // window), while slower addons keep streaming via `onEach`
+  async progressive(urls, path, { onEach, graceMs = 60, maxWaitMs = 0 } = {}) {
+    const ms = await Promise.all(urls.map((u) => (this.isDead(u) ? Promise.resolve(null) : this.manifest(u).then((m) => m, () => null))));
+    const settled = [];
+    let pending = 0, timer = null, capTimer = null, done = false;
+    return new Promise((resolve) => {
+      const finish = () => { if (done) return; done = true; clearTimeout(timer); clearTimeout(capTimer); resolve([...settled]); };
+      if (maxWaitMs > 0) capTimer = setTimeout(finish, maxWaitMs);
+      const jobs = urls.map((u, i) => {
+        if (!ms[i] || !isResourceSupported(ms[i], path)) return null;
+        pending++;
+        return this.request(u, path).then(
+          (result) => ({ url: u, manifest: ms[i], addonRank: i, result }),
+          (error) => ({ url: u, manifest: ms[i], addonRank: i, error }),
+        ).then((x) => {
+          settled.push(x);
+          pending--;
+          onEach?.(x, done);
+          if (pending === 0) finish();
+          else if (!done && x.result && !timer) timer = setTimeout(finish, graceMs);
+        });
+      }).filter(Boolean);
+      if (!jobs.length) finish();
+    });
+  }
+
+  forget(url) { url = normalizeUrl(url); this.manifests.delete(url); this.latencies.delete(url); this.health.delete(url); this.healthMeta.delete(url); http.forget(String(url).replace('/manifest.json', '')); }
 }
 
 // legacy JSON-RPC answers wrap the result; shape it like a v3 response

@@ -176,7 +176,10 @@ class Link extends EventEmitter {
       if (t0 === undefined) return;
       path.sentProbes.delete(k);
       const rtt = hr() - t0;
-      path.rtt = path.rtt == null ? rtt : path.rtt * 0.7 + rtt * 0.3;
+      const prevRtt = path.rtt;
+      path.rtt = prevRtt == null ? rtt : prevRtt * 0.7 + rtt * 0.3;
+      const sampleDiff = prevRtt == null ? 0 : Math.abs(rtt - prevRtt);
+      path.jitter = path.jitter == null ? sampleDiff : path.jitter * 0.75 + sampleDiff * 0.25;
       path.okAt = now();
       if (!this.active) setTimeout(() => this._reselect(true), 250);
       this.emit('paths');
@@ -186,11 +189,13 @@ class Link extends EventEmitter {
   _score(p) {
     if (p.rtt == null || now() - p.okAt > 5000) return Infinity;
     if (FORCE_RELAY && p.kind !== 'relay' && p.kind !== 'ws') return Infinity; // testing aid
-    let s = p.rtt;
+    let s = p.rtt + (p.jitter || 0) * 1.5;
     if (p.kind === 'relay') s += 3;        // direct wins ties
     if (p.kind === 'ws' || p.tls) s += 40; // TCP only when nothing else works: one lost packet stalls everything behind it
     if (p.kind === 'direct' && p.fam === 'v6') s -= 1.5; // IPv6 first
     if (p.kind === 'direct' && p.k === 'lan') s -= 2;
+    const pref = this.net?.settings?.preferredRelay || this.net?.preferredRelay;
+    if (pref && pref !== 'auto' && p.name === pref) s -= 6;
     return s;
   }
 
@@ -416,15 +421,32 @@ class Net extends EventEmitter {
   get base() { return String(this.settings.get('server')).replace(/^ws/i, 'http').replace(/\/+$/, ''); }
 
   async start() {
+    this.authFailed = false;
+    this.noServer = false;
     const fixed = +this.settings.get('udpPort') || 0;
     this.s4 = await this._bind('udp4', fixed);
     this.s6 = await this._bind('udp6', fixed).catch(() => null);
-    if (!String(this.settings.get('server') || '').trim()) { this.noServer = true; return; }
+    if (!String(this.settings.get('server') || '').trim() && !String(this.settings.get('serverWs') || '').trim()) { this.noServer = true; return; }
     if (this.cloud) return this._startCloud();
     await this.resolveServer();
     this._hello();
     this.helloTimer = setInterval(() => this._hello(), 20000);
-    setTimeout(() => { if (!this.registered) this._wsSignal(); }, 3500);
+    this.wsFallbackTimer = setTimeout(() => { if (!this.registered && !this.stopped && !this.authFailed && !this.noServer) this._wsSignal(); }, 3500);
+  }
+
+  _haltSignaling() {
+    this.authFailed = true;
+    this.registered = false;
+    clearInterval(this.helloTimer); this.helloTimer = null;
+    clearInterval(this.stunTimer); this.stunTimer = null;
+    clearInterval(this.wsPing); this.wsPing = null;
+    clearTimeout(this.wsRetryTimer); this.wsRetryTimer = null;
+    clearTimeout(this.wsFallbackTimer); this.wsFallbackTimer = null;
+    if (this.wsSig) {
+      const ws = this.wsSig;
+      this.wsSig = null;
+      try { ws.removeAllListeners?.(); ws.close(); } catch {}
+    }
   }
 
   _bind(type, port) {
@@ -473,16 +495,36 @@ class Net extends EventEmitter {
   }
 
   _cloudWs() {
+    if (this.stopped || this.noServer || this.authFailed) return;
+    clearTimeout(this.wsRetryTimer);
     const url = `${this.base.replace(/^http/i, 'ws')}/signal`;
     let ws;
-    try { ws = new WebSocket(url); } catch { setTimeout(() => this._cloudWs(), 3000); return; }
-    ws.on('open', () => { this.wsSig = ws; this.wsBackoff = 1000; this._hello(); });
+    try { ws = new WebSocket(url); } catch {
+      if (!this.stopped && !this.noServer && !this.authFailed) {
+        this.wsRetryTimer = setTimeout(() => this._cloudWs(), 3000);
+      }
+      return;
+    }
+    ws.on('open', () => { if (this.stopped || this.authFailed) { try { ws.close(); } catch {} return; } this.wsSig = ws; this.wsBackoff = 1000; this._hello(); });
     ws.on('message', (d) => { const str = String(d); if (str === 'pong') return; try { this._onSignal(JSON.parse(str), 'ws'); } catch {} });
-    ws.on('close', () => {
+    ws.on('unexpected-response', (_req, res) => {
+      if (res && (res.statusCode === 401 || res.statusCode === 403)) {
+        const first = !this.authFailed;
+        this._haltSignaling();
+        if (first) this.emit('server-error', 'access');
+      }
+    });
+    ws.on('close', (code, reason) => {
       if (this.wsSig === ws) { this.wsSig = null; this.registered = false; this.emit('unregistered'); }
-      if (this.stopped) return;
+      if (code === 4001 || code === 4003 || code === 1008 || /access|auth|forbidden/i.test(String(reason || ''))) {
+        const first = !this.authFailed;
+        this._haltSignaling();
+        if (first) this.emit('server-error', 'access');
+        return;
+      }
+      if (this.stopped || this.authFailed || this.noServer) return;
       this.wsBackoff = Math.min(15000, (this.wsBackoff || 1000) * 1.6);
-      setTimeout(() => this._cloudWs(), this.wsBackoff);
+      this.wsRetryTimer = setTimeout(() => this._cloudWs(), this.wsBackoff);
     });
     ws.on('error', () => {});
     clearInterval(this.wsPing);
@@ -573,6 +615,7 @@ class Net extends EventEmitter {
   _sign(obj) { obj.sig = this.id.sign(signedBytes(obj)).toString('base64'); return obj; }
 
   signal(obj) {
+    if (this.noServer || this.authFailed || this.stopped) return false;
     const buf = Buffer.from(JSON.stringify(obj));
     let sent = false;
     if (this.cloud) { if (this.wsSig && this.wsSig.readyState === 1) { this.wsSig.send(buf.toString()); return true; } return false; }
@@ -583,25 +626,42 @@ class Net extends EventEmitter {
   }
 
   _hello() {
+    if (this.noServer || this.authFailed || this.stopped) return;
     const key = this.settings.get('accessKey') || undefined;
-    const msg = this._sign({ t: 'hello', id: this.id.id, pk: this.id.pkB64, salt: this.id.salt, nick: this.settings.get('nick') || '', busy: this.busy, allow: this.allow, key, ts: now() });
+    const msg = this._sign({ t: 'hello', id: this.id.id, pk: this.id.pkB64, salt: this.id.salt, nick: this.settings.get('nick') || '', handle: this.handle || '', status: this.status || null, busy: this.busy, allow: this.allow, key, ts: now() });
     this.signal(msg);
   }
 
-  setPresence({ busy, allow }) {
-    const before = JSON.stringify([this.busy, this.allow]);
+  setPresence({ busy, allow, status }) {
+    const before = JSON.stringify([this.busy, this.allow, this.status]);
     if (busy !== undefined) this.busy = busy;
     if (allow) this.allow = allow;
-    if (JSON.stringify([this.busy, this.allow]) !== before) this._hello();
+    if (status !== undefined) this.status = status;
+    if (JSON.stringify([this.busy, this.allow, this.status]) !== before) this._hello();
   }
 
   _wsSignal() {
+    if (this.noServer || this.authFailed || this.stopped) return;
     const url = this.settings.get('serverWs') || `ws://${this.serverHost.includes(':') ? `[${this.serverHost}]` : this.serverHost}:7780/signal`;
     try {
       const ws = new WebSocket(url);
-      ws.on('open', () => { this.wsSig = ws; this._hello(); });
+      ws.on('open', () => { if (this.stopped || this.authFailed) { try { ws.close(); } catch {} return; } this.wsSig = ws; this._hello(); });
       ws.on('message', (d) => { try { this._onSignal(JSON.parse(d), 'ws'); } catch {} });
-      ws.on('close', () => { if (this.wsSig === ws) this.wsSig = null; });
+      ws.on('unexpected-response', (_req, res) => {
+        if (res && (res.statusCode === 401 || res.statusCode === 403)) {
+          const first = !this.authFailed;
+          this._haltSignaling();
+          if (first) this.emit('server-error', 'access');
+        }
+      });
+      ws.on('close', (code, reason) => {
+        if (this.wsSig === ws) this.wsSig = null;
+        if (code === 4001 || code === 4003 || code === 1008 || /access|auth|forbidden/i.test(String(reason || ''))) {
+          const first = !this.authFailed;
+          this._haltSignaling();
+          if (first) this.emit('server-error', 'access');
+        }
+      });
       ws.on('error', () => {});
     } catch {}
   }
@@ -653,8 +713,16 @@ class Net extends EventEmitter {
       case 'taken':
         return this.emit('taken');
       case 'error':
+        if (msg.e === 'access' || msg.e === '401' || msg.e === '403' || msg.code === 401 || msg.code === 403) {
+          const first = !this.authFailed;
+          this._haltSignaling();
+          if (first) this.emit('server-error', 'access');
+          return;
+        }
         return this.emit('server-error', msg.e);
-      case 'presence': return this.emit('presence', msg.on || {});
+      case 'presence': return this.emit('presence', msg.on || {}, msg.meta || {});
+      case 'handle_res': return this.emit('handle-res', msg);
+      case 'social': return this.emit('social', msg.m || msg);
       case 'code': return this.emit('code', msg);
       case 'knock': return this._onKnock(msg);
       case 'cand': return this._onCand(msg);
@@ -778,6 +846,12 @@ class Net extends EventEmitter {
 
   // ---- connecting (guest side)
   async connect(target, { caps, nick, pin } = {}) {
+    if (this.noServer || (!String(this.settings.get('server') || '').trim() && !String(this.settings.get('serverWs') || '').trim())) {
+      throw Object.assign(new Error('no_server'), { code: 'no_server' });
+    }
+    if (this.authFailed) {
+      throw Object.assign(new Error('server_access'), { code: 'server_access' });
+    }
     const sid = crypto.randomBytes(16).toString('hex');
     const eph = newEphemeral();
     const rtts = await this.pingRelays(3).catch(() => ({}));
@@ -843,6 +917,7 @@ class Net extends EventEmitter {
   _onKnock(wrap) {
     const m = wrap.m;
     if (!m || typeof m !== 'object') return;
+    if (typeof m.sid !== 'string' || !/^[A-Za-z0-9_-]{4,64}$/.test(m.sid)) return;
     m.relay = wrap.relay; m.srflx = wrap.srflx || []; m.turn = wrap.turn;
     (this.knockPk ||= new Map()).set(m.sid, m.pk);
     if (this.seenKnocks?.has(m.sid)) return;
@@ -945,6 +1020,7 @@ class Net extends EventEmitter {
   stop() {
     this.stopped = true;
     clearInterval(this.helloTimer); clearInterval(this.stunTimer); clearInterval(this.wsPing);
+    clearTimeout(this.wsRetryTimer); clearTimeout(this.wsFallbackTimer);
     for (const t of this.turnClients || []) t.close();
     try { this.signal(this._sign({ t: 'bye', id: this.id.id, ts: now() })); } catch {}
     for (const l of [...this.links.values()]) l.close('quit');

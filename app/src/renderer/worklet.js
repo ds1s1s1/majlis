@@ -36,9 +36,10 @@ class Mixer extends AudioWorkletProcessor {
       const m = e.data;
       if (m.t === 'pcm') {
         let ring = this.rings.get(m.k);
-        if (!ring) { ring = new Ring(48000 * 2); this.rings.set(m.k, ring); }
+        if (!ring) { ring = new Ring(m.k === 'game' ? 48000 * 4 : 48000 * 2); this.rings.set(m.k, ring); }
         if (typeof m.want === 'number' && m.want > -300 && m.want < 4000) ring.align(Math.max(0, Math.round(m.want * 48)));
-        ring.push(m.l, m.r || m.l, this.target * 4 + 48000 * 0.06, this.target + 48000 * 0.01);
+        const max = typeof m.want === 'number' ? Math.max(this.target * 4 + 48000 * 0.06, 48000 * 1.5) : this.target * 4 + 48000 * 0.06;
+        ring.push(m.l, m.r || m.l, max, this.target + 48000 * 0.01);
       } else if (m.t === 'gain') { this.gain = { ...this.gain, ...m.g }; if (m.per) this.per = { ...this.per, ...m.per }; }
       else if (m.t === 'target') this.target = Math.round(48000 * m.ms / 1000);
       else if (m.t === 'duck') this.duck = !!m.on;
@@ -53,7 +54,7 @@ class Mixer extends AudioWorkletProcessor {
     L.fill(0); if (R !== L) R.fill(0);
     let talking = false;
     for (const [k, ring] of this.rings) if (k !== 'game' && currentTime - ring.last < 0.35) talking = true;
-    const want = this.duck && talking ? 0.3 : 1;
+    const want = this.duck && talking ? 0.6 : 1;
     this.duckLevel += (want - this.duckLevel) * (want < this.duckLevel ? 0.08 : 0.02);
     for (const [k, ring] of this.rings) {
       const target = k === 'game' ? this.target : 48000 * 0.04;

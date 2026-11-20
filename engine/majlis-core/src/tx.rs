@@ -132,9 +132,15 @@ impl Sender {
         self.cv.notify_one();
     }
 
-    // something that rides the paced queue in order with the picture (film audio)
+    // something that rides the paced queue in order without getting stuck behind a 2-4 s video keyframe burst (film audio)
     pub fn send_raw(&self, body: Vec<u8>) {
-        self.st.lock().unwrap().queue.push_back(TxFrame { pkts: vec![body], i: 0, key: true, pts: 0, raw: true, fk: (0, 0) });
+        let mut st = self.st.lock().unwrap();
+        if body.len() <= 1500 {
+            st.prio.push_back(body);
+        } else {
+            st.queue.push_back(TxFrame { pkts: vec![body], i: 0, key: true, pts: 0, raw: true, fk: (0, 0) });
+        }
+        drop(st);
         self.cv.notify_one();
     }
 
@@ -280,7 +286,8 @@ fn pace(s: Arc<Sender>, link: Weak<Link>) {
         if st.stop { return; }
         // refill: a film goes at the rate control's estimate; live video gets 10% headroom
         let t = now_ms();
-        let rate = st.rate_kbps.max(1000.0) * (if st.keyed { 1.0 } else { 1.1 }) / 8.0; // bytes per ms
+        let min_kbps = if st.keyed { 450.0 } else { 800.0 };
+        let rate = st.rate_kbps.max(min_kbps) * (if st.keyed { 1.0 } else { 1.1 }) / 8.0; // bytes per ms
         let cap = (16.0 * 1185.0f64).max(rate * 25.0);
         st.tokens = (st.tokens + (t - st.last_refill) * rate).min(cap);
         st.last_refill = t;

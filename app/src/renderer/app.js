@@ -13,10 +13,10 @@ const fmtId = (id) => (id ? `${id.slice(0, 3)} ${id.slice(3, 6)} ${id.slice(6)}`
 const toLatin = (s) => String(s).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d));
 
 const S = {
-  view: 'home', st: null, host: null, presence: {}, guest: { state: 'idle' }, knockQ: [], check: null, checking: false,
+  view: 'cinema', st: null, host: null, presence: {}, guest: { state: 'idle' }, knockQ: [], check: null, checking: false,
   connect: { state: 'idle', reason: null, target: '' }, upHist: [], player: null, gstats: null, pstats: null, drawer: false,
   ctrl: { roster: null, role: null, slot: null, library: null }, port: null, recKey: null, hz: 60,
-  chat: [], gmovie: null, local: false, summaries: [], hub: null, voiceGains: {}, latHist: [],
+  chat: [], gmovie: null, local: false, summaries: [], hub: null, voiceGains: {}, latHist: [], theaterOpen: false,
 };
 
 // ------------------------------------------------------------------------- utils
@@ -38,12 +38,23 @@ const RELAY_AR = { cloudflare: 'Cloudflare', jed: 'جدة', jeddah: 'جدة', ru
 function relayName(l) { if (getLang() !== 'ar') return l; return RELAY_AR[String(l || '').toLowerCase()] || l; }
 
 function toast(msg, opts = {}) {
+  const box = $('#toasts');
+  if (!box) return;
+  const text = String(msg ?? '').trim();
+  if (!text) return;
+  const existing = [...box.querySelectorAll('.toast')].find((x) => x.dataset.toastMsg === text);
+  if (existing) {
+    if (existing._timer) clearTimeout(existing._timer);
+    existing._timer = setTimeout(() => existing.remove(), opts.ms || 4200);
+    return;
+  }
   const el = document.createElement('div');
   el.className = `toast ${opts.bad ? 'bad' : ''}`;
-  el.innerHTML = `<span>${esc(msg)}</span>${opts.action ? `<span class="act">${esc(opts.action)}</span>` : ''}`;
+  el.dataset.toastMsg = text;
+  el.innerHTML = `<span>${esc(text)}</span>${opts.action ? `<span class="act">${esc(opts.action)}</span>` : ''}`;
   if (opts.onAction) el.querySelector('.act').onclick = () => { opts.onAction(); el.remove(); };
-  $('#toasts').append(el);
-  setTimeout(() => el.remove(), opts.ms || 4200);
+  box.append(el);
+  el._timer = setTimeout(() => el.remove(), opts.ms || 4200);
 }
 
 function menu(x, y, items) {
@@ -95,7 +106,18 @@ function renderStatus() {
   $('#tbStatus').innerHTML = s;
 }
 
-function go(v) { S.view = v; renderRail(); render(); }
+function go(v) {
+  if (v === 'set') {
+    S.view = 'cinema';
+    renderRail();
+    render();
+    showMedia().then(() => MEDIA?.go('settings'));
+    return;
+  }
+  S.view = v;
+  renderRail();
+  render();
+}
 const PAL = initPalette({ t, icon, esc, commands: () => [
   ...[['home', 'home', 'home'], ['room', 'room', 'room'], ['cinema', 'film', 'cinema movies'], ['net', 'net', 'network'], ['lib', 'lib', 'library games'], ['set', 'set', 'settings']]
     .map(([v, ic, alt]) => ({ id: `go-${v}`, label: t(v === 'set' ? 'nav_set' : `nav_${v}`), alt, icon: ic, run: () => go(v) })),
@@ -104,20 +126,35 @@ const PAL = initPalette({ t, icon, esc, commands: () => [
   { id: 'theme', label: t('pal_theme'), alt: 'theme dark light', icon: 'eye', run: async () => { await set({ theme: S.st.settings.theme === 'light' ? 'dark' : 'light' }); applyLook(); } },
   { id: 'lang', label: t('pal_lang'), alt: 'language arabic english', icon: 'chat', run: async () => { await set({ lang: S.st.settings.lang === 'en' ? 'ar' : 'en' }); applyLook(); renderRail(); render(); } },
   { id: 'panic', label: t('pal_panic'), alt: 'kick all panic', icon: 'door', when: !!S.host?.guests?.length, run: () => api.invoke('host:panic') },
-  { id: 'cinema-search-run', when: false, run: () => { go('cinema'); setTimeout(() => MEDIA?.go('search'), 0); } },
+  { id: 'cinema-search-run', when: false, run: (q) => { go('cinema'); showMedia().then(() => { MEDIA?.go('search'); if (q) window.dispatchEvent(new CustomEvent('majlis-cmd-palette', { detail: { q } })); }); } },
 ] });
 
 // Cinema is the React app in media/ (built into renderer/media): mounted once into its own node
 // and only hidden when you leave, so its pages, scroll and loaded rows are there when you come back.
-let MEDIA = null;
-const mediaHost = () => ({ lang: getLang(), theme: S.st?.settings?.cinemaTheme || 'majlis', toast, leave: () => go('home') });
+let MEDIA = null, pendingAddonUrl = null;
+const mediaHost = () => ({
+  lang: getLang(),
+  theme: S.st?.settings?.cinemaTheme || 'majlis',
+  toast,
+  leave: () => go('home'),
+  visible: S.view === 'cinema' && !S.player,
+  theaterOpen: !!S.theaterOpen,
+  switchMode: (mode) => {
+    if (mode === 'cinema') go('cinema');
+    else if (mode === 'play' || mode === 'watch') api.invoke('mode', mode).then((h) => { S.host = h; go('home'); }).catch(() => go('home'));
+    else go(mode);
+  },
+  setLang: async (l) => { await set({ lang: l }); applyLook(); },
+});
 async function showMedia() {
   document.body.classList.add('cin-on'); $('#cinRoot').hidden = false;
   if (MEDIA) { MEDIA.update(mediaHost()); return; }
-  try { MEDIA = (await import('./media/cinema.js')).mount($('#cinRoot'), mediaHost()); }
-  catch (e) { toast(e.message); }
+  try {
+    MEDIA = (await import('./media/cinema.js')).mount($('#cinRoot'), mediaHost());
+    if (pendingAddonUrl) { const u = pendingAddonUrl; pendingAddonUrl = null; MEDIA?.go('addons'); MEDIA?.deepLinkAddon?.(u); }
+  } catch (e) { toast(e.message); }
 }
-function hideMedia() { document.body.classList.remove('cin-on'); $('#cinRoot').hidden = true; }
+function hideMedia() { document.body.classList.remove('cin-on'); $('#cinRoot').hidden = true; MEDIA?.update(mediaHost()); }
 
 function render() {
   if (S.view === 'cinema') { showMedia(); return; }
@@ -139,11 +176,10 @@ function viewHome() {
       ${S.st.noServer ? `<div class="knockline fail" style="margin:0 0 22px;color:var(--fg)"><span style="flex:1">${t('noserver_note')}</span><button class="btn sm primary" id="gosrv">${t('nav_set')}</button></div>` : ''}
       <section class="idblock">
         <div class="label">${t('your_number')}</div>
-        <div class="bignum mono" id="bignum"><span>${a}</span><span>${b}</span><span>${c}</span></div>
+        <div class="bignum mono" id="bignum"><span>${esc(a)}</span><span>${esc(b)}</span><span>${esc(c)}</span></div>
         <div class="idactions">
           <button class="btn sm" id="cpy">${icon('copy', 15)}<span>${t('copy')}</span></button>
           <button class="btn sm" id="inv">${icon('link', 15)}<span>${t('invite')}</span></button>
-          <button class="btn sm" id="wa">${icon('chat', 15)}<span>${t('whatsapp')}</span></button>
         </div>
         <div class="idstatus">
           <span><i class="dot ${S.st.registered ? 'ok' : 'warn'}"></i>${S.st.registered ? t('st_online') : t('st_connecting')}</span>
@@ -204,10 +240,10 @@ function friendsList() {
     const p = S.presence[f.id];
     const st = f.trust === 'block' ? '' : p === 'online' ? 'ok' : p === 'busy' ? 'acc' : '';
     const line = f.trust === 'block' ? t('f_block') : p === 'online' ? t('f_online') : p === 'busy' ? t('f_busy') : t('f_last', { when: ago(f.lastSeen) });
-    return `<div class="frow" data-id="${f.id}">
+    return `<div class="frow" data-id="${esc(f.id)}">
       ${avatar(f.name, f.id, st)}
       <div class="who"><div class="nm">${esc(f.name)}${f.trust === 'always' ? ` <span class="tag acc" style="height:18px">${icon('shield', 12)}</span>` : ''}</div>
-        <div class="ln"><span class="mono">${fmtId(f.id)}</span><span>${esc(line)}</span></div></div>
+        <div class="ln"><span class="mono">${esc(fmtId(f.id))}</span><span>${esc(line)}</span></div></div>
       <div class="act">
         ${f.trust !== 'block' ? `<button class="iconbtn" data-act="call" title="${t('f_connect')}">${icon('door', 17)}</button>` : ''}
         <button class="iconbtn" data-act="more">${icon('more', 17)}</button>
@@ -222,10 +258,6 @@ function mountHome() {
   $('#gosrv') && ($('#gosrv').onclick = () => go('set'));
   $('#cpy').onclick = () => { api.invoke('copy', id); toast(t('copied')); };
   $('#inv').onclick = async () => { const l = await api.invoke('invite', id); api.invoke('copy', l); toast(t('copied')); };
-  $('#wa').onclick = async () => {
-    const l = await api.invoke('invite', id);
-    api.invoke('open', `https://wa.me/?text=${encodeURIComponent(t('share_text', { num: fmtId(id), link: l }))}`);
-  };
   $$('.mode[data-m]').forEach((b) => (b.onclick = async () => { S.host = await api.invoke('mode', b.dataset.m); render(); }));
   $('#gocinema') && ($('#gocinema').onclick = () => go('cinema'));
   $('#hostsw').onclick = async () => { S.host = await api.invoke('host:enable', !S.host?.enabled); render(); renderRail(); };
@@ -292,10 +324,10 @@ function renderKnockLine() {
   const el = $('#knockline'); if (!el) return;
   const c = S.connect;
   if (c.state === 'knocking' || c.state === 'waiting') {
-    el.innerHTML = `<div class="knockline"><span class="pulse"></span><span>${c.state === 'waiting' ? t('waiting_host') : t('knocking')}</span><span class="mono muted">${c.target.length === 9 ? fmtId(c.target) : c.target}</span><span class="sp"></span><button class="btn sm ghost" id="cancelk">${t('cancel')}</button></div>`;
+    el.innerHTML = `<div class="knockline"><span class="pulse"></span><span>${c.state === 'waiting' ? t('waiting_host') : t('knocking')}</span><span class="mono muted">${esc(c.target.length === 9 ? fmtId(c.target) : c.target)}</span><span class="sp"></span><button class="btn sm ghost" id="cancelk">${t('cancel')}</button></div>`;
     $('#cancelk').onclick = () => { api.invoke('cancel'); S.connect = { state: 'idle', target: c.target }; renderKnockLine(); };
   } else if (c.state === 'failed' && c.reason !== 'cancelled') {
-    el.innerHTML = `<div class="knockline fail">${icon('x', 16)}<span>${t(`fail_${c.reason}`) || c.reason}</span></div>`;
+    el.innerHTML = `<div class="knockline fail">${icon('x', 16)}<span>${esc(t(`fail_${c.reason}`) || c.reason)}</span></div>`;
   } else el.innerHTML = '';
 }
 
@@ -362,12 +394,13 @@ function viewRoom() {
       <span class="tag ${h.enabled ? 'ok' : ''}"><i class="dot ${h.enabled ? 'ok' : ''}"></i>${h.enabled ? t('hosting_on') : t('hosting_off')}</span>
       <span class="summary mono" id="sum">${play ? streamSummary(play) : ''}</span>
       <span class="sp"></span>
+      ${h.enabled ? `<button class="btn sm ${h.privacy ? 'primary' : ''}" id="privacyBtn" title="${t('privacy_toggle')}">${icon('shield', 14)}<span>${t('privacy_toggle')}</span></button>` : ''}
       ${!h.enabled ? `<button class="btn primary" id="openroom">${t('hosting')}</button>` : ''}
       <button class="btn danger" id="panic">${icon('door', 16)}<span>${t('panic')}</span><span class="kbd">${esc(shortKey(set_.panicKey))}</span></button>
     </div>
     <div class="room">
       <div>
-        ${h.knocks?.length ? `<div class="lane" style="margin:0 0 22px"><h2>${t('waiting')}</h2><div class="stack">${h.knocks.map((k) => `<div class="knockrow" data-sid="${k.sid}">${avatar(k.name, k.from)}<div style="flex:1"><div>${esc(k.name)}</div><div class="sub mono">${fmtId(k.from)}</div></div><button class="btn sm primary" data-act="review">${t('let_in')}</button><button class="btn sm ghost" data-act="no">${t('decline')}</button></div>`).join('')}</div></div>` : ''}
+        ${h.knocks?.length ? `<div class="lane" style="margin:0 0 22px"><h2>${t('waiting')}</h2><div class="stack">${h.knocks.map((k) => `<div class="knockrow" data-sid="${esc(k.sid)}">${avatar(k.name, k.from)}<div style="flex:1"><div>${esc(k.name)}</div><div class="sub mono">${esc(fmtId(k.from))}</div></div><button class="btn sm primary" data-act="review">${t('let_in')}</button><button class="btn sm ghost" data-act="no">${t('decline')}</button></div>`).join('')}</div></div>` : ''}
         ${!guests.length && !h.knocks?.length ? `<div class="empty" style="padding:6px 0 22px"><h3 style="color:var(--fg);margin-bottom:4px">${t('room_empty_title')}</h3>${t('room_empty')}</div>` : ''}
         <div class="slots">
           ${[1, 2, 3, 4].map((n) => { const g = bySlot(n); return `<div class="slot ${g ? 'filled' : ''}" data-slot="${n}">
@@ -376,7 +409,7 @@ function viewRoom() {
           </div>`; }).join('')}
         </div>
         <div class="lane">
-          <h2>${t('spectators')}</h2>
+          <h2>${t('spectators')} <span class="tag mono" style="margin-inline-start:6px">${spect.length}</span></h2>
           <div class="lanebox" data-slot="0">${spect.length ? spect.map(gcard).join('') : `<div class="empty">${t('spectators_empty')}</div>`}</div>
         </div>
         <div class="lane">
@@ -404,8 +437,10 @@ function viewRoom() {
               <div class="seg" id="codec">${['auto', 'av1', 'hevc', 'h264'].map((c) => `<button data-v="${c}" class="${set_.codec === c ? 'on' : ''}" ${c !== 'auto' && !S.st.encoders.some((e) => e.startsWith(c)) ? 'disabled style="opacity:.4"' : ''}>${c === 'auto' ? t('auto') : c.toUpperCase()}</button>`).join('')}<button disabled style="opacity:.35" title="${t('pyrowave_soon')}">Pyro</button></div>
             </div>
             <div class="field"><label>${t('max_bitrate')} <span class="mono" id="mbv">${set_.maxMbps} Mbps</span></label><input type="range" min="5" max="150" step="5" value="${set_.maxMbps}" id="mbps"></div>
+            <div class="field"><label>${t('game_preset')}</label><div class="seg" id="gpresets">${['competitive', 'story', 'pixel'].map((gp) => `<button data-v="${gp}" class="${set_.gamePreset === gp ? 'on' : ''}">${t(`gp_${gp}`)}</button>`).join('')}</div></div>
             <div class="field"><label>${t('resolution')}</label><div class="seg" id="res">${['source', '1440', '1080', '720'].map((r) => `<button data-v="${r}" class="${(set_.maxRes || 'source') === r ? 'on' : ''}">${r === 'source' ? t('res_source') : `${r}p`}</button>`).join('')}</div></div>
             <div class="field"><label>${t('quality')}</label><div class="seg" id="qp">${['speed', 'balanced', 'quality'].map((q) => `<button data-v="${q}" class="${(set_.qualityPreset || 'balanced') === q ? 'on' : ''}">${t(`q_${q}`)}</button>`).join('')}</div><div class="sub">${t(`q_${set_.qualityPreset || 'balanced'}_sub`)}</div></div>
+            <div class="prow"><div class="lbl"><div>${t('privacy_curtain')}</div><div class="sub">${t('privacy_curtain_sub')}</div></div><button class="switch ${set_.privacyCurtain ? 'on' : ''}" data-k="privacyCurtain"></button></div>
             <div class="prow"><div class="lbl"><div>${t('light_spect')}</div><div class="sub">${t('light_spect_sub')}</div></div><button class="switch ${set_.lightSpectators ? 'on' : ''}" data-k="lightSpectators"></button></div>
             <div class="prow"><div class="lbl">${t('fps')}</div><div class="seg" id="fps">${[30, 60, 90, 120].map((f) => `<button data-v="${f}" class="${set_.fps === f ? 'on' : ''}">${f}</button>`).join('')}</div></div>
             <div class="prow"><div class="lbl"><div>${t('stability')}</div><div class="sub">${t('stability_sub')}</div></div>
@@ -430,14 +465,16 @@ function streamSummary(p) { return `${p.codec.toUpperCase()} · ${p.scale ? `${p
 function gcard(g) {
   const p = g.path;
   const left = g.expiresAt ? Math.max(0, Math.round((g.expiresAt - Date.now()) / 60000)) : null;
-  return `<div class="gcard ${g.speaking ? 'speaking' : ''}" draggable="true" data-sid="${g.sid}">
+  const fVol = (S.st?.settings?.friendVolumes?.[g.id]) ?? 1;
+  const lossPct = Math.round((g.loss || 0) * 100);
+  return `<div class="gcard ${g.speaking ? 'speaking' : ''}" draggable="true" data-sid="${esc(g.sid)}" data-fid="${esc(g.id)}">
     <div class="r1">${avatar(g.name, g.id)}<span class="nm">${esc(g.name)}</span>
       ${g.hand ? `<span class="baton" title="${t('hand_up')}">${icon('hand', 15)}</span>` : ''}
       ${g.baton ? `<span class="baton">${icon('pad', 15)}</span>` : ''}
       ${g.muted ? `<span class="muted">${icon('micoff', 14)}</span>` : ''}
       <button class="iconbtn" data-act="more" style="width:24px;height:24px">${icon('more', 15)}</button></div>
-    <div class="r2"><span class="tag"><span class="ping ${pingCls(g.rtt)}" data-f="rtt">${g.rtt || '—'} ms</span></span><span class="tag" data-f="path">${esc(pathLabel(p))}</span>${left != null ? `<span class="tag acc">${t('acc_left', { m: left })}</span>` : ''}</div>
-    <div class="r3"><select class="input" data-act="role">${['watch', 'pad', 'kbm', 'full'].map((r) => `<option value="${r}" ${g.role === r ? 'selected' : ''}>${t(`role_${r}`)}</option>`).join('')}</select></div>
+    <div class="r2"><span class="tag"><span class="ping ${pingCls(g.rtt)}" data-f="rtt">${esc(g.rtt ?? '—')} ms</span></span><span class="tag mono" data-f="loss">${esc(t('loss_tag', { p: lossPct }))}</span><span class="tag" data-f="path">${esc(pathLabel(p))}</span>${left != null ? `<span class="tag acc">${t('acc_left', { m: left })}</span>` : ''}</div>
+    <div class="r3"><select class="input" data-act="role">${['watch', 'pad', 'kbm', 'full'].map((r) => `<option value="${r}" ${g.role === r ? 'selected' : ''}>${esc(t(`role_${r}`))}</option>`).join('')}</select>${g.role === 'watch' ? `<button class="btn sm" data-act="seat" title="${t('give_seat')}">${icon('pad', 12)}<span>${t('give_seat')}</span></button>` : ''}<input type="range" min="0" max="2" step="0.1" value="${fVol}" data-act="fvol" title="${t('their_volume')}" style="width:62px"></div>
   </div>`;
 }
 
@@ -447,6 +484,7 @@ function mountRoom() {
   if (S.host?.mode === 'watch') return watchUI().mountWatchRoom();
   const set_ = S.st.settings;
   $('#openroom') && ($('#openroom').onclick = async () => { S.host = await api.invoke('host:enable', true); render(); });
+  $('#privacyBtn') && ($('#privacyBtn').onclick = async () => { await api.invoke('host:privacy', { on: !S.host?.privacy }); refresh(); });
   $('#panic').onclick = () => api.invoke('host:panic');
   $('#hotseat').onclick = () => api.invoke('host:hotseat', !S.host?.hotseat?.on);
   $('#pass') && ($('#pass').onclick = () => api.invoke('host:pass'));
@@ -459,6 +497,17 @@ function mountRoom() {
     c.ondragstart = (e) => { e.dataTransfer.setData('text/sid', c.dataset.sid); e.dataTransfer.effectAllowed = 'move'; };
     c.querySelector('[data-act="role"]').onchange = (e) => api.invoke('host:role', { sid: c.dataset.sid, role: e.target.value });
     c.querySelector('[data-act="more"]').onclick = (e) => guestMenu(e, c.dataset.sid);
+    const seatBtn = c.querySelector('[data-act="seat"]');
+    if (seatBtn) seatBtn.onclick = () => {
+      const used = new Set((S.host?.guests || []).map((x) => x.slot).filter(Boolean));
+      const freeSlot = [1, 2, 3, 4].find((n) => !used.has(n)) || 1;
+      api.invoke('host:slot', { sid: c.dataset.sid, slot: freeSlot });
+    };
+    const volEl = c.querySelector('[data-act="fvol"]');
+    if (volEl) volEl.oninput = () => {
+      const idx = (S.host?.guests || []).findIndex((x) => x.sid === c.dataset.sid) + 1;
+      setVoiceGain(idx, +volEl.value, c.dataset.fid);
+    };
     c.oncontextmenu = (e) => guestMenu(e, c.dataset.sid);
   });
   $$('[data-slot]').forEach((z) => {
@@ -479,6 +528,15 @@ function mountRoom() {
   $$('#fps button').forEach((b) => (b.onclick = async () => { await set({ fps: +b.dataset.v }); render(); }));
   $$('#res button').forEach((b) => (b.onclick = async () => { await set({ maxRes: b.dataset.v }); render(); }));
   $$('#qp button').forEach((b) => (b.onclick = async () => { await set({ qualityPreset: b.dataset.v }); render(); }));
+  $$('#gpresets button').forEach((b) => (b.onclick = async () => {
+    const p = b.dataset.v;
+    const map = {
+      competitive: { gamePreset: 'competitive', qualityPreset: 'speed', fps: 120, maxRes: '1080', maxMbps: 45, tenBit: false, stability: 'off', pixelArt: false },
+      story: { gamePreset: 'story', qualityPreset: 'quality', fps: 60, maxRes: 'source', maxMbps: 60, tenBit: true, stability: 'auto', pixelArt: false },
+      pixel: { gamePreset: 'pixel', qualityPreset: 'quality', fps: 60, maxRes: 'source', maxMbps: 35, tenBit: false, stability: 'auto', pixelArt: true },
+    };
+    if (map[p]) { await set(map[p]); $('#screen')?.classList?.toggle('pixelated', !!map[p].pixelArt); render(); }
+  }));
   $$('#stab button').forEach((b) => (b.onclick = async () => { await set({ stability: b.dataset.v }); render(); }));
   $('#mbps').oninput = (e) => { $('#mbv').textContent = `${e.target.value} Mbps`; };
   $('#mbps').onchange = (e) => set({ maxMbps: +e.target.value });
@@ -517,10 +575,14 @@ async function pickWindow() {
     let list = [], tab = 'window', pick = null;
     const draw = () => {
       const items = list.filter((s) => s.kind === tab);
-      $('#pgrid', L).innerHTML = items.length ? items.map((s, i) => `<button class="pcard ${pick === s ? 'on' : ''}" data-i="${list.indexOf(s)}">
-          <div class="pthumb">${s.thumb ? `<img src="${s.thumb}" alt="">` : icon(s.kind === 'screen' ? 'monitor' : 'window', 30)}</div>
-          <div class="pname">${s.icon ? `<img class="picon" src="${s.icon}" alt="">` : ''}<span>${esc(s.kind === 'screen' ? `${t('source_display', { n: s.index + 1 })}${s.res ? ` · ${s.res}` : ''}` : s.name)}</span></div>
-        </button>`).join('') : `<div class="empty">—</div>`;
+      $('#pgrid', L).innerHTML = items.length ? items.map((s) => {
+        const thumbUrl = String(s.thumb || '').startsWith('data:image/') ? s.thumb : '';
+        const iconUrl = String(s.icon || '').startsWith('data:image/') ? s.icon : '';
+        return `<button class="pcard ${pick === s ? 'on' : ''}" data-i="${list.indexOf(s)}">
+          <div class="pthumb">${thumbUrl ? `<img src="${esc(thumbUrl)}" alt="">` : icon(s.kind === 'screen' ? 'monitor' : 'window', 30)}</div>
+          <div class="pname">${iconUrl ? `<img class="picon" src="${esc(iconUrl)}" alt="">` : ''}<span>${esc(s.kind === 'screen' ? `${t('source_display', { n: s.index + 1 })}${s.res ? ` · ${s.res}` : ''}` : s.name)}</span></div>
+        </button>`;
+      }).join('') : `<div class="empty">—</div>`;
       $$('.pcard', L).forEach((b) => (b.onclick = () => { pick = list[+b.dataset.i]; $('#pgo', L).disabled = false; draw(); }));
       $$('.pcard', L).forEach((b) => (b.ondblclick = () => go()));
     };
@@ -560,9 +622,11 @@ function patchRoom() {
   for (const g of h.guests || []) {
     const c = $(`.gcard[data-sid="${g.sid}"]`); if (!c) continue;
     const r = c.querySelector('[data-f="rtt"]'); r.textContent = `${g.rtt || '—'} ms`; r.className = `ping ${pingCls(g.rtt)}`;
+    const le = c.querySelector('[data-f="loss"]'); if (le) le.textContent = t('loss_tag', { p: Math.round((g.loss || 0) * 100) });
     c.querySelector('[data-f="path"]').textContent = pathLabel(g.path);
     c.classList.toggle('speaking', !!g.speaking);
   }
+  $('#screen')?.classList?.toggle('pixelated', !!S.st?.settings?.pixelArt);
   drawSpark();
 }
 
@@ -611,10 +675,11 @@ function knockDialog(k) {
 function viewNet() {
   const c = S.check;
   const set_ = S.st.settings;
+  const ispBar = `<div class="panel" style="margin:0 0 16px;max-width:1100px"><div class="ph"><h3>${t('saudi_isp')}</h3>${c?.isp ? `<span class="tag acc">${esc(t('isp_detected', { isp: c.isp.toUpperCase() }))}</span>` : ''}<span class="sp"></span><select class="input" id="ispsel" style="width:auto">${['auto', 'stc', 'mobily', 'zain', 'salam', 'other'].map((v) => `<option value="${v}" ${(set_.isp || 'auto') === v ? 'selected' : ''}>${t(`isp_${v}`)}</option>`).join('')}</select><button class="btn sm primary" id="ispbench" ${S.checking ? 'disabled' : ''}>${icon('bolt', 14)}<span>${t('isp_bench')}</span></button></div></div>`;
   const head = `<div class="page-head"><h1>${t('net_title')}</h1><span class="sp"></span>
     <label class="sub">${t('conn_override')}</label>
     <select class="input" id="ctype" style="width:auto">${['auto', 'fiber', '5g', '4g', 'wifi'].map((v) => `<option value="${v}" ${set_.connType === v ? 'selected' : ''}>${t(`conn_${v}`)}</option>`).join('')}</select>
-    <button class="btn primary" id="runcheck" ${S.checking ? 'disabled' : ''}>${S.checking ? `<span class="pulse"></span>${t('net_checking')}` : `${icon('refresh', 16)}<span>${t('net_check')}</span>`}</button></div>`;
+    <button class="btn primary" id="runcheck" ${S.checking ? 'disabled' : ''}>${S.checking ? `<span class="pulse"></span>${t('net_checking')}` : `${icon('refresh', 16)}<span>${t('net_check')}</span>`}</button></div>${ispBar}`;
   if (!c) return `${head}<div class="empty">${t('net_never')}</div>${peakBlock()}`;
   const best = c.relays[0];
   const cell = (k, v) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`;
@@ -639,7 +704,7 @@ function viewNet() {
       <section>
         <h2>${t('relays')}</h2>
         <table class="t"><thead><tr><th></th><th class="n">${t('relay_best')}</th><th class="n">${t('jitter')}</th><th class="n">${t('loss')}</th><th style="width:30%"></th></tr></thead><tbody>
-          ${c.relays.map((r) => `<tr><td>${esc(relayName(r.label))} <span class="sub mono">${r.fam}</span></td><td class="n">${r.best != null ? r.best.toFixed(1) : '—'}</td><td class="n">${r.jitter.toFixed(1)}</td><td class="n">${Math.round(r.loss * 100)}%</td><td><div class="bar"><i style="width:${r.best != null ? Math.max(4, 100 - r.best) : 0}%"></i></div></td></tr>`).join('')}
+          ${c.relays.map((r) => `<tr><td>${esc(relayName(r.label))} <span class="sub mono">${esc(r.fam)}</span></td><td class="n">${r.best != null ? r.best.toFixed(1) : '—'}</td><td class="n">${r.jitter.toFixed(1)}</td><td class="n">${Math.round(r.loss * 100)}%</td><td><div class="bar"><i style="width:${r.best != null ? Math.max(4, 100 - r.best) : 0}%"></i></div></td></tr>`).join('')}
         </tbody></table>
         ${peakBlock()}
       </section>
@@ -672,6 +737,13 @@ function peakBlock() {
 function mountNet() {
   $('#runcheck').onclick = runCheck;
   $('#ctype').onchange = (e) => set({ connType: e.target.value });
+  $('#ispsel') && ($('#ispsel').onchange = (e) => set({ isp: e.target.value }));
+  $('#ispbench') && ($('#ispbench').onclick = async () => {
+    S.checking = true; render();
+    try { S.check = await api.invoke('net:isp-bench'); } finally { S.checking = false; }
+    if (S.check?.relays?.[0]?.name) await set({ preferredRelay: S.check.relays[0].name });
+    render();
+  });
   $$('[data-tip]').forEach((b) => (b.onclick = async () => {
     if (b.dataset.tip === 'stability') { await set({ stability: 'on' }); toast(t('stability')); }
     if (b.dataset.tip === 'bandLock') api.invoke('routerlock');
@@ -729,8 +801,8 @@ function viewSettings() {
     <section class="sgroup"><h2>${t('set_server')}</h2><div class="rows">
       <div class="field"><label>${t('server')}</label><input class="input mono" data-s="server" value="${esc(s.server)}" placeholder="${s.builtInServer ? t('server_builtin') : t('server_hint')}"></div>
       ${s.builtInServer ? `<div class="sub">${icon('shield', 13)} ${t('builtin_note')}</div>` : `<div class="field"><label>${t('access_key')}</label><input class="input mono" type="password" data-s="accessKey" value="${esc(s.accessKey)}"><div class="sub">${t('access_key_sub')}</div></div>`}
-      <div class="field"><label>${t('server_ws')}</label><input class="input mono" data-s="serverWs" value="${esc(s.serverWs)}" placeholder="wss://majlis.example.com/signal"></div>
-      <div class="field"><label>${t('invite_base')}</label><input class="input mono" data-s="inviteBase" value="${esc(s.inviteBase)}" placeholder="https://majlis.example.com"></div>
+      <div class="field"><label>${t('server_ws')}</label><input class="input mono" data-s="serverWs" value="${esc(s.serverWs)}" placeholder="wss://your-worker.workers.dev/signal"></div>
+      <div class="field"><label>${t('invite_base')}</label><input class="input mono" data-s="inviteBase" value="${esc(s.inviteBase)}" placeholder="https://your-worker.workers.dev"></div>
     </div></section>
 
     <section class="sgroup"><h2>${t('set_stream')}</h2><div class="rows">
@@ -745,7 +817,9 @@ function viewSettings() {
     </div></section>
 
     <section class="sgroup"><h2>${t('set_pads')}</h2><div class="rows">
-      ${helper?.vigem ? `<div class="prow"><i class="dot ok"></i><div class="lbl">${t('vigem_ok')}</div></div>` : `<div class="prow"><i class="dot warn"></i><div class="lbl">${t('vigem_missing')}</div><button class="btn sm" id="vigem">${t('vigem_get')}</button></div>`}
+      ${helper?.vigem ? `<div class="prow"><i class="dot ok"></i><div class="lbl">${t('vigem_ok')}</div><button class="btn sm" id="resetpads">${icon('refresh', 14)}<span>${t('pads_reset')}</span></button></div>` : `<div class="prow"><i class="dot warn"></i><div class="lbl">${t('vigem_missing')}</div><button class="btn sm" id="resetpads">${icon('refresh', 14)}<span>${t('pads_reset')}</span></button><button class="btn sm" id="vigem">${t('vigem_get')}</button></div>`}
+      ${row(t('pad_hud'), sw('controllerHud'))}
+      ${row(t('privacy_curtain'), sw('privacyCurtain'), t('privacy_curtain_sub'))}
     </div></section>
 
     <section class="sgroup"><h2>${t('set_voice')}</h2><div class="rows">
@@ -802,6 +876,10 @@ function mountSettings() {
   $('#newid').onclick = () => { if (confirm(t('confirm_new_id'))) api.invoke('identity:new'); };
   $('#pickff').onclick = async () => { const p = await api.invoke('pick:file', [{ name: 'ffmpeg', extensions: ['exe'] }]); if (p) { await set({ ffmpeg: p }); render(); } };
   $('#vigem') && ($('#vigem').onclick = () => api.invoke('vigem'));
+  $('#resetpads') && ($('#resetpads').onclick = async () => {
+    const r = await api.invoke('host:pads-reset').catch(() => null);
+    toast(r?.ok ? t('pads_reset_done') : (r?.error || t('fail_bad')), { bad: !r?.ok });
+  });
   $('#rl').onclick = () => api.invoke('routerlock');
   $('#openlogs').onclick = () => api.invoke('logs');
   $$('[data-num]').forEach((r) => {
@@ -834,19 +912,77 @@ function applyLook() {
 }
 
 // ========================================================================= STAGE (guest)
+function renderPadHud(pad) {
+  const el = $('#padHud');
+  if (!el) return;
+  if (!pad || !S.st?.settings?.controllerHud || !S.player || S.ctrl?.mode === 'watch') {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const LABELS = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'LS', 'RS', 'DU', 'DD', 'DL', 'DR'];
+  const lsX = Math.round((pad.lx || 0) * 9), lsY = Math.round((pad.ly || 0) * 9);
+  const rsX = Math.round((pad.rx || 0) * 9), rsY = Math.round((pad.ry || 0) * 9);
+  el.innerHTML = `<div class="sticks"><div class="stick"><i style="transform:translate(calc(-50% + ${lsX}px),calc(-50% + ${lsY}px))"></i></div><div class="stick"><i style="transform:translate(calc(-50% + ${rsX}px),calc(-50% + ${rsY}px))"></i></div></div><div class="btns">${LABELS.map((l, i) => `<span class="${((pad.bits >>> i) & 1) ? 'on' : ''}">${l}</span>`).join('')}</div>`;
+}
+
+function renderSpecLounge() {
+  const el = $('#specLounge');
+  if (!el) return;
+  const c = S.ctrl;
+  if (!S.player || c?.role !== 'watch' || c?.mode === 'watch') {
+    el.hidden = true;
+    return;
+  }
+  const me = c.roster?.list?.find((r) => r.idx === c.roster?.you);
+  el.hidden = false;
+  el.innerHTML = `<button class="btn sm ${me?.hand ? 'primary' : ''}" data-sl="hand">${icon('hand', 13)}<span>${me?.hand ? t('lower_hand') : t('raise_hand')}</span></button>${['🔥', '👏', '😂', '😮'].map((em) => `<button class="rb" data-sl="react" data-r="${em}">${em}</button>`).join('')}`;
+  el.querySelector('[data-sl="hand"]').onclick = () => api.invoke('guest:ctrl', { t: 'hand', on: !me?.hand });
+  el.querySelectorAll('[data-sl="react"]').forEach((b) => (b.onclick = () => api.invoke('guest:ctrl', { t: 'react', r: b.dataset.r })));
+}
+
+function updateMicroPill() {
+  const mp = $('#microPill');
+  if (!mp) return;
+  if (!S.player || S.ctrl?.mode === 'watch' || S.local) {
+    mp.hidden = true;
+    return;
+  }
+  const g = S.gstats || {};
+  mp.hidden = false;
+  mp.textContent = `${Math.round(g.rtt || 0)}ms · ${Math.round((g.loss || 0) * 100)}%`;
+  mp.onclick = () => { $('#hud').classList.toggle('on'); updateHud(); };
+}
+
+function applyPrivacyOverlay(on) {
+  const el = $('#privacyCurtain');
+  if (!el) return;
+  el.hidden = !on;
+  if (on) {
+    $('#pcTitle').textContent = t('privacy_active');
+    $('#pcSub').textContent = t('privacy_resume');
+  }
+}
+
 function openStage(info) {
+  api.invoke('media:close').catch(() => {});
+  if (S.view === 'cinema') { S.view = 'home'; renderRail(); hideMedia(); }
   if (S.player) { S.player.destroy(); S.player = null; }
   S.connect = { state: 'idle', target: '' };
   const stage = $('#stage');
   stage.hidden = false;
+  $('#screen')?.classList?.toggle('pixelated', !!S.st?.settings?.pixelArt);
+  applyPrivacyOverlay(false);
   if (!info.local) S.ctrl = { roster: null, role: null, slot: null, library: null, host: info.host, safety: info.safety, keyChanged: info.keyChanged, mode: 'play' };
   $('#stageWait').innerHTML = `<span class="pulse"></span><span>${t('no_signal')}</span>`;
   $('#stageWait').hidden = false;
   S.player = new Player({
     port: S.port, canvas: $('#screen'), cursorEl: $('#cursor'), stage: $('#stageVideo'), settings: S.st.settings,
-    onStats: (p) => { S.pstats = p; updateHud(); if (S.drawer) updateDrawerStats(); },
-    onFirstFrame: () => { $('#stageWait').hidden = true; },
+    onStats: (p) => { S.pstats = p; updateHud(); updateMicroPill(); if (S.drawer) updateDrawerStats(); },
+    onFirstFrame: () => { $('#stageWait').hidden = true; updateMicroPill(); renderSpecLounge(); },
+    onPadState: renderPadHud,
   });
+  MEDIA?.update(mediaHost());
   S.player.filterKey = (e, down) => {
     const s = S.st.settings;
     if (watchUI().watchKey(e, down)) { e.preventDefault(); return true; }
@@ -874,8 +1010,9 @@ async function setupVoice() {
   if (mode === 'off' || !S.player) return;
   try {
     await S.player.startMic((b) => S.port.postMessage({ t: 'vo', data: b }));
-    S.player.setMicOpen(mode === 'open');
+    S.player.setMicOpen(mode === 'open', mode === 'open');
   } catch {}
+  emitVoiceUi();
 }
 
 function closeStage(msgKey) {
@@ -884,7 +1021,12 @@ function closeStage(msgKey) {
   watchUI().teardownWatchStage();
   if (S.local) { S.local = false; api.invoke('local:view', false); }
   S.player?.destroy(); S.player = null;
+  MEDIA?.update(mediaHost());
   $('#stage').hidden = true;
+  if ($('#microPill')) $('#microPill').hidden = true;
+  if ($('#padHud')) $('#padHud').hidden = true;
+  if ($('#specLounge')) $('#specLounge').hidden = true;
+  applyPrivacyOverlay(false);
   toggleDrawer(false);
   $('#hud').classList.remove('on');
   api.invoke('fullscreen', false);
@@ -931,11 +1073,13 @@ function renderDrawer() {
       <div class="prow tight"><div class="lbl"><div>${t('data_saver')}</div><div class="sub">${t('data_saver_sub')}</div></div><button class="switch ${s.dataSaver ? 'on' : ''}" id="dsaver"></button></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" id="dmini">${icon('window', 15)}<span>${t('mini')}</span></button>${['kbm', 'full'].includes(c.role) ? `<button class="btn sm" id="dclip">${icon('copy', 15)}<span>${t('clip_to_host')}</span></button>` : ''}</div>
     </div>
-    ${c.role === 'full' ? `<div class="dsec"><h2>${t('library')}</h2><div class="minicovers" id="dlib">${(c.library || []).map((g) => `<div class="mc" data-id="${esc(g.id)}" title="${esc(g.name)}">${g.cover ? `<img src="data:image/jpeg;base64,${g.cover}" alt="">` : esc(g.name)}</div>`).join('') || `<span class="sub">…</span>`}</div></div>` : ''}
+    ${c.role === 'full' ? `<div class="dsec"><h2>${t('library')}</h2><div class="minicovers" id="dlib">${(c.library || []).map((g) => `<div class="mc" data-id="${esc(g.id)}" title="${esc(g.name)}">${g.cover && /^[A-Za-z0-9+/=\s]+$/.test(String(g.cover)) ? `<img src="data:image/jpeg;base64,${String(g.cover).replace(/\s+/g, '')}" alt="">` : esc(g.name)}</div>`).join('') || `<span class="sub">…</span>`}</div></div>` : ''}
     <div class="dsec stack">
       <div class="prow tight"><div class="lbl">${t('mouse_lock')}</div><button class="switch ${S.player?.mouseMode === 'rel' ? 'on' : ''}" id="dlock"></button></div>
       <div class="prow tight"><div class="lbl">${t('gyro')}</div><button class="btn sm" id="dgyro">${S.player?.hid ? t('gyro_on') : 'DualSense'}</button></div>
       <div class="prow tight"><div class="lbl">HUD</div><button class="switch ${$('#hud').classList.contains('on') ? 'on' : ''}" id="dhud"></button></div>
+      <div class="prow tight"><div class="lbl">${t('pad_hud')}</div><button class="switch ${s.controllerHud ? 'on' : ''}" id="dpadhud"></button></div>
+      <div class="prow tight"><div class="lbl">${t('gp_pixel')}</div><button class="switch ${s.pixelArt ? 'on' : ''}" id="dpixel"></button></div>
     </div>
     <div class="dsec">
       <h2>${t('safety')}</h2>
@@ -965,6 +1109,8 @@ function renderDrawer() {
   $('#dlock', D).onclick = () => { S.player?.setMouseMode(S.player.mouseMode === 'rel' ? 'abs' : 'rel'); renderDrawer(); };
   $('#dgyro', D).onclick = async () => { try { await S.player?.enableGyro(); } catch {} renderDrawer(); };
   $('#dhud', D).onclick = () => { $('#hud').classList.toggle('on'); renderDrawer(); updateHud(); };
+  $('#dpadhud', D).onclick = async () => { await set({ controllerHud: !S.st.settings.controllerHud }); if (!S.st.settings.controllerHud) renderPadHud(null); renderDrawer(); };
+  $('#dpixel', D).onclick = async () => { await set({ pixelArt: !S.st.settings.pixelArt }); $('#screen')?.classList?.toggle('pixelated', !!S.st.settings.pixelArt); renderDrawer(); };
   $('#dhand', D) && ($('#dhand', D).onclick = () => api.invoke('guest:ctrl', { t: 'hand', on: !me?.hand }));
   $('#dpass', D) && ($('#dpass', D).onclick = () => api.invoke('guest:ctrl', { t: 'pass' }));
   $$('#dvoice button', D).forEach((b) => (b.onclick = async () => { await set({ voice: b.dataset.v }); if (b.dataset.v === 'off') S.player?.stopMic(); else { await setupVoice(); S.player?.setMicOpen(b.dataset.v === 'open'); } renderDrawer(); }));
@@ -1005,7 +1151,7 @@ function updateDrawerStats() {
     <dt>RTT</dt><dd class="mono">${g.rtt ?? '—'} ms</dd>
     <dt>${t('bitrate')}</dt><dd class="mono">${((g.kbps || 0) / 1000).toFixed(1)} Mbps</dd>
     <dt>${t('loss')}</dt><dd class="mono">${((g.loss || 0) * 100).toFixed(1)}%${g.recovered ? ` · ${t('fec')} ${g.recovered}` : ''}</dd>
-    <dt>${t('fps_now')}</dt><dd class="mono">${p.fps || 0}${p.codec ? ` · ${String(p.codec.codec || '').toUpperCase()}` : ''}</dd>`;
+    <dt>${t('fps_now')}</dt><dd class="mono">${p.fps || 0}${p.codec ? ` · ${esc(String(p.codec.codec || '').toUpperCase())}` : ''}</dd>`;
 }
 
 function updateHud() {
@@ -1031,25 +1177,128 @@ function chime() {
   } catch {}
 }
 
-function setVoiceGain(idx, g) { S.voiceGains[idx] = g; S.player?.setVoiceGain(idx, g); S.hub?.setGain(idx, g); }
+function setVoiceGain(idx, g, friendId = null) {
+  if (!(idx >= 0)) return;
+  S.voiceGains[idx] = g;
+  S.player?.setVoiceGain(idx, g);
+  S.hub?.setGain(idx, g);
+  if (friendId && S.st?.settings) {
+    const nextMap = { ...(S.st.settings.friendVolumes || {}), [friendId]: g };
+    S.st.settings.friendVolumes = nextMap;
+    set({ friendVolumes: nextMap }).catch(() => {});
+  }
+}
 
-// The host hears friends and talks to them from the room page too, not only inside a stream.
+function syncSavedFriendGains() {
+  const vols = S.st?.settings?.friendVolumes || {};
+  const list = S.ctrl?.roster?.list || [];
+  for (const r of list) {
+    if (r?.id && vols[r.id] != null) {
+      S.voiceGains[r.idx] = vols[r.id];
+      S.player?.setVoiceGain(r.idx, vols[r.id]);
+      S.hub?.setGain(r.idx, vols[r.id]);
+    }
+  }
+  const guests = S.host?.guests || [];
+  guests.forEach((g, i) => {
+    const idx = i + 1;
+    if (g?.id && vols[g.id] != null) {
+      S.voiceGains[idx] = vols[g.id];
+      S.player?.setVoiceGain(idx, vols[g.id]);
+      S.hub?.setGain(idx, vols[g.id]);
+    }
+  });
+}
+
+const activeTalkers = new Map();
+function emitVoiceUi() {
+  const s = S.st?.settings || {};
+  const cutoff = Date.now() - 600;
+  for (const [k, v] of activeTalkers) if (v.at < cutoff) activeTalkers.delete(k);
+  window.dispatchEvent(new CustomEvent('majlis-voice', {
+    detail: {
+      mode: s.voice || 'ptt',
+      pttKey: s.pttKey || 'CapsLock',
+      micOpen: !!(S.player?.mic?.open || S.hub?.mic?.open),
+      autoDuck: s.autoDuck !== false,
+      talkers: [...activeTalkers.values()],
+    },
+  }));
+}
+
+window.__majlisVoice = {
+  getState: () => {
+    const s = S.st?.settings || {};
+    return {
+      mode: s.voice || 'ptt',
+      pttKey: s.pttKey || 'CapsLock',
+      micOpen: !!(S.player?.mic?.open || S.hub?.mic?.open),
+      autoDuck: s.autoDuck !== false,
+      talkers: [...activeTalkers.values()],
+    };
+  },
+  setPtt: (down) => {
+    const s = S.st?.settings || {};
+    if (s.voice !== 'ptt') return;
+    const on = !!down;
+    S.player?.setMicOpen(on, false);
+    S.hub?.setMicOpen(on, false);
+    emitVoiceUi();
+  },
+  setMode: async (mode) => {
+    if (!['off', 'ptt', 'open'].includes(mode)) return;
+    await set({ voice: mode });
+    const gate = mode === 'open';
+    S.player?.setMicOpen(gate, gate);
+    S.hub?.setMicOpen(gate, gate);
+    if (mode === 'off') { S.player?.stopMic?.(); hub(false); }
+    else { await setupVoice().catch(() => {}); await hub((S.host?.guests?.length || 0) > 0 || !!S.guestLinked); }
+    emitVoiceUi();
+  },
+  getPeers: () => {
+    const vols = S.st?.settings?.friendVolumes || {};
+    if (S.ctrl?.roster?.list?.length) {
+      return [
+        { idx: 0, id: S.ctrl.host?.id || 'host', name: S.ctrl.roster.host || S.ctrl.host?.nick || 'Host', gain: S.voiceGains[0] ?? vols[S.ctrl.host?.id] ?? 1 },
+        ...S.ctrl.roster.list.filter((r) => r.idx !== S.ctrl.roster.you).map((r) => ({ idx: r.idx, id: r.id || String(r.idx), name: r.name, gain: S.voiceGains[r.idx] ?? vols[r.id] ?? 1 })),
+      ];
+    }
+    if (S.host?.guests?.length) {
+      return S.host.guests.map((g, i) => ({ idx: i + 1, id: g.id, name: g.name, gain: S.voiceGains[i + 1] ?? vols[g.id] ?? 1 }));
+    }
+    return [];
+  },
+  setPeerGain: (idx, gain, friendId = null) => setVoiceGain(idx, gain, friendId),
+};
+
+// The host (and guests in Theater watch parties) hears friends and talks from the room/cinema too.
 async function hub(want) {
   const s = S.st?.settings || {};
-  want = want && !S.player && s.voice !== 'off';
-  if (!want) { if (S.hub) { S.hub.destroy(); S.hub = null; } return; }
+  want = (want || !!S.guestLinked) && !S.player && s.voice !== 'off';
+  if (!want) { if (S.hub) { S.hub.destroy(); S.hub = null; emitVoiceUi(); } return; }
   if (S.hub) return;
+  const pktType = S.guestLinked && !S.host?.guests?.length ? 'vo' : 'hvo';
   S.hub = new VoiceHub({ port: S.port, settings: s, onSpeak: (idx) => speaking(idx) });
   await S.hub.ready;
   for (const [i, g] of Object.entries(S.voiceGains)) S.hub.setGain(+i, g);
-  try { await S.hub.startMic((b) => S.port.postMessage({ t: 'hvo', data: b })); S.hub.setMicOpen(s.voice === 'open'); } catch {}
+  try {
+    await S.hub.startMic((b) => S.port.postMessage({ t: pktType, data: b }));
+    S.hub.setMicOpen(s.voice === 'open', s.voice === 'open');
+  } catch {}
+  emitVoiceUi();
 }
 
-// who's talking: a name chip over the stream
+// who's talking: a name chip over the stream or Theater HUD
 function speaking(idx) {
   let name = '';
-  if (S.player && S.ctrl.roster) name = idx === 0 ? (S.ctrl.roster.host || S.ctrl.host?.nick || '') : (S.ctrl.roster.list.find((r) => r.idx === idx)?.name || '');
+  if (S.ctrl?.roster) name = idx === 0 ? (S.ctrl.roster.host || S.ctrl.host?.nick || '') : (S.ctrl.roster.list.find((r) => r.idx === idx)?.name || '');
   else if (S.host?.guests) name = S.host.guests[idx - 1]?.name || '';
+  if (!name && idx === 0) name = S.ctrl?.host?.nick || 'Host';
+  if (name) {
+    activeTalkers.set(idx, { idx, name, at: Date.now() });
+    setTimeout(emitVoiceUi, 620);
+    emitVoiceUi();
+  }
   if (!name || $('#stage').hidden) return;
   let el = $(`.talk[data-i="${idx}"]`);
   if (!el) { el = document.createElement('div'); el.className = 'talk'; el.dataset.i = idx; el.innerHTML = `${icon('mic', 13)}<span>${esc(name)}</span>`; ($('#talkers') || $('#stage').appendChild(Object.assign(document.createElement('div'), { id: 'talkers' }))).append(el); }
@@ -1087,6 +1336,7 @@ async function refresh() {
   applyLook(); renderRail(); renderStatus();
   // (cinema keeps its own state and scroll: a settings refresh must not rebuild it)
   if (S.view !== 'cinema' && !(S.view === 'home' && document.activeElement?.matches('#digits input')) && !document.activeElement?.matches('.view input.input')) render();
+  else if (S.view === 'cinema') MEDIA?.update(mediaHost());
 }
 
 // Events can arrive before the first state load finishes; hold them until it has.
@@ -1097,14 +1347,47 @@ function handleEvent(m) {
   switch (m.type) {
     case 'registered': S.st.registered = true; S.st.publicAddr = m.publicAddr; S.st.relays = m.relays; S.via = m.via; renderStatus(); if (S.view === 'home') { const st = $('.idstatus'); if (st) render(); } break;
     case 'id-changed': refresh(); break;
-    case 'vote': MEDIA?.setVote(m); break;
-    case 'theater': if (!m.open) MEDIA?.refresh(); break;
+    case 'vote': MEDIA?.setVote(m); MEDIA?.refresh('social-room'); break;
+    case 'social-updated': MEDIA?.refresh('social-friends'); MEDIA?.refresh('social-me'); MEDIA?.refresh('social-profile'); break;
+    case 'party-updated': MEDIA?.refresh('social-room'); break;
+    case 'tray:nav': go(m.view || 'cinema'); if (m.tab) setTimeout(() => MEDIA?.go(m.tab), 120); break;
+    case 'theater':
+      if (typeof m.open === 'boolean') {
+        S.theaterOpen = m.open;
+        document.body.classList.toggle('th-open', m.open);
+        if (m.open && S.player && S.guestLinked) {
+          // Hand off guest voice from full-screen Play/Watch stage to background VoiceHub during Theater Watch Party
+          S.player.destroy(); S.player = null;
+          $('#stage').hidden = true;
+          go('cinema');
+          setTimeout(() => hub(true), 40);
+        }
+        MEDIA?.update(mediaHost());
+        if (!m.open) MEDIA?.refresh();
+        emitVoiceUi();
+      }
+      break;
     case 'downloads': MEDIA?.refresh('downloads'); break;
     case 'trackers': MEDIA?.refresh('trackers'); break;
-    case 'presence': S.presence = m.on; if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
+    case 'cin:notif-new': MEDIA?.refresh('notifications'); break;
+    case 'cin:streams-part': MEDIA?.mergeStreams?.(m); break;
+    case 'cin:deeplink-addon':
+      if (m.url) {
+        if (MEDIA) { MEDIA.go('addons'); MEDIA.deepLinkAddon?.(m.url); }
+        else pendingAddonUrl = m.url;
+      }
+      break;
+    case 'discord-voice':
+      // Echo guard: if Discord voice call is active while Majlis mic is open, temporarily mute Majlis mic
+      if (S.st?.settings?.discordEchoGuard !== false && S.player) {
+        if (m.active) S.player.setMicOpen(false);
+        else if (S.st?.settings?.voice === 'open') S.player.setMicOpen(true);
+      }
+      break;
+    case 'presence': S.presence = m.on; MEDIA?.refresh('social-friends'); if (S.view === 'home') { const fl = $('#flist'); if (fl) { fl.innerHTML = friendsList(); wireFriends(); } } break;
     case 'knock-progress': if (m.state === 'waiting' && S.connect.state === 'knocking') { S.connect.state = 'waiting'; renderKnockLine(); } break;
     case 'knock': S.host = S.host || {}; renderRail(); if (S.st.settings.knockSound !== false) chime(); knockDialog(m); if (S.view === 'room') render(); break;
-    case 'ptt': if (S.st.settings.voice === 'ptt') { S.player?.setMicOpen(m.down); S.hub?.setMicOpen(m.down); } break;
+    case 'ptt': if (S.st.settings.voice === 'ptt') { S.player?.setMicOpen(m.down, false); S.hub?.setMicOpen(m.down, false); emitVoiceUi(); } break;
     case 'clip': toast(t('clip_got', { name: m.from || '' })); break;
     case 'knock-gone': if (S.knockClose?.sid === m.sid) S.knockClose.close(); break;
     case 'host': {
@@ -1130,10 +1413,18 @@ function handleEvent(m) {
     case 'movie': if (S.host) { S.host.movie = { ...m, rx: performance.now() }; if (S.local) watchUI().renderBar(); if (S.view === 'room') patchRoom(); } break;
     case 'chat': watchUI().addChat(m); break;
     case 'react': watchUI().floatReaction(m.r); break;
-    case 'countdown': watchUI().countdown(m.ms); break;
+    case 'countdown': if (!S.theaterOpen) watchUI().countdown(m.ms); break;
     case 'askpause': toast(t('asked_pause', { name: m.name }), { action: t('pause'), onAction: () => api.invoke('movie:ctl', { op: 'pause' }) }); break;
     case 'movie-by': toast(t('by_who', { by: m.by, op: t(`op_${m.op}`) }), { ms: 2200 }); break;
-    case 'hand': if (m.on) toast(t('hand_note', { name: m.name }), { action: t('pass_next'), onAction: () => api.invoke('host:pass', m.sid) }); break;
+    case 'hand': if (m.on) {
+      const gg = S.host?.guests?.find((x) => x.sid === m.sid);
+      if (gg && gg.role === 'watch' && !S.host?.hotseat?.on) {
+        const used = new Set((S.host?.guests || []).map((x) => x.slot).filter(Boolean));
+        const freeSlot = [1, 2, 3, 4].find((n) => !used.has(n));
+        if (freeSlot) { toast(t('hand_note', { name: m.name }), { action: t('give_seat'), onAction: () => api.invoke('host:slot', { sid: m.sid, slot: freeSlot }) }); break; }
+      }
+      toast(t('hand_note', { name: m.name }), { action: t('pass_next'), onAction: () => api.invoke('host:pass', m.sid) });
+    } break;
     case 'baton': toast(t('baton_to', { name: m.name })); break;
     case 'panic': toast(t('panic_done')); refresh(); break;
     case 'notice': toast(t(`notice_${m.key}`), { bad: true }); break;
@@ -1142,33 +1433,42 @@ function handleEvent(m) {
     case 'encoders': S.st.encoders = m.list; S.st.ffmpeg = true; if (S.view === 'set' || S.view === 'room') render(); break;
     case 'ffmpeg': ffmpegStatus(m); break;
     case 'helper': S.st.helper = m; if (S.view === 'set' || S.view === 'room') render(); break;
-    case 'deeplink': go('home'); S.connect.target = m.target; render(); doConnect(m.target); break;
+    case 'deeplink':
+      if (m.kind === 'friend') { go('cinema'); setTimeout(() => MEDIA?.go('friends'), 200); break; }
+      if (m.kind === 'addon') { pendingAddonUrl = m.url || pendingAddonUrl; go('cinema'); setTimeout(() => { MEDIA?.go('addons'); if (m.url) MEDIA?.deepLinkAddon?.(m.url); }, 200); break; }
+      if (S.theaterOpen) api.invoke('media:close').catch(() => {});
+      go('home'); S.connect.target = m.target; render(); doConnect(m.target); break;
     case 'guest':
       if (m.state === 'reconnecting') { if (S.player) { $('#stageWait').hidden = false; $('#stageWait').innerHTML = `<span class="pulse"></span><span>${t('reconnecting')}</span>`; } break; }
-      if (m.state === 'linked') openStage(m);
-      else if (m.state === 'failed') { S.connect = { state: 'failed', reason: m.reason, target: m.target }; renderKnockLine(); }
-      else if (m.state === 'ended' && S.player && !S.local) { closeStage('ended'); if (m.summary && m.summary.ms > 60000) watchUI().summary([m.summary]); }
+      if (m.state === 'linked') { S.guestLinked = true; openStage(m); }
+      else if (m.state === 'failed') { S.guestLinked = false; S.connect = { state: 'failed', reason: m.reason, target: m.target }; renderKnockLine(); }
+      else if (m.state === 'ended') { S.guestLinked = false; hub(false); if (S.player && !S.local) { closeStage('ended'); if (m.summary && m.summary.ms > 60000) watchUI().summary([m.summary]); } }
       break;
-    case 'kicked': if (S.player) closeStage('kicked'); break;
-    case 'guest-stats': S.gstats = m; break;
+    case 'kicked': S.guestLinked = false; hub(false); if (S.player) closeStage('kicked'); break;
+    case 'guest-stats': S.gstats = m; updateMicroPill(); break;
     case 'guest-ctrl': {
       const c = S.ctrl;
       if (m.t === 'welcome') {
         c.role = m.role; c.slot = m.slot; c.host = { ...c.host, nick: m.host, id: m.hostId }; c.canControl = m.canControl; c.perms = m.perms || { chat: true, react: true };
         if (m.mode === 'watch' && c.mode !== 'watch') { c.mode = 'watch'; if (S.player) watchUI().setupWatchStage(); }
+        renderSpecLounge();
       }
       if (m.t === 'mode') {
         c.mode = m.mode; c.canControl = m.canControl;
         if (S.player) { if (m.mode === 'watch') watchUI().setupWatchStage(); else watchUI().teardownWatchStage(); }
+        renderSpecLounge();
+        updateMicroPill();
       }
+      if (m.t === 'privacy') applyPrivacyOverlay(!!m.on);
       if (m.t === 'movie') { S.gmovie = { ...m, rx: performance.now() }; watchUI().renderBar(); }
       if (m.t === 'perms') { c.perms = { chat: m.chat, react: m.react }; watchUI().renderBar(); if (!m.chat) toast(t('chat_off_note')); }
       if (m.t === 'chat') watchUI().addChat(m);
       if (m.t === 'react') watchUI().floatReaction(m.r);
-      if (m.t === 'ready?') watchUI().readyAsk();
-      if (m.t === 'countdown') watchUI().countdown(m.ms);
-      if (m.t === 'role') { c.role = m.role; c.slot = m.slot; toast(t('your_role', { role: t(`role_${m.role}`) })); }
-      if (m.t === 'roster') c.roster = m;
+      if (m.t === 'ready?') { if (!S.theaterOpen) watchUI().readyAsk(); }
+      if (m.t === 'countdown') { if (!S.theaterOpen) watchUI().countdown(m.ms); }
+      if (m.t === 'watch_control') { c.canControl = !!m.canControl; c.watchControl = { mode: m.mode, holderId: m.holderId, holderName: m.holderName }; }
+      if (m.t === 'role') { c.role = m.role; c.slot = m.slot; renderSpecLounge(); toast(t('your_role', { role: t(`role_${m.role}`) })); }
+      if (m.t === 'roster') { c.roster = m; syncSavedFriendGains(); renderSpecLounge(); }
       if (m.t === 'library') c.library = m.games;
       if (m.t === 'notice') toast(t(`notice_${m.key}`));
       if (S.drawer) renderDrawer();
@@ -1178,10 +1478,15 @@ function handleEvent(m) {
 }
 
 window.addEventListener('message', (e) => {
+  if (e.source !== window) return;
   if (e.data === 'majlis-port' && e.ports[0]) {
     S.port = e.ports[0];
+    const sendThAck = () => { try { S.port?.postMessage({ t: 'thv-ack' }); } catch {} };
+    window.__majlisThAck = sendThAck;
+    window.__majlisThSetAck?.(sendThAck);
     S.port.onmessage = (ev) => {
       const d = ev.data;
+      if (d.t === 'thv' || d.t === 'thv-clear') { window.__majlisThFrame?.(d); return; }
       if (S.player) S.player.onMessage(d);
       else if (d.t === 'vo' && S.hub) S.hub.play(d.idx, d.data);
     };
@@ -1191,8 +1496,49 @@ window.addEventListener('message', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (S.recKey) { S.recKey(e); return; }
+  if (!e.repeat && e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyM') {
+    const tag = (e.target && e.target.tagName) || '';
+    if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) && !S.theaterOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (S.view === 'cinema') {
+        const playTarget = (S.host?.guests?.length || S.guestLinked) ? 'room' : 'home';
+        if (S.player && S.guestLinked) $('#stage').hidden = false;
+        go(playTarget);
+      } else {
+        if (S.player) $('#stage').hidden = true;
+        go('cinema');
+      }
+      return;
+    }
+  }
   if (!S.player && e.key === 'Escape') $('#modal').classList.contains('open') && $('#modal').click();
 }, true);
+
+window.addEventListener('dragover', (e) => {
+  if (S.view === 'cinema' || S.theaterOpen) return;
+  const types = e.dataTransfer?.types;
+  if (types && [...types].includes('text/sid')) return;
+  if (types && ([...types].includes('Files') || [...types].includes('text/uri-list'))) e.preventDefault();
+});
+
+window.addEventListener('drop', async (e) => {
+  if (S.view === 'cinema' || S.theaterOpen) return;
+  const types = e.dataTransfer?.types;
+  if (types && [...types].includes('text/sid')) return;
+  const f = e.dataTransfer?.files?.[0];
+  const filePath = f ? (api.pathFor?.(f) || f.path || '') : '';
+  const txt = (!filePath && (e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain') || '').trim()) || '';
+  if (!filePath && !/^(magnet:\?|https?:\/\/)/i.test(txt)) return;
+  e.preventDefault();
+  go('cinema');
+  if (filePath) {
+    const r = await api.invoke('cin:drop-file', { filePath }).catch(() => null);
+    if (!r?.ok) toast(t('cin_nothing'), { bad: true });
+  } else {
+    await api.invoke('cin:play-url', { url: txt }).catch(() => {});
+  }
+});
 
 setInterval(() => { if (W) { W.tickBar(); if (S.view === 'room' && S.host?.mode === 'watch') W.tickWatchRoom(); } }, 500);
 
@@ -1203,11 +1549,14 @@ setInterval(() => {
 // ------------------------------------------------------------------------- boot
 (async () => {
   $('.brand-mark').innerHTML = mark(18);
-  S.hz = await measureHz().catch(() => 60);
+  measureHz().then((hz) => { S.hz = hz || 60; }).catch(() => {});
+  renderRail();
+  if (S.view === 'cinema') showMedia();
   await refresh();
   for (const m of early.splice(0)) handleEvent(m);
   const q = new URLSearchParams(location.search);
   if (q.get('view')) go(q.get('view'));
+  else if (S.view !== 'cinema') render();
   // test aid: open a title in cinema mode straight away (type:id)
   // test aid: a Cinema tab straight away (MAJLIS_CTAB=calendar)
   if (q.get('ctab')) { go('cinema'); setTimeout(() => MEDIA?.go(q.get('ctab')), 1500); }

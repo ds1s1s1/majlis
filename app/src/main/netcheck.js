@@ -70,7 +70,28 @@ function classify(adapter, wifi, upnp) {
   return { link, wan };
 }
 
-async function check(net, store, { upload = true } = {}) {
+async function downloadTest(bytes = 2000000, timeoutMs = 6000, fetchFn = fetch) {
+  if (typeof fetchFn !== 'function') return null;
+  const n = Math.max(65536, Math.min(20000000, Number(bytes) || 2000000));
+  const t0 = performance.now();
+  try {
+    const r = await fetchFn(`https://speed.cloudflare.com/__down?bytes=${n}`, {
+      cache: 'no-store',
+      headers: { 'user-agent': 'Majlis' },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!r?.ok) return null;
+    const buf = await r.arrayBuffer();
+    if (!buf || !buf.byteLength) return null;
+    const dt = Math.max(10, performance.now() - t0);
+    const mbps = +((buf.byteLength * 8) / (dt * 1000)).toFixed(1);
+    return { mbps, bytes: buf.byteLength, ms: Math.round(dt) };
+  } catch {
+    return null;
+  }
+}
+
+async function check(net, store, { upload = true, download = false } = {}) {
   const t0 = Date.now();
   const [wifi, adapter, upnp] = await Promise.all([wifiInfo(), defaultAdapter(), upnpInfo()]);
   const { link, wan } = classify(adapter, wifi, upnp);
@@ -107,14 +128,19 @@ async function check(net, store, { upload = true } = {}) {
       relays.push({ name: r.name, label: r.label || r.name, fam: fam === 6 ? 'v6' : 'v4', best: ok.length ? Math.min(...ok) : null, avg, jitter, loss: 1 - ok.length / rtts.length });
     }
   }
-  relays.sort((a, b) => (a.best ?? 1e9) - (b.best ?? 1e9));
+  relays.splice(0, relays.length, ...rankPathsByJitter(relays));
 
   let up = null;
-  if (upload && net.relays.length) {
-    const best = net.relays.find((r) => r.name === relays[0]?.name) || net.relays[0];
-    up = await net.uploadTest(best, 80, 1500).catch(() => null);
-    if (up && up.loss < 0.02) up.capped = true; // the line may be faster than what we pushed
-  }
+  let dl = null;
+  const upTask = (upload && net.relays.length)
+    ? (async () => {
+      const best = net.relays.find((r) => r.name === relays[0]?.name) || net.relays[0];
+      up = await net.uploadTest(best, 80, 1500).catch(() => null);
+      if (up && up.loss < 0.02) up.capped = true; // the line may be faster than what we pushed
+    })()
+    : Promise.resolve();
+  const dlTask = download ? downloadTest().then((x) => { dl = x; }).catch(() => {}) : Promise.resolve();
+  await Promise.all([upTask, dlTask]);
 
   const v6 = Object.values(os.networkInterfaces()).flat().some((a) => a && a.family === 'IPv6' && !a.internal && /^[23]/.test(a.address) && !/^(2001:0?:|2002:)/i.test(a.address));
   const pub4 = net.publicAddr.v4?.ip || null;
@@ -136,11 +162,66 @@ async function check(net, store, { upload = true } = {}) {
   const recBitrate = up ? Math.max(3, Math.min(80, Math.floor(up.mbps * (up.capped ? 0.8 : 0.65)))) : null;
   const res = {
     at: Date.now(), took: Date.now() - t0, link, wan, wifi, adapter, router: upnp, cgnat, v6, pub4, pub6: net.publicAddr.v6?.ip || null,
-    registered: net.registered, via: net.wsSig ? 'tcp' : 'udp', relays, upload: up, jitter, tips, recBitrate,
+    isp: detectSaudiIsp([adapter?.desc, adapter?.name, net.colo].filter(Boolean).join(' ')),
+    registered: net.registered, via: net.wsSig ? 'tcp' : 'udp', relays, upload: up, download: dl, jitter, tips, recBitrate,
     recStability: wan === '5g' || wan === '4g' || (jitter != null && jitter > 6),
   };
   if (store.get('connType') === 'auto') res.detected = wan !== 'unknown' ? wan : link === 'wifi' ? 'wifi' : link === 'ethernet' ? 'fiber' : 'auto';
   return res;
 }
 
-module.exports = { check, upnpInfo, wifiInfo, classify };
+function detectSaudiIsp(orgOrIp = '') {
+  const s = String(orgOrIp || '').trim();
+  if (!s) return 'other';
+  if (/\bstc\b|saudi\s*telecom|awalnet|arabian\s*internet/i.test(s)) return 'stc';
+  if (/mobily|etihad\s*etisalat|bayanat/i.test(s)) return 'mobily';
+  if (/\bzain\b|mobile\s*telecommunication\s*company\s*saudi/i.test(s)) return 'zain';
+  if (/\bsalam\b|integrated\s*telecom|\bitc\b/i.test(s)) return 'salam';
+  return 'other';
+}
+
+function summarizeProbeSamples(samples = [], fallback = {}) {
+  const ok = samples.filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+  const total = samples.length || 1;
+  const best = ok.length ? Math.min(...ok) : (fallback.best ?? null);
+  const avg = ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : (fallback.avg ?? best);
+  let jitter = fallback.jitter ?? 0;
+  if (ok.length > 1) {
+    let sum = 0;
+    for (let i = 1; i < ok.length; i++) sum += Math.abs(ok[i] - ok[i - 1]);
+    jitter = sum / (ok.length - 1);
+  }
+  const loss = samples.length ? (1 - ok.length / total) : (fallback.loss ?? (avg == null ? 1 : 0));
+  const avgVal = avg == null ? 1e6 : avg;
+  const score = Math.round((avgVal + 2 * jitter + loss * 200) * 100) / 100;
+  return {
+    ...fallback,
+    best: best != null ? Math.round(best * 10) / 10 : null,
+    avg: avg != null ? Math.round(avg * 10) / 10 : null,
+    jitter: Math.round(jitter * 10) / 10,
+    loss: Math.round(loss * 1000) / 1000,
+    score,
+  };
+}
+
+function rankPathsByJitter(paths = [], opts = {}) {
+  const probeFn = typeof opts?.probeFn === 'function' ? opts.probeFn : null;
+  if (probeFn) {
+    return (async () => {
+      const out = [];
+      for (const p of paths) {
+        const res = await probeFn(p).catch(() => null);
+        const samples = Array.isArray(res) ? res : (Array.isArray(res?.rtts) ? res.rtts : []);
+        const base = res && !Array.isArray(res) ? { ...p, ...res } : { ...p };
+        out.push(summarizeProbeSamples(samples, base));
+      }
+      return out.sort((a, b) => (a.score - b.score) || (a.jitter - b.jitter) || ((a.best ?? 1e9) - (b.best ?? 1e9)));
+    })();
+  }
+  return (Array.isArray(paths) ? paths : []).map((p) => {
+    const samples = Array.isArray(p?.rtts) ? p.rtts : [];
+    return summarizeProbeSamples(samples, p || {});
+  }).sort((a, b) => (a.score - b.score) || (a.jitter - b.jitter) || ((a.best ?? 1e9) - (b.best ?? 1e9)));
+}
+
+module.exports = { check, upnpInfo, wifiInfo, classify, downloadTest, detectSaudiIsp, rankPathsByJitter };

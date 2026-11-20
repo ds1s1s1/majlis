@@ -1,0 +1,6 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "--remap-path-prefix=A:\\ss\\majlis=/src/majlis",
+  "--remap-path-prefix=C:\\Users\\gaawo=/user",
+  "-C", "link-arg=/DEBUG:NONE",
+]

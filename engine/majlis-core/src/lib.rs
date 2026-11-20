@@ -7,11 +7,14 @@ pub mod crypto;
 pub mod fec;
 pub mod gcc;
 pub mod link;
+pub mod mpv_render;
 pub mod netem;
 pub mod rx;
 pub mod sock;
 pub mod time;
 pub mod tx;
+
+pub use mpv_render::MpvPlayer;
 
 use link::{Ev, From, Link, Route};
 use napi::bindgen_prelude::*;

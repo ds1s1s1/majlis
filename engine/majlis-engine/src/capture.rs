@@ -115,6 +115,7 @@ impl Dda {
 
 // ------------------------------------------------------------------ one window
 pub struct Wgc {
+    d3d: IDirect3DDevice,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     event: HANDLE,
@@ -155,7 +156,7 @@ impl Wgc {
             Ok(())
         }))?;
         session.StartCapture()?;
-        Ok(Wgc { pool, session, event, tex, w, h: hh, cw: w, ch: hh, gen: 0, _token: token })
+        Ok(Wgc { d3d, pool, session, event, tex, w, h: hh, cw: w, ch: hh, gen: 0, _token: token })
     }
 
     fn next(&mut self, gpu: &Gpu, timeout_ms: u32) -> Result<bool> {
@@ -165,40 +166,36 @@ impl Wgc {
         // drain to the newest frame
         while let Ok(frame) = self.pool.TryGetNextFrame() {
             let cs = frame.ContentSize()?;
+            if cs.Width <= 0 || cs.Height <= 0 { let _ = frame.Close(); continue; }
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let t: ID3D11Texture2D = unsafe { access.GetInterface()? };
             let mut d = D3D11_TEXTURE2D_DESC::default();
             unsafe { t.GetDesc(&mut d) };
             self.cw = (cs.Width as u32).min(d.Width).min(self.w) & !1;
             self.ch = (cs.Height as u32).min(d.Height).min(self.h) & !1;
-            let b = D3D11_BOX { left: 0, top: 0, front: 0, right: self.cw.max(2), bottom: self.ch.max(2), back: 1 };
-            unsafe { gpu.ctx.CopySubresourceRegion(&self.tex, 0, 0, 0, 0, &t, 0, Some(&b)) };
+            if self.cw >= 2 && self.ch >= 2 {
+                let b = D3D11_BOX { left: 0, top: 0, front: 0, right: self.cw, bottom: self.ch, back: 1 };
+                unsafe { gpu.ctx.CopySubresourceRegion(&self.tex, 0, 0, 0, 0, &t, 0, Some(&b)) };
+                got = true;
+            }
             if cs.Width as u32 != d.Width || cs.Height as u32 != d.Height { resized = Some(cs); }
             let _ = frame.Close();
-            got = true;
         }
-        // The window was resized: let the pool follow, once, after the drain (recreating it
-        // mid-drain dropped frames). Grown past our copy: a bigger copy, so nothing gets cut off
-        // (the converter fits whatever the content is into the stream).
+        // The window was resized: recreate once after the drain (mid-drain drops frames).
+        // Bump generation on every resize so source.rs rebuilds converter + forces an IDR cleanly.
         if let Some(cs) = resized {
-            let _ = self.pool.Recreate(&CreateDirect3D11DeviceFromDXGIDeviceSafe(gpu)?, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
+            let _ = self.pool.Recreate(&self.d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
             let (nw, nh) = ((cs.Width as u32 & !1).max(64), (cs.Height as u32 & !1).max(64));
             if nw > self.w || nh > self.h {
                 let (nw, nh) = (nw.max(self.w), nh.max(self.h));
                 self.tex = gpu.texture(nw, nh, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)?;
                 self.w = nw; self.h = nh;
-                self.gen = self.gen.wrapping_add(1);
                 got = false; // the frame we have was cut to the old size: wait for the next one
             }
+            self.gen = self.gen.wrapping_add(1);
         }
         Ok(got)
     }
-}
-
-#[allow(non_snake_case)]
-fn CreateDirect3D11DeviceFromDXGIDeviceSafe(gpu: &Gpu) -> Result<IDirect3DDevice> {
-    let dxgi: IDXGIDevice = gpu.device.cast()?;
-    unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()
 }
 
 impl Drop for Wgc {

@@ -23,7 +23,7 @@ test('downloads: an http copy resumes from its .part file with a Range request',
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'majlis-dl-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  const dl = new Downloads({ file: path.join(dir, 'list.json'), folder: () => dir, svc: null, debrid: () => null });
+  const dl = new Downloads({ file: path.join(dir, 'list.json'), folder: () => dir, svc: null, debrid: () => null, allowPrivateHosts: true });
   // half of it is already there from last time
   fs.writeFileSync(path.join(dir, 'Heat.mkv.part'), DATA.subarray(0, 600_000));
   const d = dl.add({ meta: { id: 'tt0113277', name: 'Heat' }, type: 'movie', videoId: 'tt0113277', stream: { url: `http://127.0.0.1:${srv.address().port}/heat.mkv`, behaviorHints: { filename: 'Heat.mkv' } } });

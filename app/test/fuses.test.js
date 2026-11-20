@@ -7,6 +7,7 @@ test('release build flips the hardening fuses', () => {
   const { build } = require('../package.json');
   assert.deepStrictEqual(build.electronFuses, {
     runAsNode: false,
+    enableCookieEncryption: true,
     enableNodeCliInspectArguments: false,
     enableNodeOptionsEnvironmentVariable: false,
     onlyLoadAppFromAsar: true,

@@ -84,13 +84,17 @@ function relayToken(sid, exp) {
 const bindings = new Map(); // id -> pk (first come, first served)
 const bindFile = path.join(CFG.dataDir, 'bindings.json');
 try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(bindFile, 'utf8')))) bindings.set(k, v); } catch {}
+const handles = new Map(); // handle -> { id, pk, nick }
+const handleFile = path.join(CFG.dataDir, 'handles.json');
+try { for (const [k, v] of Object.entries(JSON.parse(fs.readFileSync(handleFile, 'utf8')))) handles.set(k, v); } catch {}
 let bindDirty = false;
 setInterval(() => {
   if (!bindDirty) return; bindDirty = false;
   fs.writeFile(bindFile + '.tmp', JSON.stringify(Object.fromEntries(bindings)), (e) => { if (!e) fs.rename(bindFile + '.tmp', bindFile, () => {}); });
+  fs.writeFile(handleFile + '.tmp', JSON.stringify(Object.fromEntries(handles)), (e) => { if (!e) fs.rename(handleFile + '.tmp', handleFile, () => {}); });
 }, 5000).unref();
 
-const peers = new Map();  // id -> { pk, nick, busy, allow:Set, eps:{v4,v6,ws}, seen }
+const peers = new Map();  // id -> { pk, nick, handle, status, busy, allow:Set, eps:{v4,v6,ws}, seen }
 const codes = new Map();  // code -> { id, exp }
 
 function epKey(ep) { return ep.kind === 'ws' ? 'ws' : ep.fam; }
@@ -142,6 +146,17 @@ function handleSignal(msg, ep) {
       let p = peers.get(msg.id);
       if (!p) { p = { pk: msg.pk, eps: {} }; peers.set(msg.id, p); }
       p.nick = String(msg.nick || '').slice(0, 32);
+      const hRaw = String(msg.handle || '').trim().replace(/^@+/, '').toLowerCase();
+      if (/^[a-z0-9_]{3,24}$/.test(hRaw) && !/^\d+$/.test(hRaw)) {
+        const hOwner = handles.get(hRaw);
+        if (!hOwner || hOwner.id === msg.id) {
+          for (const [hk, hv] of handles) if (hv.id === msg.id && hk !== hRaw) handles.delete(hk);
+          handles.set(hRaw, { id: msg.id, pk: msg.pk, nick: p.nick });
+          p.handle = hRaw;
+          bindDirty = true;
+        }
+      }
+      p.status = msg.status && typeof msg.status === 'object' ? { watching: msg.status.watching || null, inParty: msg.status.inParty || null } : null;
       p.busy = !!msg.busy;
       p.allow = new Set((Array.isArray(msg.allow) ? msg.allow : []).filter(isId).slice(0, 500));
       p.seen = now();
@@ -154,13 +169,34 @@ function handleSignal(msg, ep) {
       if (!limits.presence.take(ip)) return;
       const me = peers.get(msg.id);
       if (!me || !fresh || !verifyMsg(msg, me.pk) || !Array.isArray(msg.ids)) return;
-      const on = {};
+      const on = {}, meta = {};
       for (const id of msg.ids.slice(0, 200)) {
         const p = peers.get(id);
         // Only friends the other side listed may see their status.
-        if (p && p.allow && p.allow.has(msg.id) && online(id)) on[id] = p.busy ? 'busy' : 'online';
+        if (p && p.allow && p.allow.has(msg.id) && online(id)) {
+          on[id] = p.busy ? 'busy' : 'online';
+          meta[id] = { status: p.status || null, handle: p.handle || '', nick: p.nick || '' };
+        }
       }
-      return sendTo(ep, { t: 'presence', on });
+      return sendTo(ep, { t: 'presence', on, meta });
+    }
+
+    case 'handle_lookup': {
+      if (!limits.presence.take(ip)) return;
+      const me = peers.get(msg.id);
+      if (!me || !fresh || !verifyMsg(msg, me.pk)) return;
+      const h = String(msg.handle || '').trim().replace(/^@+/, '').toLowerCase();
+      const rec = /^[a-z0-9_]{3,24}$/.test(h) ? handles.get(h) : null;
+      if (rec && isId(rec.id)) return sendTo(ep, { t: 'handle_res', reqId: msg.reqId, handle: h, id: rec.id, pk: rec.pk, nick: rec.nick || rec.id });
+      return sendTo(ep, { t: 'handle_res', reqId: msg.reqId, handle: h, notFound: true });
+    }
+
+    case 'social': {
+      if (!limits.hello.take(ip)) return;
+      const me = peers.get(msg.from);
+      if (!me || !fresh || !verifyMsg(msg, me.pk) || !isId(msg.to)) return;
+      sendPeer(msg.to, { t: 'social', m: msg });
+      return;
     }
 
     case 'code': {

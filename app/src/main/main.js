@@ -1,9 +1,10 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, MessageChannelMain, globalShortcut, shell, dialog, Notification, nativeImage, clipboard, session, desktopCapturer, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, MessageChannelMain, globalShortcut, shell, dialog, Notification, nativeImage, clipboard, session, desktopCapturer, screen, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const { fileURLToPath } = require('url');
 
 const { Store } = require('./store');
 const { Net, core } = require('./net');
@@ -16,25 +17,83 @@ const { Replay } = require('./replay');
 const netcheck = require('./netcheck');
 const { steamGames } = require('./library');
 const { resolveFfmpeg, downloadFfmpeg } = require('./tools');
+const { CacheManager } = require('./cache-manager');
+const { BackupManager } = require('./backup');
+const { parseDeepLink } = require('./deeplink');
+const { updateThumbar, resetCache: resetThumbarCache } = require('./thumbar');
 
-if (process.env.MAJLIS_PROFILE) app.setPath('userData', path.join(app.getPath('appData'), `Majlis-${process.env.MAJLIS_PROFILE}`));
-if (!process.env.MAJLIS_PROFILE && !app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+if (process.platform === 'win32') {
+  app.setAppUserModelId('app.majlis.desktop');
+}
 
-// "No VSync" (set in Settings, applies on next start): frames go to the screen the moment
-// they're decoded instead of waiting for the monitor's refresh. Lower latency, may tear.
-try {
-  const pre = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'majlis.json'), 'utf8'));
-  if (pre.settings && pre.settings.noVsync) { app.commandLine.appendSwitch('disable-gpu-vsync'); app.commandLine.appendSwitch('disable-frame-rate-limit'); }
-} catch {}
+if (!app.isPackaged && process.env.MAJLIS_PROFILE) {
+  app.setPath('userData', path.join(app.getPath('appData'), `Majlis-${String(process.env.MAJLIS_PROFILE).replace(/[^\w-]/g, '')}`));
+}
+if ((app.isPackaged || !process.env.MAJLIS_PROFILE) && !app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+
+// Single read of majlis.json at startup (shared with Store)
+let preloadedCfg = null;
+try { preloadedCfg = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'majlis.json'), 'utf8')); } catch {}
+if (preloadedCfg?.settings?.noVsync) {
+  app.commandLine.appendSwitch('disable-gpu-vsync');
+  app.commandLine.appendSwitch('disable-frame-rate-limit');
+}
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 
-if (process.defaultApp) app.setAsDefaultProtocolClient('majlis', process.execPath, [path.resolve(process.argv[1])]);
-else app.setAsDefaultProtocolClient('majlis');
+for (const proto of ['majlis', 'stremio']) {
+  if (!app.isDefaultProtocolClient(proto)) {
+    if (process.defaultApp) app.setAsDefaultProtocolClient(proto, process.execPath, [path.resolve(process.argv[1])]);
+    else app.setAsDefaultProtocolClient(proto);
+  }
+}
 
-let win, store, net, helper, engine, host, guest, replay, port, theater, discord, mediaHub;
+let win, tray = null, quitting = false, shuttingDown = false;
+let store, net, helper, engine, host, guest, replay, port, theater, discord, mediaHub, social, cacheMgr, backupMgr;
+let discordTimer = null, discordSince = Date.now(), syncDiscordClient = () => {}, pushDiscord = () => {};
 let encoders = [];
+let incognitoOn = false, syncThumbar = () => {};
+const RENDERER_DIR = path.resolve(__dirname, '../renderer');
+
+function isOwnOrigin(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== 'file:') return false;
+    const p = path.resolve(fileURLToPath(u));
+    const rel = path.relative(RENDERER_DIR, p);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  } catch { return false; }
+}
+
+function safeOpenExternal(raw) {
+  try {
+    const s = String(raw || '').trim();
+    if (!s || /[\r\n\0]/.test(s)) return false;
+    const u = new URL(s);
+    if (!['https:', 'http:', 'majlis:', 'steam:'].includes(u.protocol)) return false;
+    if ((u.protocol === 'https:' || u.protocol === 'http:') && !u.hostname) return false;
+    shell.openExternal(u.toString());
+    return true;
+  } catch { return false; }
+}
+
+function isAllowedRevealPath(target) {
+  try {
+    const resolved = path.resolve(String(target || ''));
+    const roots = [
+      app.getPath('pictures'),
+      app.getPath('videos'),
+      app.getPath('downloads'),
+      app.getPath('userData'),
+      store?.get('downloadDir'),
+    ].filter(Boolean);
+    return roots.some((root) => {
+      const rel = path.relative(path.resolve(root), resolved);
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    });
+  } catch { return false; }
+}
 process.on('uncaughtException', (err) => {
   try {
     fs.mkdirSync(path.join(app.getPath('userData'), 'logs'), { recursive: true });
@@ -63,19 +122,39 @@ let lastCheck = null;
 let ffmpegExe = null;
 const ffmpegPath = () => ffmpegExe || findFfmpeg(store.get('ffmpeg'));
 
-function useFfmpeg(exe) {
+async function useFfmpeg(exe, stat = null) {
   ffmpegExe = exe;
   host.ffmpeg = exe; host.movie.ffmpeg = exe; replay.ffmpeg = exe;
-  hasGfxCapture(exe).then((ok) => {
-    host.gfx = ok;
-    // an older ffmpeg (one on PATH, say) can't capture a window on the GPU: fetch a current build once
-    if (!ok && !upgradeTried) { upgradeTried = true; upgradeFfmpeg(); }
-  });
-  return detectEncoders(exe).then((list) => {
-    encoders.splice(0, encoders.length, ...list);
-    emit('encoders', { list: list.map((e) => e.name) });
-    return list;
-  });
+  try {
+    if (!stat && path.isAbsolute(exe)) { const s = fs.statSync(exe); stat = { mtimeMs: s.mtimeMs, size: s.size }; }
+  } catch {}
+  const ok = await hasGfxCapture(exe);
+  host.gfx = ok;
+  // an older ffmpeg (one on PATH, say) can't capture a window on the GPU: fetch a current build once
+  if (!ok && !upgradeTried) { upgradeTried = true; upgradeFfmpeg(); }
+  const list = await detectEncoders(exe);
+  encoders.splice(0, encoders.length, ...list);
+  emit('encoders', { list: list.map((e) => e.name) });
+  store.d.encoderCache = { exe, mtimeMs: stat?.mtimeMs || 0, size: stat?.size || 0, gfx: ok, encoders: list, at: Date.now() };
+  store.save();
+  return list;
+}
+
+async function loadOrProbeFfmpeg(exe) {
+  ffmpegExe = exe;
+  host.ffmpeg = exe; host.movie.ffmpeg = exe; replay.ffmpeg = exe;
+  let stat = null;
+  try { if (path.isAbsolute(exe)) { const s = fs.statSync(exe); stat = { mtimeMs: s.mtimeMs, size: s.size }; } } catch {}
+  const cached = store.d.encoderCache;
+  const fresh = cached && cached.exe === exe && (Date.now() - cached.at < 7 * 86400000)
+    && (!stat || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size));
+  if (fresh && Array.isArray(cached.encoders)) {
+    host.gfx = !!cached.gfx;
+    encoders.splice(0, encoders.length, ...cached.encoders);
+    emit('encoders', { list: encoders.map((e) => e.name) });
+    return encoders;
+  }
+  return useFfmpeg(exe, stat);
 }
 
 let upgradeTried = false;
@@ -89,8 +168,10 @@ function upgradeFfmpeg() {
 
 // Hosting needs ffmpeg; fetch it the first time instead of shipping it with every copy.
 let ffmpegJob = null;
-function ensureFfmpeg() {
-  if (ffmpegExe) return Promise.resolve(ffmpegExe);
+async function ensureFfmpeg() {
+  if (ffmpegExe) return ffmpegExe;
+  const resolved = await resolveFfmpeg({ custom: store.get('ffmpeg'), dataDir: app.getPath('userData'), resources: process.resourcesPath }).catch(() => null);
+  if (resolved) { await loadOrProbeFfmpeg(resolved); return resolved; }
   if (ffmpegJob) return ffmpegJob;
   emit('ffmpeg', { state: 'downloading', pct: 0 });
   ffmpegJob = downloadFfmpeg(app.getPath('userData'), ({ got, total, extracting }) => emit('ffmpeg', { state: extracting ? 'extracting' : 'downloading', pct: total ? Math.round((got / total) * 100) : 0 }))
@@ -124,54 +205,146 @@ const VK = { CapsLock: 0x14, Space: 0x20, Tab: 0x09, Backquote: 0xc0, ShiftLeft:
 for (let i = 0; i < 26; i++) VK[`Key${String.fromCharCode(65 + i)}`] = 65 + i;
 for (let i = 0; i < 10; i++) VK[`Digit${i}`] = 48 + i;
 for (let i = 1; i <= 12; i++) VK[`F${i}`] = 0x6f + i;
-function watchPtt() { helper.cmd({ cmd: 'ptt', vk: store.get('voice') === 'ptt' ? VK[store.get('pttKey')] || 0 : 0 }); }
+function watchPtt() {
+  const vk = store.get('voice') === 'ptt' ? VK[store.get('pttKey')] || 0 : 0;
+  if (vk && !helper.p) helper.start();
+  if (helper.p) helper.cmd({ cmd: 'ptt', vk });
+}
 
 function deepLink(argv) {
-  const a = (argv || []).find((x) => /^majlis:\/\//i.test(x));
-  if (!a) return null;
-  const m = a.match(/^majlis:\/\/(join|code)\/(\d{6}|\d{9})/i);
-  return m ? { kind: m[1].toLowerCase(), target: m[2] } : null;
+  return parseDeepLink(argv);
 }
 let pendingLink = deepLink(process.argv);
 
+function createTray() {
+  if (tray) return tray;
+  try {
+    const img = nativeImage.createFromPath(path.join(RENDERER_DIR, 'img/icon.png')).resize({ width: 16, height: 16 });
+    tray = new Tray(img);
+    tray.setToolTip('Majlis');
+    const showWin = (tab) => {
+      if (!win || win.isDestroyed()) createWindow();
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      if (tab) {
+        if (tab === 'cinema' || tab === 'home') emit('tray:nav', { view: tab });
+        else if (tab === 'settings') { emit('tray:nav', { view: 'cinema', tab: 'settings' }); }
+      }
+    };
+    const buildMenu = () => {
+      const ar = (store?.get('lang') || 'ar') !== 'en';
+      return Menu.buildFromTemplate([
+        { label: ar ? 'فتح مجلس' : 'Open Majlis', click: () => showWin() },
+        { label: ar ? 'السينما' : 'Cinema', click: () => showWin('cinema') },
+        { label: ar ? 'اللعب الجماعي' : 'Co-op Room', click: () => showWin('home') },
+        { label: ar ? 'الإعدادات' : 'Settings', click: () => showWin('settings') },
+        { type: 'separator' },
+        { label: ar ? 'إيقاف / تشغيل المشغل' : 'Play / Pause', click: () => { try { theater?.pauseIfPlaying?.(); } catch {} } },
+        { type: 'separator' },
+        { label: ar ? 'إغلاق نهائي' : 'Quit Majlis', click: () => { quitting = true; shutdown(); app.quit(); } },
+      ]);
+    };
+    tray.setContextMenu(buildMenu());
+    tray.on('click', () => showWin());
+    tray.on('right-click', () => tray.setContextMenu(buildMenu()));
+  } catch {}
+  return tray;
+}
+
 function createWindow() {
+  const devQuery = !app.isPackaged && (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL || process.env.MAJLIS_TITLE || process.env.MAJLIS_PAL || process.env.MAJLIS_CTAB);
   win = new BrowserWindow({
     width: 1240, height: 800, minWidth: 980, minHeight: 640,
     backgroundColor: store.get('theme') === 'light' ? '#f3eee5' : '#11100e',
     titleBarStyle: 'hidden',
     titleBarOverlay: overlayColors(),
-    icon: path.join(__dirname, '../renderer/img/icon.png'),
+    icon: path.join(RENDERER_DIR, 'img/icon.png'),
     show: false,
-    webPreferences: { preload: path.join(__dirname, '../preload/preload.js'), contextIsolation: true, sandbox: false, backgroundThrottling: false },
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      navigateOnDragDrop: false,
+      backgroundThrottling: false,
+    },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '../renderer/index.html'), (process.env.MAJLIS_VIEW || process.env.MAJLIS_DRAWER || process.env.MAJLIS_LOCAL || process.env.MAJLIS_TITLE || process.env.MAJLIS_PAL || process.env.MAJLIS_CTAB) ? { query: { ctab: process.env.MAJLIS_CTAB || '', title: process.env.MAJLIS_TITLE || '', pal: process.env.MAJLIS_PAL || '', view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
-  // dev aid: MAJLIS_SHOT=out.png saves a screenshot of the page after a delay
-  if (process.env.MAJLIS_SHOT) {
+  win.setContentProtection(false);
+  win.loadFile(path.join(RENDERER_DIR, 'index.html'), devQuery ? { query: { ctab: process.env.MAJLIS_CTAB || '', title: process.env.MAJLIS_TITLE || '', pal: process.env.MAJLIS_PAL || '', view: process.env.MAJLIS_VIEW || (process.env.MAJLIS_LOCAL ? 'room' : ''), pick: process.env.MAJLIS_PICK || '', drawer: process.env.MAJLIS_DRAWER || '', local: process.env.MAJLIS_LOCAL || '' } } : undefined);
+  if (!app.isPackaged && process.env.MAJLIS_SHOT) {
     setTimeout(async () => {
       const img = await win.webContents.capturePage();
       fs.writeFileSync(process.env.MAJLIS_SHOT, img.toPNG());
-      if (process.env.MAJLIS_SHOT_QUIT) app.quit();
+      if (process.env.MAJLIS_SHOT_QUIT) { quitting = true; app.quit(); }
     }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
   }
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    if (!win || win.isDestroyed()) return;
+    if (store.get('alwaysOnTop')) win.setAlwaysOnTop(true, 'floating');
+    if (store.get('startMinimized')) {
+      if (store.get('minimizeToTray') && tray) return;
+      win.minimize();
+    } else {
+      win.show();
+    }
+  });
+  win.on('show', () => {
+    resetThumbarCache(win);
+    syncThumbar();
+  });
   win.webContents.on('did-finish-load', () => setupPort());
   if (DEBUG) win.webContents.on('console-message', (e, level, msg) => { if (level >= 2) console.log('[renderer]', msg); });
-  win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
+  win.webContents.on('will-navigate', (e, url) => { if (!isOwnOrigin(url)) e.preventDefault(); });
+  win.webContents.setWindowOpenHandler(({ url }) => { safeOpenExternal(url); return { action: 'deny' }; });
   win.on('focus', () => win.flashFrame(false));
-  // Let the renderer talk to a DualSense over WebHID for gyro and touchpad.
+  win.on('blur', () => { if (store.get('pauseOnFocusLost')) try { theater?.pauseIfPlaying?.(); } catch {} });
+  win.on('minimize', (e) => {
+    if (store.get('pauseOnMinimize')) try { theater?.pauseIfPlaying?.(); } catch {}
+    if (store.get('minimizeToTray') && tray) { e.preventDefault(); win.hide(); }
+  });
+  win.on('close', (e) => {
+    if (!quitting && store.get('closeToTray') && tray) {
+      e.preventDefault();
+      if (store.get('pauseOnMinimize')) try { theater?.pauseIfPlaying?.(); } catch {}
+      win.hide();
+    }
+  });
+  // Let the renderer talk to a DualSense over WebHID (scoped strictly to our own local origin)
   win.webContents.session.on('select-hid-device', (e, details, cb) => {
     e.preventDefault();
+    if (!isOwnOrigin(details?.frame?.url)) return cb('');
     const d = details.deviceList.find((x) => x.vendorId === 0x054c);
     cb(d ? d.deviceId : '');
   });
-  win.webContents.session.setDevicePermissionHandler((d) => d.deviceType === 'hid' && d.device.vendorId === 0x054c);
-  win.webContents.session.setPermissionCheckHandler((wc, perm) => ['hid', 'media', 'pointerLock', 'fullscreen', 'clipboard-sanitized-write'].includes(perm));
-  win.webContents.session.setPermissionRequestHandler((wc, perm, cb) => cb(['media', 'pointerLock', 'fullscreen', 'clipboard-sanitized-write'].includes(perm)));
+  win.webContents.session.setDevicePermissionHandler((d) => isOwnOrigin(d.origin) && d.deviceType === 'hid' && d.device.vendorId === 0x054c);
+  win.webContents.session.setPermissionCheckHandler((wc, perm, requestingOrigin) => isOwnOrigin(requestingOrigin || wc?.getURL()) && ['hid', 'media', 'pointerLock', 'fullscreen', 'clipboard-sanitized-write'].includes(perm));
+  win.webContents.session.setPermissionRequestHandler((wc, perm, cb, details) => cb(isOwnOrigin(details?.requestingUrl || wc?.getURL()) && ['media', 'pointerLock', 'fullscreen', 'clipboard-sanitized-write'].includes(perm)));
+  win.on('closed', () => {
+    win = null;
+    try { theater?.stop?.(true); } catch {}
+    if (quitting || !store?.get('closeToTray')) { shutdown(); app.quit(); }
+  });
 }
 
+let theaterOpen = false;
 function overlayColors() {
-  return store.get('theme') === 'light' ? { color: '#f3eee5', symbolColor: '#3a342c', height: 38 } : { color: '#11100e', symbolColor: '#cfc6b8', height: 38 };
+  if (theaterOpen) return { color: '#000000', symbolColor: '#e5e5e5', height: 36 };
+  return store.get('theme') === 'light' ? { color: '#f3eee5', symbolColor: '#3a342c', height: 36 } : { color: '#11100e', symbolColor: '#cfc6b8', height: 36 };
+}
+
+function setTheaterChrome(open) {
+  theaterOpen = !!open;
+  if (!win || win.isDestroyed()) return;
+  try {
+    const bg = theaterOpen ? '#000000' : (store.get('theme') === 'light' ? '#f3eee5' : '#11100e');
+    win.setBackgroundColor(bg);
+    win.setTitleBarOverlay(overlayColors());
+  } catch {}
+  syncThumbar();
 }
 
 function setupPort() {
@@ -179,7 +352,9 @@ function setupPort() {
   port = port1;
   port1.on('message', (e) => {
     const m = e.data;
-    if (m.t === 'hvo') return host.hostVoice(Buffer.from(m.data));
+    if (m?.t === 'thv-ack') { theater?.ackFrame?.(); return; }
+    if (m.t === 'hvo') { theater?.onVoice?.(); return host.hostVoice(Buffer.from(m.data)); }
+    if (m.t === 'vo') theater?.onVoice?.();
     guest._fromRenderer(m);
   });
   port1.start();
@@ -187,32 +362,55 @@ function setupPort() {
   host.removeAllListeners('voice');
   host.removeAllListeners('local');
   host.on('local', (m) => { if (localView) port1.postMessage(m); });
-  host.on('voice', (v) => port1.postMessage({ t: 'vo', idx: v.idx, data: v.data }));
+  host.on('voice', (v) => { theater?.onVoice?.(); port1.postMessage({ t: 'vo', idx: v.idx, data: v.data }); });
   win.webContents.postMessage('port', null, [port2]);
 }
 
 // ------------------------------------------------------------------------------- state
+let cachedRouterLock = null, routerLockChecked = false;
+async function findRouterLockAsync() {
+  const custom = store?.get('routerLock');
+  const cands = [
+    custom,
+    path.join(os.homedir(), 'Downloads', 'DS1-Router-Lock.exe'),
+    path.join(os.homedir(), 'Desktop', 'DS1-Router-Lock.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'DS1 Router Lock', 'DS1-Router-Lock.exe'),
+  ].filter(Boolean);
+  for (const c of cands) {
+    try { await fs.promises.access(c, fs.constants.F_OK); cachedRouterLock = c; routerLockChecked = true; return c; } catch {}
+  }
+  cachedRouterLock = null; routerLockChecked = true; return null;
+}
+
 function snapshot() {
   const idn = store.identity();
+  if (!routerLockChecked) findRouterLockAsync().catch(() => {});
   return {
     id: idn.id, settings: store.all(), friends: store.friends(), games: store.games(),
-    registered: net.registered, publicAddr: net.publicAddr, relays: net.relays, noServer: !store.hasServer(),
+    registered: net.registered, publicAddr: net.publicAddr, relays: net.relays, noServer: !store.hasServer(), serverAuthFailed: !!net.authFailed,
     encoders: encoders.map((e) => e.name), ffmpeg: !!ffmpegExe, helper: helper.info ? { vigem: helper.info.vigem, wgc: helper.info.wgc, displays: helper.info.displays } : null,
     host: host.stats(), guest: guest.link ? { state: 'linked', host: guest.link.peer, safety: guest.link.safety } : { state: guest.state },
-    lastCheck, peaks: store.peaks(), usage: usageSummary(), routerLock: findRouterLock(), replay: replay.running,
+    lastCheck, peaks: store.peaks(), usage: usageSummary(), routerLock: cachedRouterLock, replay: replay.running,
     version: app.getVersion(), platform: `${os.type()} ${os.release()}`,
   };
+}
+
+function requireServerForSession() {
+  if (!store.hasServer() || net?.noServer) {
+    emit('notice', { key: 'server_required' });
+    return false;
+  }
+  if (net?.authFailed) {
+    emit('notice', { key: 'server_access' });
+    return false;
+  }
+  return true;
 }
 
 function usageSummary() {
   const u = store.d.usage || {}, today = new Date().toISOString().slice(0, 10), month = today.slice(0, 7);
   let m = 0; for (const [k, v] of Object.entries(u)) if (k.startsWith(month)) m += v;
   return { today: u[today] || 0, month: m };
-}
-
-function findRouterLock() {
-  const cands = [store.get('routerLock'), path.join(os.homedir(), 'Downloads', 'DS1-Router-Lock.exe'), path.join(os.homedir(), 'Desktop', 'DS1-Router-Lock.exe'), 'A:\\ss\\ds1-router-lock\\dist\\DS1-Router-Lock.exe', path.join(process.env.LOCALAPPDATA || '', 'Programs', 'DS1 Router Lock', 'DS1-Router-Lock.exe')];
-  return cands.find((c) => c && fs.existsSync(c)) || null;
 }
 
 function inviteLink(target) {
@@ -234,45 +432,103 @@ function registerShortcuts() {
 function handlers() {
   ipcMain.handle('state', () => snapshot());
   ipcMain.handle('settings', (e, patch) => {
+    const safePatch = {};
+    if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        safePatch[k] = v;
+      }
+    }
     const before = store.get('server');
-    store.patch(patch);
-    if (patch.theme && win) win.setTitleBarOverlay(overlayColors());
-    if (('server' in patch && patch.server !== before) || 'accessKey' in patch) { setTimeout(() => { app.relaunch(); app.exit(0); }, 400); }
-    if ('panicKey' in patch || 'replayKey' in patch) registerShortcuts();
-    if ('pttKey' in patch || 'voice' in patch) watchPtt();
-    if (patch.ffmpeg) resolveFfmpeg({ custom: patch.ffmpeg, dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => exe && useFfmpeg(exe));
-    if (['fps', 'maxRes', 'qualityPreset', 'maxMbps', 'codec', 'tenBit', 'hdr', 'lightSpectators'].some((k) => k in patch) && host.guests.size) host._retier(true);
-    if (('watchMbps' in patch || 'maxRes' in patch) && host.movie.info) host.applyMovieQuality();
-    if ('replay' in patch) { if (patch.replay && host.guests.size) replay.start(store.get('display')); if (!patch.replay) replay.stop(); }
-    if (patch.shareStatus !== undefined || patch.nick !== undefined) pushPresence();
+    store.patch(safePatch);
+    if (safePatch.theme && win && !win.isDestroyed()) win.setTitleBarOverlay(overlayColors());
+    if ('alwaysOnTop' in safePatch && win && !win.isDestroyed()) win.setAlwaysOnTop(!!safePatch.alwaysOnTop, 'floating');
+    if ('launchOnStartup' in safePatch && app.isPackaged) { try { app.setLoginItemSettings({ openAtLogin: !!safePatch.launchOnStartup }); } catch {} }
+    if (('server' in safePatch && safePatch.server !== before) || 'accessKey' in safePatch) { setTimeout(() => { quitting = true; shutdown(); app.relaunch(); app.exit(0); }, 400); }
+    if ('panicKey' in safePatch || 'replayKey' in safePatch) registerShortcuts();
+    if ('pttKey' in safePatch || 'voice' in safePatch) watchPtt();
+    if (safePatch.ffmpeg) resolveFfmpeg({ custom: safePatch.ffmpeg, dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => exe && useFfmpeg(exe));
+    if (['fps', 'maxRes', 'qualityPreset', 'maxMbps', 'codec', 'tenBit', 'hdr', 'lightSpectators', 'spectatorQuality'].some((k) => k in safePatch) && host.guests.size) host._retier(true);
+    if ('privacyCurtain' in safePatch) host.syncPrivacyWatch();
+    if ('preferredRelay' in safePatch && net?.settings) net.settings.preferredRelay = safePatch.preferredRelay;
+    if (('watchMbps' in safePatch || 'maxRes' in safePatch) && host.movie.info) host.applyMovieQuality();
+    if ('replay' in safePatch) { if (safePatch.replay && host.guests.size) replay.start(store.get('display')); if (!safePatch.replay) replay.stop(); }
+    if (safePatch.shareStatus !== undefined || safePatch.nick !== undefined) pushPresence();
+    if ('watchControl' in safePatch && !('watchControlHolder' in safePatch) && safePatch.watchControl !== 'guest') {
+      host.setWatchControl(safePatch.watchControl, null);
+    }
+    if (['discordClientId', 'discordPresence', 'discordHideTitle', 'discordShowWhenPaused', 'discordShowBrowsing', 'discordShowPoster', 'discordShowTimestamp', 'discordShowPartyJoin'].some((k) => k in safePatch)) {
+      syncDiscordClient?.();
+      pushDiscord?.(true);
+    }
     return store.all();
   });
+  ipcMain.handle('helper:ensure', () => { if (!helper.p) helper.start(); return helper.info || true; });
+  ipcMain.handle('media:close', () => { try { theater?.close?.(); } catch {} return true; });
+  ipcMain.handle('quit', () => { quitting = true; shutdown(); app.quit(); });
+  ipcMain.handle('app:relaunch', () => { quitting = true; shutdown(); app.relaunch(); app.exit(0); });
   ipcMain.handle('friend', (e, f) => { const r = store.upsertFriend(f); pushPresence(); return r; });
   ipcMain.handle('friend:remove', (e, id) => { store.removeFriend(id); pushPresence(); return true; });
 
-  ipcMain.handle('connect', (e, { target, caps, pin }) => guest.connect(target, caps, { pin }));
+  ipcMain.handle('connect', (e, { target, caps, pin } = {}) => {
+    if (!requireServerForSession()) return { ok: false, reason: !store.hasServer() ? 'no_server' : 'server_access' };
+    return guest.connect(target, caps, { pin });
+  });
   ipcMain.handle('datasaver', (e, on) => guest.setDataSaver(on));
   ipcMain.handle('clip:send-host', () => guest.ctrl({ t: 'clip', text: clipboard.readText().slice(0, 10000) }));
   ipcMain.handle('clip:send-guest', (e, sid) => host.sendClip(sid, clipboard.readText()));
-  // mini player: small, always on top, for keeping an eye on the stream while doing something else
-  let normalBounds = null;
-  ipcMain.handle('mini', () => {
-    if (win.isFullScreen()) win.setFullScreen(false);
-    if (normalBounds) { win.setAlwaysOnTop(false); win.setMinimumSize(980, 640); win.setBounds(normalBounds); normalBounds = null; return false; }
-    normalBounds = win.getBounds();
-    const wa = screen.getDisplayMatching(normalBounds).workArea;
-    win.setMinimumSize(320, 200);
-    win.setBounds({ width: 520, height: 330, x: wa.x + wa.width - 540, y: wa.y + wa.height - 350 });
+  // mini player / PiP: small, always on top, aspect-matched to active video
+  let normalState = null;
+  function setMiniMode(want) {
+    if (!win || win.isDestroyed()) return false;
+    const next = !!want;
+    if (!next) {
+      if (!normalState) return false;
+      win.setAspectRatio(0);
+      win.setResizable(true);
+      win.setAlwaysOnTop(!!store.get('alwaysOnTop'), 'floating');
+      win.setMinimumSize(980, 640);
+      win.setBounds(normalState.bounds);
+      if (normalState.wasMaximized) win.maximize();
+      normalState = null;
+      theater?.setPipMode?.(false);
+      emit('mini', { on: false });
+      return false;
+    }
+    if (normalState) return true;
+    const wasFullscreen = win.isFullScreen();
+    const wasMaximized = win.isMaximized();
+    if (wasFullscreen) win.setFullScreen(false);
+    if (wasMaximized) win.unmaximize();
+    normalState = { bounds: win.getBounds(), wasMaximized, wasFullscreen };
+    const aspect = theater?.videoAspect?.() || (16 / 9);
+    const w = 460;
+    const h = Math.max(200, Math.min(360, Math.round(w / aspect)));
+    const wa = screen.getDisplayMatching(normalState.bounds).workArea;
+    win.setMinimumSize(320, 180);
+    win.setAspectRatio(aspect);
+    win.setBounds({ width: w, height: h, x: wa.x + wa.width - w - 20, y: wa.y + wa.height - h - 20 });
     win.setAlwaysOnTop(true, 'floating');
+    theater?.setPipMode?.(true);
+    emit('mini', { on: true });
     return true;
-  });
+  }
+  ipcMain.handle('mini', (e, force) => setMiniMode(typeof force === 'boolean' ? force : !normalState));
   ipcMain.handle('cancel', () => guest.cancel());
   ipcMain.handle('leave', () => guest.leave());
   ipcMain.handle('guest:ctrl', (e, m) => guest.ctrl(m));
 
-  ipcMain.handle('host:enable', (e, on) => { host.setEnabled(on); if (on) ensureFfmpeg(); return host.stats(); });
+  ipcMain.handle('host:enable', (e, on) => {
+    if (on && !requireServerForSession()) return host.stats();
+    host.setEnabled(on);
+    if (on) { if (!helper.p) helper.start(); ensureFfmpeg(); }
+    return host.stats();
+  });
   ipcMain.handle('ffmpeg:get', () => ensureFfmpeg());
-  ipcMain.handle('host:code', (e, revoke) => host.newCode(revoke));
+  ipcMain.handle('host:code', (e, revoke) => {
+    if (!revoke && !requireServerForSession()) return null;
+    return host.newCode(revoke);
+  });
   ipcMain.handle('host:decide', (e, d) => host.decide(d.sid, d));
   ipcMain.handle('host:role', (e, { sid, role }) => host.setRole(sid, role));
   ipcMain.handle('host:slot', (e, { sid, slot }) => host.setSlot(sid, slot));
@@ -331,15 +587,27 @@ function handlers() {
     return games;
   });
   ipcMain.handle('games:add', async () => {
-    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Games', extensions: ['exe', 'lnk', 'url', 'bat'] }] });
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Games', extensions: ['exe', 'lnk', 'url'] }] });
     if (r.canceled || !r.filePaths[0]) return store.games();
     const p = r.filePaths[0];
     const games = store.games();
-    games.push({ id: `exe:${Date.now()}`, name: path.basename(p).replace(/\.(exe|lnk|url|bat)$/i, ''), source: 'manual', path: p, visible: true });
+    games.push({ id: `exe:${Date.now()}`, name: path.basename(p).replace(/\.(exe|lnk|url)$/i, ''), source: 'manual', path: p, visible: true });
     store.setGames(games);
     return games;
   });
-  ipcMain.handle('games:update', (e, list) => { store.setGames(list); return list; });
+  ipcMain.handle('games:update', (e, list) => {
+    const clean = (Array.isArray(list) ? list : []).slice(0, 500).map((g) => ({
+      id: String(g?.id || '').slice(0, 80),
+      name: String(g?.name || '').slice(0, 120),
+      source: g?.source === 'steam' ? 'steam' : 'manual',
+      ...(g?.appid && /^\d+$/.test(String(g.appid)) ? { appid: String(g.appid) } : {}),
+      ...(typeof g?.path === 'string' && g.path.length <= 500 ? { path: g.path } : {}),
+      ...(typeof g?.cover === 'string' && g.cover.length <= 500 ? { cover: g.cover } : {}),
+      visible: !!g?.visible,
+    })).filter((g) => g.id && g.name);
+    store.setGames(clean);
+    return clean;
+  });
   ipcMain.handle('games:launch', (e, id) => launchGame(id, null));
 
   ipcMain.handle('replay:save', async () => replay.save());
@@ -368,6 +636,44 @@ function handlers() {
   ipcMain.handle('react', (e, r) => host.react({ r: String(r).slice(0, 8), idx: 0, from: store.get('nick') || '' }));
   ipcMain.handle('ready:check', () => host.readyCheck());
   ipcMain.handle('ready:go', () => host.countdown());
+  ipcMain.handle('host:watch-control', (_e, { mode, holderId } = {}) => host.setWatchControl(mode, holderId || null));
+  ipcMain.handle('host:privacy', (_e, { on } = {}) => host.setPrivacy(on, true));
+  ipcMain.handle('host:pads-reset', () => host.resetPads());
+  ipcMain.handle('net:isp-bench', async () => {
+    lastCheck = await netcheck.check(net, store, { upload: false });
+    if (lastCheck.detected && store.get('connType') === 'auto') lastCheck.autoType = lastCheck.detected;
+    return lastCheck;
+  });
+  ipcMain.handle('party:presets', () => store.roomPresets());
+  ipcMain.handle('party:preset-save', (_e, preset) => store.saveRoomPreset(preset));
+  ipcMain.handle('party:preset-del', (_e, id) => store.deleteRoomPreset(id));
+  ipcMain.handle('party:preset-launch', (_e, id) => {
+    if (!requireServerForSession()) return { ok: false, reason: !store.hasServer() ? 'no_server' : 'server_access' };
+    const preset = store.roomPresets().find((p) => p.id === id);
+    if (!preset) return null;
+    store.patch({
+      mode: preset.mode,
+      watchControl: preset.watchControl,
+      watchControlHolder: null,
+      acceptCodes: preset.acceptCodes,
+      allowChat: preset.allowChat,
+      allowReactions: preset.allowReactions,
+      autoNext: preset.autoNext,
+      autoDuck: preset.autoDuck,
+      qualityPreset: preset.qualityPreset,
+      maxRes: preset.maxRes,
+      fps: preset.fps,
+      defaultRole: preset.defaultRole,
+      roomPin: preset.roomPin || '',
+    });
+    host.setMode(preset.mode);
+    host.setWatchControl(preset.watchControl, null);
+    host.pushPerms();
+    host.setEnabled(true);
+    if (host.guests.size) host._retier(true);
+    emit('party-updated', { kind: 'preset', presetId: preset.id });
+    return { ok: true, preset, stats: host.stats() };
+  });
   ipcMain.handle('shot', (e, dataUrl) => {
     const m = /^data:image\/png;base64,(.+)$/.exec(String(dataUrl || ''));
     if (!m) return null;
@@ -378,32 +684,81 @@ function handlers() {
     fs.writeFileSync(file, Buffer.from(m[1], 'base64'));
     return file;
   });
-  ipcMain.handle('show-file', (e, f) => { if (f && fs.existsSync(f)) shell.showItemInFolder(f); });
-  ipcMain.handle('open', (e, url) => { if (/^(https?|majlis):/.test(url)) shell.openExternal(url); });
+  ipcMain.handle('show-file', (e, f) => { if (f && isAllowedRevealPath(f) && fs.existsSync(f)) shell.showItemInFolder(f); });
+  ipcMain.handle('open', (e, url) => safeOpenExternal(url));
   ipcMain.handle('copy', (e, text) => clipboard.writeText(String(text)));
+  ipcMain.handle('clipboard:write-image', (e, dataUrl) => {
+    const s = String(dataUrl || '');
+    if (!/^data:image\/(png|jpeg|webp);base64,/i.test(s) || s.length > 20 * 1024 * 1024) throw new Error('invalid_image');
+    const img = nativeImage.createFromDataURL(s);
+    if (img.isEmpty()) throw new Error('empty_image');
+    clipboard.writeImage(img);
+    return true;
+  });
+  ipcMain.handle('file:save-png', async (e, { dataUrl, defaultName } = {}) => {
+    const m = /^data:image\/png;base64,(.+)$/i.exec(String(dataUrl || ''));
+    if (!m) throw new Error('invalid_png');
+    const dir = path.join(app.getPath('pictures'), 'Majlis');
+    fs.mkdirSync(dir, { recursive: true });
+    const cleanName = String(defaultName || `Majlis-Collage-${new Date().toISOString().slice(0, 10)}.png`).replace(/[<>:"/\\|?*]+/g, '_');
+    const r = await dialog.showSaveDialog(win, {
+      defaultPath: path.join(dir, cleanName.endsWith('.png') ? cleanName : `${cleanName}.png`),
+      filters: [{ name: 'PNG Image', extensions: ['png'] }],
+    });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(`${r.filePath}.tmp`, Buffer.from(m[1], 'base64'));
+    fs.renameSync(`${r.filePath}.tmp`, r.filePath);
+    return { ok: true, filePath: r.filePath };
+  });
+  ipcMain.handle('backup:list', () => backupMgr ? { dir: backupMgr.dir(), lastBackupAt: store.get('lastBackupAt') || 0, items: backupMgr.list() } : { dir: '', lastBackupAt: 0, items: [] });
+  ipcMain.handle('backup:create', () => backupMgr?.create({ reason: 'manual' }) || null);
+  ipcMain.handle('backup:restore', (e, { id } = {}) => backupMgr?.restore(id));
+  ipcMain.handle('backup:delete', (e, { id } = {}) => backupMgr?.delete(id) || false);
+  ipcMain.handle('backup:open-dir', () => { const d = backupMgr?.dir(); if (d) shell.openPath(d); return !!d; });
+  ipcMain.handle('backup:mirror', (e, payload) => backupMgr?.mirror(payload || {}) || false);
   ipcMain.handle('invite', (e, target) => inviteLink(target));
-  ipcMain.handle('routerlock', () => {
-    const p = findRouterLock();
+  ipcMain.handle('routerlock', async () => {
+    const p = await findRouterLockAsync();
     if (p) { spawn(p, [], { detached: true, stdio: 'ignore', cwd: path.dirname(p) }).unref(); return true; }
-    shell.openExternal('https://github.com/ds1s1s1/ds1-router-lock/releases');
+    safeOpenExternal('https://github.com/ds1s1s1/ds1-router-lock/releases');
     return false;
   });
   ipcMain.handle('pick:file', async (e, filters) => {
-    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: filters || [] });
+    const safeFilters = Array.isArray(filters)
+      ? filters.slice(0, 10).map((f) => ({
+          name: String(f?.name || 'Files').slice(0, 40),
+          extensions: Array.isArray(f?.extensions)
+            ? f.extensions.map((ext) => String(ext || '').replace(/[^a-z0-9]/gi, '').slice(0, 10)).filter(Boolean)
+            : [],
+        })).filter((f) => f.extensions.length > 0)
+      : [];
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: safeFilters });
     return r.canceled ? null : r.filePaths[0];
   });
-  ipcMain.handle('identity:new', () => { store.resetIdentity(); app.relaunch(); app.exit(0); });
+  ipcMain.handle('identity:new', () => { store.resetIdentity(); quitting = true; shutdown(); app.relaunch(); app.exit(0); });
   ipcMain.handle('fullscreen', (e, on) => { win.setFullScreen(on === undefined ? !win.isFullScreen() : !!on); return win.isFullScreen(); });
-  ipcMain.handle('vigem', () => shell.openExternal('https://github.com/nefarius/ViGEmBus/releases'));
+  ipcMain.handle('win:minimize', () => { if (win && !win.isDestroyed()) win.minimize(); return true; });
+  ipcMain.handle('win:maximize', () => {
+    if (!win || win.isDestroyed()) return false;
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return win.isMaximized();
+  });
+  ipcMain.handle('win:close', () => { if (win && !win.isDestroyed()) win.close(); return true; });
+  ipcMain.handle('win:is-maximized', () => !!(win && !win.isDestroyed() && win.isMaximized()));
+  ipcMain.handle('vigem', () => safeOpenExternal('https://github.com/nefarius/ViGEmBus/releases'));
 }
 
 function launchGame(id, by) {
   const g = store.games().find((x) => x.id === id);
   if (!g) return false;
-  if (g.source === 'steam') shell.openExternal(`steam://rungameid/${g.appid}`);
-  else if (g.path) {
+  if (g.source === 'steam') {
+    if (!/^\d+$/.test(String(g.appid || ''))) return false;
+    safeOpenExternal(`steam://rungameid/${g.appid}`);
+  } else if (g.path) {
+    if (!/\.(exe|lnk|url)$/i.test(g.path) || !fs.existsSync(g.path)) return false;
     if (/\.(lnk|url)$/i.test(g.path)) shell.openPath(g.path);
-    else spawn(g.path, g.args ? g.args.split(' ') : [], { cwd: path.dirname(g.path), detached: true, stdio: 'ignore' }).unref();
+    else spawn(g.path, [], { cwd: path.dirname(g.path), detached: true, stdio: 'ignore' }).unref();
   }
   emit('launched', { name: g.name, by });
   return true;
@@ -431,16 +786,22 @@ function pollPresence() {
 // ------------------------------------------------------------------------------- boot
 app.whenReady().then(async () => {
   // Packaged-build check (the fuses block ELECTRON_RUN_AS_NODE): does the native core load, does
-  // the engine start? Result goes to the file named by MAJLIS_SELFTEST (a GUI exe has no stdout).
+  // the engine start? Result goes to the file named by MAJLIS_SELFTEST (restricted to tmpdir).
   if (process.env.MAJLIS_SELFTEST) {
-    const done = (r) => { fs.writeFileSync(process.env.MAJLIS_SELFTEST, JSON.stringify(r)); app.exit(r.core && r.engine ? 0 : 1); };
+    const p = path.resolve(process.env.MAJLIS_SELFTEST);
+    if (app.isPackaged && (path.dirname(p) !== path.resolve(os.tmpdir()) || !/^majlis-selftest-[a-z0-9_-]+\.json$/i.test(path.basename(p)))) {
+      app.exit(1); return;
+    }
+    const done = (r) => { fs.writeFileSync(p, JSON.stringify(r)); app.exit(r.core && r.engine ? 0 : 1); };
     const h = new Helper();
     const t = setTimeout(() => done({ core: core?.version() || null, engine: null }), 15000);
-    h.once('ready', (m) => { clearTimeout(t); h.stop(); done({ core: core?.version() || null, engine: m.version || null }); });
+    h.once('ready', (m) => { clearTimeout(t); h.stop(true); done({ core: core?.version() || null, engine: m.version || null }); });
     if (!h.start()) { clearTimeout(t); done({ core: core?.version() || null, engine: null }); }
     return;
   }
-  store = new Store(app.getPath('userData'));
+  store = new Store(app.getPath('userData'), preloadedCfg);
+  preloadedCfg = null;
+  if (app.isPackaged) { try { app.setLoginItemSettings({ openAtLogin: !!store.get('launchOnStartup') }); } catch {} }
   net = new Net(store.identity(), store);
   helper = new Helper();
   guest = new Guest({ net, store });
@@ -449,48 +810,215 @@ app.whenReady().then(async () => {
   host = new Host({ store, net, helper, encoders, ffmpeg: ffmpegPath(), engine });
   replay = new Replay({ ffmpeg: ffmpegPath(), helper, store, encoders });
   handlers();
+  createTray();
   createWindow();
-  theater = require('./theater').setup({ getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest, getMediaHub: () => mediaHub, preload: path.join(__dirname, '../preload/preload.js'), rendererDir: path.join(__dirname, '../renderer') });
-  mediaHub = require('./media/hub').setup({ store, dataDir: app.getPath('userData'), videosDir: app.getPath('videos'), svc: theater.svc, emit, openExternal: (u) => shell.openExternal(u), openPath: (p) => { fs.mkdirSync(p, { recursive: true }); shell.openPath(p); } });
-  // Discord: our profile shows what we're watching / hosting; a friend's "Join" there knocks here
-  const dcId = store.get('discordClientId');
-  if (/^\d{15,22}$/.test(String(dcId || ''))) {
-    const { Discord, activity, joinTarget } = require('./discord');
-    discord = new Discord(String(dcId));
-    discord.on('join', (secret) => { const target = joinTarget(secret); if (target) { emit('deeplink', { kind: 'join', target }); if (win) { if (win.isMinimized()) win.restore(); win.focus(); } } });
+  cacheMgr = new CacheManager({
+    dataDir: app.getPath('userData'),
+    getSettings: () => store.all(),
+    getDownloadDir: () => store.get('downloadDir') || path.join(app.getPath('videos'), 'Majlis'),
+    getActiveFiles: async () => {
+      const active = [];
+      const svcAct = await theater?.svc?.active?.().catch(() => null);
+      if (svcAct?.files?.length) active.push(...svcAct.files);
+      const subs = theater?.activeTempSubs?.();
+      if (subs?.length) active.push(...subs);
+      const mi = theater?.activeMediaInfo?.();
+      if (mi?.file) active.push(mi.file);
+      if (replay?.running && replay?.dir) active.push(replay.dir);
+      return active;
+    },
+    getChromiumCacheSize: () => session.defaultSession.getCacheSize(),
+    clearChromiumCache: () => session.defaultSession.clearCache(),
+  });
+  theater = require('./theater').setup({
+    getWin: () => win, store, emit, helper, getHost: () => host, getGuest: () => guest,
+    getMediaHub: () => mediaHub, getSocial: () => social, getFfmpeg: ffmpegPath,
+    getCacheManager: () => cacheMgr,
+    openExternal: safeOpenExternal,
+    preload: path.join(__dirname, '../preload/preload-theater.js'), rendererDir: RENDERER_DIR,
+    onTheaterState: setTheaterChrome,
+    isIncognito: () => incognitoOn,
+    onPlaybackStateChange: () => syncThumbar(),
+    onPresenceChange: () => pushDiscord(true),
+    onTheaterClose: () => {
+      if (normalState) setMiniMode(false);
+      if (incognitoOn || store.get('deleteCacheAfterWatch')) cacheMgr?.enforce({ aggressive: true }).catch(() => {});
+      syncThumbar();
+      pushDiscord(true);
+    },
+    onFrame: (f) => {
+      if (port && win && !win.isDestroyed()) {
+        port.postMessage({ t: 'thv', w: f.w, h: f.h, fmt: f.fmt, data: f.buf });
+      }
+    },
+    onFrameClear: () => {
+      if (port && win && !win.isDestroyed()) port.postMessage({ t: 'thv-clear' });
+    },
+  });
+  syncThumbar = () => updateThumbar(win, {
+    ...(theater?.playbackSnapshot?.() || { open: false, paused: false, hasNext: false }),
+    lang: store?.get('lang') || 'ar',
+  }, {
+    onSeekBack: () => theater?.seekBy?.(-10),
+    onToggle: () => theater?.togglePause?.(),
+    onSeekFwdOrNext: () => (theater?.playbackSnapshot?.()?.hasNext ? theater?.nextEpisode?.() : theater?.seekBy?.(10)),
+  });
+  if (!app.isPackaged && process.env.MAJLIS_PLAY && win && !win.isDestroyed()) {
+    win.webContents.once('did-finish-load', () => {
+      setTimeout(() => {
+        theater?.play({
+          type: 'movie', id: 'dev:testsrc',
+          card: { name: 'Majlis Signal Test', type: 'movie', metaId: 'dev:testsrc' },
+          stream: { url: process.env.MAJLIS_PLAY },
+        }).catch(() => {});
+      }, 1200);
+    });
+  }
+  const showDesktopToast = ({ title, body, route = null, force = false } = {}) => {
+    try {
+      if (!Notification.isSupported()) return false;
+      if (!force && store.get('desktopNotifications') === false) return false;
+      if (!force && win && !win.isDestroyed() && win.isFocused()) return false;
+      const iconPath = path.join(RENDERER_DIR, 'img/icon.png');
+      const n = new Notification({
+        title: String(title || 'Majlis').slice(0, 120),
+        body: String(body || '').slice(0, 240),
+        ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
+      });
+      n.on('click', () => {
+        if (win && !win.isDestroyed()) {
+          if (win.isMinimized()) win.restore();
+          win.show();
+          win.focus();
+          if (route) emit('tray:nav', { view: 'cinema', tab: route });
+        }
+      });
+      n.show();
+      return true;
+    } catch { return false; }
+  };
+  mediaHub = require('./media/hub').setup({
+    store, dataDir: app.getPath('userData'), videosDir: app.getPath('videos'), svc: theater.svc, emit,
+    getWin: () => win, getFfmpeg: ffmpegPath, getCacheManager: () => cacheMgr,
+    openExternal: safeOpenExternal,
+    openPath: (p) => { fs.mkdirSync(p, { recursive: true }); shell.openPath(p); },
+    notify: showDesktopToast,
+    isIncognito: () => incognitoOn,
+    setIncognito: (on) => {
+      incognitoOn = !!on;
+      emit('incognito', { on: incognitoOn });
+      pushDiscord(true);
+      social?.broadcastStatusToFriends?.();
+      return incognitoOn;
+    },
+    onProfileChanged: (name) => {
+      social?.syncNetIdentity?.();
+      pushDiscord(true);
+      emit('profile-changed', { name });
+    },
+    getDiagnosticsHooks: () => ({
+      theater: () => theater,
+      net: () => net,
+      helper: () => helper,
+      ffmpegPath,
+      ensureFfmpeg,
+      coreVersion: () => core?.version?.() || null,
+      encoders: () => encoders,
+    }),
+  });
+  backupMgr = new BackupManager({ store, dataDir: app.getPath('userData'), reloadLibs: () => mediaHub?.reloadLibs?.() });
+  backupMgr.startScheduler();
+  setTimeout(() => { if (!shuttingDown) cacheMgr?.enforce().catch(() => {}); }, 15000).unref?.();
+  setInterval(() => { if (!shuttingDown) cacheMgr?.enforce().catch(() => {}); }, 1800000).unref?.();
+  social = require('./social').setup({ store, net, getHost: () => host, getGuest: () => guest, getTheater: () => theater, getMediaHub: () => mediaHub, emit, pushPresence, isIncognito: () => incognitoOn });
+  mediaHub?.setOnQueueChange?.((items) => { social?.syncPartyQueue?.(items); theater?.onPartyEvent?.('queue', items); });
+  if (pendingLink?.kind === 'friend') social.onFriendLink(pendingLink.raw || pendingLink.target);
+  // Defer Discord Rich Presence init slightly so window renders instantaneously
+  const { Discord, activity, joinTarget, resolveDiscordClientId } = require('./discord');
+  const buildDiscordPrivacy = () => ({
+    hideTitle: !!store.get('discordHideTitle'),
+    showWhenPaused: store.get('discordShowWhenPaused') !== false,
+    showBrowsing: !!store.get('discordShowBrowsing'),
+    showPoster: store.get('discordShowPoster') !== false,
+    showTimestamp: store.get('discordShowTimestamp') !== false,
+    showPartyJoin: store.get('discordShowPartyJoin') !== false,
+  });
+  pushDiscord = (immediate = false) => {
+    if (shuttingDown || !discord) return;
+    if (incognitoOn || store.get('discordPresence') === false) {
+      discord.set(null, { immediate: true });
+      return;
+    }
+    const watching = theater?.info?.() || null;
+    const hosting = host?.enabled ? { guests: host.guests.size, max: 8, mode: host.mode, since: discordSince } : null;
+    discord.set(activity({
+      watching,
+      hosting,
+      browsing: !watching && !hosting,
+      id: store.identity().id,
+      privacy: buildDiscordPrivacy(),
+    }), { immediate });
+  };
+  syncDiscordClient = () => {
+    if (shuttingDown) return;
+    let buildCfg = {};
+    try { buildCfg = require('./build-config.json'); } catch {}
+    const dcId = resolveDiscordClientId(store.get('discordClientId'), buildCfg.discordClientId);
+    const enabled = store.get('discordPresence') !== false;
+    if (!enabled || !dcId) {
+      clearInterval(discordTimer); discordTimer = null;
+      if (discord) { try { discord.stop(); } catch {} discord = null; }
+      return;
+    }
+    if (discord && discord.clientId === dcId) {
+      pushDiscord(true);
+      return;
+    }
+    clearInterval(discordTimer); discordTimer = null;
+    if (discord) { try { discord.stop(); } catch {} discord = null; }
+    discordSince = Date.now();
+    discord = new Discord(dcId);
+    discord.on('join', (secret) => { const target = joinTarget(secret); if (target) { emit('deeplink', { kind: 'join', target }); if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } } });
+    discord.on('voice-active', (v) => emit('discord-voice', v));
     discord.on('error', (e) => { if (DEBUG) console.log('[discord]', e.message); });
     discord.start();
-    const since = Date.now();
-    setInterval(() => {
-      const hosting = host?.enabled ? { guests: host.guests.size, max: 8, mode: host.mode, since } : null;
-      discord.set(store.get('discordPresence') === false ? null : activity({ watching: theater.info(), hosting, id: store.identity().id }));
-    }, 5000);
-  }
+    discordTimer = setInterval(() => pushDiscord(false), 5000);
+    discordTimer.unref?.();
+    pushDiscord(true);
+  };
+  setTimeout(() => { if (!shuttingDown) syncDiscordClient(); }, 2500).unref?.();
   // watch together: the shared state reaches the theater, as host and as guest
   host.on('sync', (st) => theater.onSync('host', st));
   // what friends have watched, both ways
   host.getActivity = guest.getActivity = () => theater.activity();
   host.on('activity', (a) => theater.saveFriend(a));
-  host.on('vote', (items) => emit('vote', { items, host: true }));
-  guest.on('vote', (items) => emit('vote', { items, host: false }));
+  host.on('vote', (items) => { emit('vote', { items, host: true }); theater?.onPartyEvent?.('vote', items); });
+  guest.on('vote', (items) => { emit('vote', { items, host: false }); theater?.onPartyEvent?.('vote', items); });
   guest.on('activity', (a) => theater.saveFriend(a));
   guest.on('sync', (st) => theater.onSync('guest', st));
   registerShortcuts();
 
   let firstReg = true;
+  let serverErrNotified = false;
   net.on('registered', (r) => {
+    serverErrNotified = false;
     emit('registered', { publicAddr: r.publicAddr, relays: r.relays, via: net.cloud ? 'cloud' : r.via });
     if (firstReg) { firstReg = false; pushPresence(); }
   });
   net.on('taken', () => { store.bumpSalt(); emit('id-changed', { id: store.identity().id }); net._hello(); });
   net.on('presence', (on) => emit('presence', { on }));
-  net.on('server-error', (e) => emit('notice', { key: e === 'access' ? 'server_access' : 'server_error' }));
+  net.on('server-error', (e) => {
+    const passiveSoloCinema = store.get('view') === 'cinema' && !host.enabled && !host.guests.size && !guest.link && guest.state === 'idle';
+    if (passiveSoloCinema || serverErrNotified) return;
+    serverErrNotified = true;
+    emit('notice', { key: e === 'access' ? 'server_access' : 'server_error' });
+  });
   net.on('knock-progress', (p) => emit('knock-progress', p));
   setInterval(pollPresence, 15000);
 
   host.on('knock', (k) => {
     emit('knock', k);
-    if (!win.isFocused()) {
+    if (win && !win.isDestroyed() && !win.isFocused()) {
       win.flashFrame(true);
       try { new Notification({ title: k.known ? `${k.name} يبي يدخل` : 'أحد يبي يدخل مجلسك', body: `${k.from.slice(0, 3)} ${k.from.slice(3, 6)} ${k.from.slice(6)}` }).show(); } catch {}
     }
@@ -507,15 +1035,32 @@ app.whenReady().then(async () => {
   host.on('encoder-error', (e) => emit('notice', { key: 'encoder_error', detail: e.err }));
   host.on('library-request', (g) => g.link.ctrl({ t: 'library', games: guestLibrary() }));
   host.on('movie', (v) => emit('movie', v));
-  host.on('chat', (c) => emit('chat', c));
-  host.on('react', (r) => emit('react', r));
-  host.on('countdown', (c) => emit('countdown', c));
+  host.on('chat', (c) => { emit('chat', c); theater?.onPartyEvent?.('chat', c); });
+  host.on('react', (r) => { emit('react', r); theater?.onPartyEvent?.('react', r); });
+  host.on('countdown', (c) => { emit('countdown', c); theater?.onPartyEvent?.('countdown', c); });
+  host.on('ready-state', (s) => { emit('ready-state', s); theater?.onPartyEvent?.('ready', s); });
+  host.on('watch-control', (w) => { emit('watch-control', w); theater?.onPartyEvent?.('control', w); emit('party-updated', { kind: 'control' }); });
   host.on('askpause', (a) => emit('askpause', a));
   host.on('movie-by', (a) => emit('movie-by', a));
   host.on('launch', ({ by, id }) => launchGame(id, by));
 
   guest.on('state', (s) => { emit('guest', s); boost(s.state === 'linked' || host.guests.size > 0); });
-  guest.on('ctrl', (m) => emit('guest-ctrl', m));
+  guest.on('ctrl', (m) => {
+    emit('guest-ctrl', m);
+    if (m?.t === 'chat') theater?.onPartyEvent?.('chat', m);
+    else if (m?.t === 'react') theater?.onPartyEvent?.('react', m);
+    else if (m?.t === 'ready?') theater?.onPartyEvent?.('ready', { active: true, peers: [], prompt: true });
+    else if (m?.t === 'countdown') theater?.onPartyEvent?.('countdown', { ms: m.ms, startAt: m.startAt || (Date.now() + (m.ms || 3000)) });
+    else if (m?.t === 'watch_control') { theater?.onPartyEvent?.('control', m); emit('party-updated', { kind: 'control' }); }
+    else if (m?.t === 'roster') {
+      const peers = [
+        { id: 'host', name: m.host || 'Host', ready: !!m.hostReady, isHost: true },
+        ...(m.list || []).map((p) => ({ id: p.id || String(p.idx), name: p.name, ready: !!p.ready, isHost: false })),
+      ];
+      theater?.onPartyEvent?.('ready', { active: !!m.readyActive, peers });
+      if (m.watchControl) theater?.onPartyEvent?.('control', { ...m.watchControl, canControl: !!m.canControl });
+    }
+  });
   guest.on('stats', (s) => { emit('guest-stats', s); logStats('guest', { rtt: s.rtt, kbps: s.kbps, loss: s.loss, lost: s.lost, fps: s.fps, qd: s.qd, jitter: s.jitter, path: s.path?.kind, label: s.path?.label, dec: s.dec }); });
   guest.on('path', (p) => emit('guest-path', p));
   guest.on('kicked', (k) => { emit('kicked', k); guest.leave(); });
@@ -534,51 +1079,87 @@ app.whenReady().then(async () => {
     if (delta > 0) { const k = new Date().toISOString().slice(0, 10); store.d.usage = store.d.usage || {}; store.d.usage[k] = (store.d.usage[k] || 0) + delta; store.save(); }
   }, 5000);
 
-  try { await net.start(); } catch (e) { emit('notice', { key: 'net_failed', detail: e.message }); }
+  net.start().catch((e) => emit('notice', { key: 'net_failed', detail: e.message }));
 
-  resolveFfmpeg({ custom: store.get('ffmpeg'), dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => {
-    if (exe) useFfmpeg(exe);
-    else emit('ffmpeg', { state: 'missing' });
-  });
-  // Start the helper early so displays and controller support show up in settings.
-  helper.start();
-
-  if (pendingLink) setTimeout(() => emit('deeplink', pendingLink), 800);
-
-  // dev aids for testing two copies on one machine
-  if (process.env.MAJLIS_AUTOHOST) {
-    host.setEnabled(true);
-    host.on('knock', (k) => host.decide(k.sid, { accept: true, role: process.env.MAJLIS_AUTOHOST }));
+  // Load cached encoder probe synchronously from disk if fresh; defer cold probe until after first paint
+  const ec = store.d.encoderCache;
+  if (ec?.exe && (Date.now() - ec.at < 7 * 86400000) && (ec.exe === 'ffmpeg' || fs.existsSync(ec.exe))) {
+    loadOrProbeFfmpeg(ec.exe).catch(() => {});
+  } else {
+    setTimeout(() => {
+      if (shuttingDown || ffmpegExe) return;
+      resolveFfmpeg({ custom: store.get('ffmpeg'), dataDir: app.getPath('userData'), resources: process.resourcesPath }).then((exe) => {
+        if (exe) return loadOrProbeFfmpeg(exe);
+        emit('ffmpeg', { state: 'missing' });
+      }).catch(() => {});
+    }, 4000).unref?.();
   }
-  if (process.env.MAJLIS_MOVIE) setTimeout(async () => { host.setEnabled(true); host.setMode('watch'); await ensureFfmpeg(); await host.movieOpen(process.env.MAJLIS_MOVIE, { fresh: true, autoplay: true }); }, 2500);
-  if (process.env.MAJLIS_CHAT) setTimeout(() => host.hostChat(process.env.MAJLIS_CHAT), 9000);
-  // dev aid: MAJLIS_SHOT_SCREEN=out.png saves what's on screen inside the app window (native
-  // windows over it included, e.g. the film), cropped to the window: nothing else on the desktop
-  if (process.env.MAJLIS_SHOT_SCREEN) setTimeout(async () => {
-    const d = screen.getDisplayMatching(win.getBounds()), f = d.scaleFactor;
-    const src = (await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: d.size.width * f, height: d.size.height * f } })).find((s) => +s.display_id === d.id);
-    const b = win.getBounds();
-    const img = src.thumbnail.crop({ x: Math.round((b.x - d.bounds.x) * f), y: Math.round((b.y - d.bounds.y) * f), width: Math.round(b.width * f), height: Math.round(b.height * f) });
-    fs.writeFileSync(process.env.MAJLIS_SHOT_SCREEN, img.toPNG());
-  }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
-  // dev aid: MAJLIS_PLAY=<http url> opens it in the theater
-  // dev aid: MAJLIS_PARTY=<ms> starts watching together that long after start (host, film open)
-  if (process.env.MAJLIS_PARTY) setTimeout(() => { const n = theater.mpv?.props; if (n && host.guests.size) { const p = Math.round((n['time-pos'] || 0) * 1000); console.log('[party] start at', p); } theater.partyStart().catch((e) => console.log('[party]', e.message)); }, +process.env.MAJLIS_PARTY);
-  if (process.env.MAJLIS_PLAY_PAUSE) setTimeout(() => theater.mpv?.set('pause', true).catch(() => {}), 11000);
-  if (process.env.MAJLIS_PLAY) setTimeout(() => theater.play({ type: 'movie', id: 'dev-play', card: { name: 'Test', type: 'movie' }, stream: { url: process.env.MAJLIS_PLAY } }).catch((e) => console.log('[play]', e.message)), 4000);
-  if (process.env.MAJLIS_JOIN) setTimeout(() => emit('deeplink', { kind: 'join', target: process.env.MAJLIS_JOIN }), 3000);
+  // Helper is only spawned on demand (host:enable, sources, windows, displays, or PTT)
+  if (store.get('voice') === 'ptt') setTimeout(() => { if (!shuttingDown && !helper.p) helper.start(); }, 1200).unref?.();
+
+  const sendDeepLink = (l) => {
+    if (!l) return;
+    if (l.kind === 'friend') social?.onFriendLink(l.raw || l.target);
+    if (l.kind === 'addon') emit('cin:deeplink-addon', { url: l.url });
+    emit('deeplink', l);
+  };
+  if (pendingLink) setTimeout(() => sendDeepLink(pendingLink), 800);
+
+  // dev aids for testing two copies on one machine (never active in packaged releases)
+  if (!app.isPackaged) {
+    if (process.env.MAJLIS_AUTOHOST) {
+      host.setEnabled(true);
+      host.on('knock', (k) => host.decide(k.sid, { accept: true, role: process.env.MAJLIS_AUTOHOST }));
+    }
+    if (process.env.MAJLIS_MOVIE) setTimeout(async () => { host.setEnabled(true); host.setMode('watch'); await ensureFfmpeg(); await host.movieOpen(process.env.MAJLIS_MOVIE, { fresh: true, autoplay: true }); }, 2500);
+    if (process.env.MAJLIS_CHAT) setTimeout(() => host.hostChat(process.env.MAJLIS_CHAT), 9000);
+    if (process.env.MAJLIS_SHOT_SCREEN) setTimeout(async () => {
+      const d = screen.getDisplayMatching(win.getBounds()), f = d.scaleFactor;
+      const src = (await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: d.size.width * f, height: d.size.height * f } })).find((s) => +s.display_id === d.id);
+      const b = win.getBounds();
+      const img = src.thumbnail.crop({ x: Math.round((b.x - d.bounds.x) * f), y: Math.round((b.y - d.bounds.y) * f), width: Math.round(b.width * f), height: Math.round(b.height * f) });
+      fs.writeFileSync(process.env.MAJLIS_SHOT_SCREEN, img.toPNG());
+    }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
+    if (process.env.MAJLIS_PARTY) setTimeout(() => { const n = theater.mpv?.props; if (n && host.guests.size) { const p = Math.round((n['time-pos'] || 0) * 1000); console.log('[party] start at', p); } theater.partyStart().catch((e) => console.log('[party]', e.message)); }, +process.env.MAJLIS_PARTY);
+    if (process.env.MAJLIS_PLAY_PAUSE) setTimeout(() => theater.mpv?.set('pause', true).catch(() => {}), 11000);
+    if (process.env.MAJLIS_PLAY) setTimeout(() => theater.play({ type: 'movie', id: 'dev-play', card: { name: 'Test', type: 'movie' }, stream: { url: process.env.MAJLIS_PLAY } }).catch((e) => console.log('[play]', e.message)), 4000);
+    if (process.env.MAJLIS_JOIN) setTimeout(() => emit('deeplink', { kind: 'join', target: process.env.MAJLIS_JOIN }), 3000);
+  }
 });
+
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  globalShortcut.unregisterAll();
+  const clean = (fn) => { try { fn?.(); } catch {} };
+  clean(() => { if (tray && !tray.isDestroyed()) tray.destroy(); });
+  clean(() => theater?.stop?.(true));
+  clean(() => guest?.leave?.());
+  clean(() => { host?.panic?.(); host?.dispose?.(); });
+  clean(() => replay?.stop?.());
+  clean(() => { clearInterval(discordTimer); discordTimer = null; discord?.stop?.(); discord = null; });
+  clean(() => mediaHub?.flush?.());
+  clean(() => backupMgr?.stopScheduler?.());
+  clean(() => { helper?.cmd?.({ cmd: 'mode_restore' }); helper?.stop?.(true); });
+  clean(() => net?.stop?.());
+  clean(() => store?.flush?.());
+}
 
 app.on('second-instance', (e, argv) => {
   const l = deepLink(argv);
-  if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
-  if (l) emit('deeplink', l);
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+  } else if (app.isReady()) {
+    createWindow();
+  }
+  if (l) { if (l.kind === 'friend') social?.onFriendLink(l.raw || l.target); if (l.kind === 'addon') emit('cin:deeplink-addon', { url: l.url }); emit('deeplink', l); }
 });
-app.on('open-url', (e, url) => { const l = deepLink([url]); if (l) emit('deeplink', l); });
+app.on('open-url', (e, url) => { const l = deepLink([url]); if (l) { if (l.kind === 'friend') social?.onFriendLink(l.raw || l.target); if (l.kind === 'addon') emit('cin:deeplink-addon', { url: l.url }); emit('deeplink', l); } });
 
-app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => {
-  globalShortcut.unregisterAll();
-  try { guest?.leave(); host?.panic(); host?.dispose(); replay?.stop(); theater?.stop(); discord?.stop(); mediaHub?.flush(); } catch {}
-  try { helper?.cmd({ cmd: 'mode_restore' }); helper?.stop(); net?.stop(); store?.flush(); } catch {}
+app.on('window-all-closed', () => {
+  if (quitting || !store?.get('closeToTray') || !tray) app.quit();
 });
+app.on('before-quit', () => { quitting = true; shutdown(); });
+app.on('will-quit', () => shutdown());

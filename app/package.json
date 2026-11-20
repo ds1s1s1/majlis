@@ -1,8 +1,8 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.6.1",
-  "description": "Play with your friends over the internet. No accounts, just numbers.",
+  "version": "0.1.0-beta",
+  "description": "Cinema-first media center with embedded libmpv, Stremio addons, Watch Party, and ultra-low-latency Co-op gaming.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
   "license": "MIT",
@@ -11,10 +11,11 @@
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "fonts": "node scripts/copy-fonts.js",
-    "dist": "npm run media && npm run core && npm run mpv && electron-builder --win portable nsis",
+    "dist": "npm run media && npm run core && npm run mpv && npm run ytdlp && electron-builder --win dir",
     "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\"",
     "verify-release": "node scripts/check-release.js",
     "mpv": "node scripts/fetch-mpv.js",
+    "ytdlp": "node scripts/fetch-ytdlp.js",
     "media": "vite build --config media/vite.config.ts",
     "media:check": "tsc -p media/tsconfig.json",
     "prestart": "npm run media"
@@ -34,11 +35,13 @@
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^38.0.0",
     "electron-builder": "^26.0.0",
+    "lucide-react": "^1.76.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwindcss": "^4.3.5",
     "typescript": "^5.9.3",
-    "vite": "^7.3.8"
+    "vite": "^7.3.8",
+    "zustand": "^5.1.0"
   },
   "build": {
     "appId": "app.majlis.desktop",
@@ -46,7 +49,8 @@
     "files": [
       "src/**/*",
       "native/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map"
     ],
     "extraResources": [
       {
@@ -61,10 +65,18 @@
         "from": "../engine/vendor/mpv",
         "to": "mpv",
         "filter": [
-          "mpv.exe",
+          "libmpv-2.dll",
           "d3dcompiler_43.dll",
           "mpv/fonts.conf",
           "LICENSE-mpv.txt"
+        ]
+      },
+      {
+        "from": "../engine/vendor/ytdlp",
+        "to": "ytdlp",
+        "filter": [
+          "yt-dlp.exe",
+          "LICENSE-ytdlp.txt"
         ]
       }
     ],
@@ -74,27 +86,26 @@
         "schemes": [
           "majlis"
         ]
+      },
+      {
+        "name": "Stremio",
+        "schemes": [
+          "stremio"
+        ]
       }
     ],
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        "portable",
-        "nsis"
+        "dir"
       ]
-    },
-    "portable": {
-      "artifactName": "Majlis-portable.exe"
-    },
-    "nsis": {
-      "artifactName": "Majlis-setup.exe",
-      "oneClick": true
     },
     "asarUnpack": [
       "native/**/*"
     ],
     "electronFuses": {
       "runAsNode": false,
+      "enableCookieEncryption": true,
       "enableNodeCliInspectArguments": false,
       "enableNodeOptionsEnvironmentVariable": false,
       "onlyLoadAppFromAsar": true,

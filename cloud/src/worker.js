@@ -11,15 +11,30 @@ const enc = new TextEncoder();
 const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 // Media center sign-ins. Client ids are public; the secrets stay here (wrangler secret put
-// TRAKT_SECRET; TRAKT_ID and SIMKL_ID as vars or secrets). The app never sees a secret.
+// TRAKT_SECRET, MAL_SECRET, ANILIST_SECRET; TRAKT_ID, SIMKL_ID, ANILIST_ID, MAL_ID as vars or secrets).
 async function oauth(req, env, url) {
   if (env.ACCESS_KEY && url.searchParams.get('k') !== env.ACCESS_KEY) return json({ error: 'forbidden' }, 403);
   const p = url.pathname;
-  if (p === '/oauth/config') return json({ trakt: env.TRAKT_ID || null, simkl: env.SIMKL_ID || null });
+  if (p === '/oauth/config') return json({ trakt: env.TRAKT_ID || null, simkl: env.SIMKL_ID || null, anilist: env.ANILIST_ID || null, mal: env.MAL_ID || null });
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
+  const b = await req.json().catch(() => ({}));
+  if (p === '/oauth/mal/token') {
+    const id = String(b.client_id || env.MAL_ID || '');
+    if (!id) return json({ error: 'MAL is not set up on this server' }, 501);
+    const form = new URLSearchParams({ client_id: id, grant_type: String(b.grant_type || (b.refresh_token ? 'refresh_token' : 'authorization_code')) });
+    if (env.MAL_SECRET) form.set('client_secret', env.MAL_SECRET);
+    for (const k of ['code', 'code_verifier', 'redirect_uri', 'refresh_token']) if (b[k]) form.set(k, String(b[k]));
+    const r = await fetch('https://myanimelist.net/v1/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'Majlis' }, body: form });
+    return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  }
+  if (p === '/oauth/anilist/token') {
+    const id = String(b.client_id || env.ANILIST_ID || '');
+    if (!id || !env.ANILIST_SECRET) return json({ error: 'AniList is not set up on this server' }, 501);
+    const r = await fetch('https://anilist.co/api/v2/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'user-agent': 'Majlis' }, body: JSON.stringify({ grant_type: 'authorization_code', client_id: id, client_secret: env.ANILIST_SECRET, redirect_uri: String(b.redirect_uri || 'https://anilist.co/api/v2/oauth/pin'), code: String(b.code || '') }) });
+    return new Response(await r.text(), { status: r.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  }
   if (!p.startsWith('/oauth/trakt/')) return json({ error: 'not found' }, 404);
   if (!env.TRAKT_ID || !env.TRAKT_SECRET) return json({ error: 'Trakt is not set up on this server' }, 501);
-  const b = await req.json().catch(() => ({}));
   const trakt = async (path, body) => {
     const r = await fetch(`https://api.trakt.tv${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Majlis' }, body: JSON.stringify(body) });
     // Trakt's status codes carry the meaning while polling (400 pending, 429 slow down, 410 expired, 418 denied)
@@ -137,7 +152,7 @@ export class Hub extends DurableObject {
   }
 
   async webSocketMessage(ws, data) {
-    if (typeof data !== 'string' || data.length > 8192) return;
+    if (typeof data !== 'string' || data.length > 65536) return;
     let msg; try { msg = JSON.parse(data); } catch { return; }
     const att = ws.deserializeAttachment() || {};
     const ip = att.ip || '';
@@ -160,18 +175,48 @@ export class Hub extends DurableObject {
           await this.ctx.storage.put(`allow:${msg.id}`, allow);
           this.allowCache.set(msg.id, new Set(allow));
         }
-        ws.serializeAttachment({ ip, colo: att.colo, id: msg.id, pk: msg.pk, nick: String(msg.nick || '').slice(0, 32), busy: !!msg.busy });
+        const hRaw = String(msg.handle || '').trim().replace(/^@+/, '').toLowerCase();
+        let handle = '';
+        if (/^[a-z0-9_]{3,24}$/.test(hRaw) && !/^\d+$/.test(hRaw)) {
+          const hOwner = await this.ctx.storage.get(`handle:${hRaw}`);
+          if (!hOwner || hOwner.id === msg.id) {
+            handle = hRaw;
+            const prevH = await this.ctx.storage.get(`handleof:${msg.id}`);
+            if (prevH && prevH !== hRaw) await this.ctx.storage.delete(`handle:${prevH}`);
+            await this.ctx.storage.put({ [`handle:${hRaw}`]: { id: msg.id, pk: msg.pk, nick: String(msg.nick || '').slice(0, 32) }, [`handleof:${msg.id}`]: hRaw });
+          }
+        }
+        const status = msg.status && typeof msg.status === 'object' ? { watching: msg.status.watching || null, inParty: msg.status.inParty || null } : null;
+        ws.serializeAttachment({ ip, colo: att.colo, id: msg.id, pk: msg.pk, nick: String(msg.nick || '').slice(0, 32), handle, status, busy: !!msg.busy });
         return this.send(ws, { t: 'hi', ip, fam: 'ws', colo: att.colo, relays: [{ name: 'cf', label: 'Cloudflare', turn: true }], stun: 'stun.cloudflare.com:3478', now: now() });
       }
 
       case 'presence': {
         if (!this.take(`p:${ip}`, 40, 10) || !att.id || att.id !== msg.id || !fresh || !(await verify(msg, att.pk)) || !Array.isArray(msg.ids)) return;
-        const on = {};
+        const on = {}, meta = {};
         for (const id of msg.ids.slice(0, 200)) {
           const p = this.peer(id);
-          if (p && (await this.allowOf(id)).has(msg.id)) on[id] = p.busy ? 'busy' : 'online';
+          if (p && (await this.allowOf(id)).has(msg.id)) {
+            on[id] = p.busy ? 'busy' : 'online';
+            meta[id] = { status: p.status || null, handle: p.handle || '', nick: p.nick || '' };
+          }
         }
-        return this.send(ws, { t: 'presence', on });
+        return this.send(ws, { t: 'presence', on, meta });
+      }
+
+      case 'handle_lookup': {
+        if (!this.take(`hl:${ip}`, 30, 10) || !att.id || att.id !== msg.id || !fresh || !(await verify(msg, att.pk))) return;
+        const h = String(msg.handle || '').trim().replace(/^@+/, '').toLowerCase();
+        if (!/^[a-z0-9_]{3,24}$/.test(h)) return this.send(ws, { t: 'handle_res', reqId: msg.reqId, handle: h, notFound: true });
+        const rec = await this.ctx.storage.get(`handle:${h}`);
+        if (rec && isId(rec.id)) return this.send(ws, { t: 'handle_res', reqId: msg.reqId, handle: h, id: rec.id, pk: rec.pk, nick: rec.nick || rec.id });
+        return this.send(ws, { t: 'handle_res', reqId: msg.reqId, handle: h, notFound: true });
+      }
+
+      case 'social': {
+        if (!this.take(`s:${ip}`, 120, 30) || !att.id || att.id !== msg.from || !fresh || !isId(msg.to) || !(await verify(msg, att.pk))) return;
+        this.sendPeer(msg.to, { t: 'social', m: msg });
+        return;
       }
 
       case 'code': {

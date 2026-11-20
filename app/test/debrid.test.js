@@ -46,3 +46,17 @@ test('debrid: file choice and magnet trackers', () => {
   assert.strictEqual(pickFile(files, null).name, 'a/Film.Extras.mkv');
   assert.strictEqual(magnet(H, ['tracker:udp://t.example:1337/announce', 'dht:' + H]), `magnet:?xt=urn:btih:${H}&tr=udp%3A%2F%2Ft.example%3A1337%2Fannounce`);
 });
+
+test('debrid: AllDebrid v4.1 magnet/upload, magnet/status, link/unlock with agent=Majlis', async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, o = {}) => {
+    calls.push([o.method || 'GET', url, o.body ? String(o.body) : '']);
+    if (url.includes('/magnet/upload')) return reply(200, { status: 'success', data: { magnets: [{ id: 42, ready: true }] } });
+    if (url.includes('/magnet/status')) return reply(200, { status: 'success', data: { magnets: { id: 42, status: 'Ready', statusCode: 4, files: [{ n: 'Show', e: [{ n: 'Show.S01E01.mkv', s: 10, l: 'https://ad/raw1' }, { n: 'Show.S01E02.mkv', s: 12, l: 'https://ad/raw2' }] }] } } });
+    if (url.includes('/link/unlock')) return reply(200, { status: 'success', data: { link: 'https://dl.ad/Show.S01E02.mkv', filesize: 12 } });
+    return reply(404, {});
+  });
+  const r = await resolve('alldebrid', 'ADKEY', { infoHash: H, behaviorHints: { filename: 'Show.S01E02.mkv' } });
+  assert.deepStrictEqual(r, { url: 'https://dl.ad/Show.S01E02.mkv', name: 'Show.S01E02.mkv', size: 12 });
+  assert.ok(calls.every(([, u]) => u.includes('agent=Majlis')), 'every AllDebrid call includes agent=Majlis');
+});

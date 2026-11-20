@@ -11,9 +11,12 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 
+let isPackaged = false;
+try { isPackaged = !!require('electron').app?.isPackaged; } catch {}
+
 function helperPath() {
   const cands = [
-    process.env.MAJLIS_ENGINE,
+    isPackaged ? null : process.env.MAJLIS_ENGINE,
     path.join(process.resourcesPath || '', 'engine', 'majlis-engine.exe'),
     path.join(__dirname, '../../../engine/target/release/majlis-engine.exe'),
   ];
@@ -30,6 +33,7 @@ class Helper extends EventEmitter {
   }
 
   start() {
+    if (this.p) return true;
     const exe = helperPath();
     if (!exe) { this.emit('missing'); return false; }
     this.stopped = false;
@@ -90,7 +94,15 @@ class Helper extends EventEmitter {
     });
   }
 
-  stop() { this.stopped = true; this.cmd({ cmd: 'quit' }); setTimeout(() => { try { this.p?.kill(); } catch {} }, 500); }
+  stop(immediate = false) {
+    this.stopped = true;
+    this.cmd({ cmd: 'quit' });
+    const p = this.p;
+    if (!p) return;
+    if (immediate) { try { p.kill(); } catch {} this.p = null; return; }
+    const t = setTimeout(() => { try { p.kill(); } catch {} }, 500);
+    t.unref?.();
+  }
 }
 
 module.exports = { Helper, helperPath };

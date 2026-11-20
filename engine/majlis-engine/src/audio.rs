@@ -152,14 +152,15 @@ fn capture(kbps: u32, exclude: Option<u32>, include: Option<u32>, run: &AtomicBo
         op::opus_encoder_ctl(enc, op::OPUS_SET_BITRATE_REQUEST as i32, (kbps * 1000) as i32);
         op::opus_encoder_ctl(enc, op::OPUS_SET_COMPLEXITY_REQUEST as i32, 10i32);
         proto::event("audio", json!({ "on": true, "rate": RATE, "ch": 2, "mode": mode }));
-        let mut pending: Vec<f32> = Vec::with_capacity(RATE);
+        let mut pending: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(RATE);
         let mut out = [0u8; 1500];
         let mut seq: u32 = 0;
+        let step = std::time::Duration::from_millis(10);
+        let mut next_tick = std::time::Instant::now() + step;
         while live() {
-            if WaitForSingleObject(ev, 100) != WAIT_OBJECT_0 {
-                // nothing playing: loopback goes quiet; keep the stream (and the clock) going
-                pending.extend(std::iter::repeat(0.0).take(FRAME * 2 * 10));
-            }
+            let now = std::time::Instant::now();
+            let wait_ms = next_tick.saturating_duration_since(now).as_millis().min(10) as u32;
+            if wait_ms > 0 { let _ = WaitForSingleObject(ev, wait_ms); }
             loop {
                 let n = cap.GetNextPacketSize().unwrap_or(0);
                 if n == 0 { break; }
@@ -169,17 +170,29 @@ fn capture(kbps: u32, exclude: Option<u32>, include: Option<u32>, run: &AtomicBo
                 if fl & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
                     pending.extend(std::iter::repeat(0.0).take(frames as usize * 2));
                 } else {
-                    pending.extend_from_slice(std::slice::from_raw_parts(data as *const f32, frames as usize * 2));
+                    pending.extend(std::slice::from_raw_parts(data as *const f32, frames as usize * 2));
                 }
                 let _ = cap.ReleaseBuffer(frames);
             }
-            let mut used = 0;
-            while pending.len() - used >= FRAME * 2 {
-                let pcm = &pending[used..used + FRAME * 2];
+            // Cap buffered audio at 60 ms so device stalls never build latency bursts
+            let max_pending = FRAME * 2 * 6;
+            if pending.len() > max_pending {
+                pending.drain(..pending.len() - max_pending);
+            }
+            let now = std::time::Instant::now();
+            if now.saturating_duration_since(next_tick) > std::time::Duration::from_millis(80) {
+                next_tick = now;
+            }
+            let mut emitted = 0u8;
+            while std::time::Instant::now() >= next_tick && emitted < 2 {
+                let mut pcm = [0.0f32; FRAME * 2];
+                if pending.len() >= FRAME * 2 {
+                    for s in pcm.iter_mut() { *s = pending.pop_front().unwrap(); }
+                }
                 {
                     let mut r = ring.lock().unwrap();
                     let len = r.pcm.len();
-                    for &s in pcm { let p = r.pos; r.pcm[p] = (s.clamp(-1.0, 1.0) * 32767.0) as i16; r.pos = (p + 1) % len; if r.pos == 0 { r.full = true; } }
+                    for &s in pcm.iter() { let p = r.pos; r.pcm[p] = (s.clamp(-1.0, 1.0) * 32767.0) as i16; r.pos = (p + 1) % len; if r.pos == 0 { r.full = true; } }
                 }
                 let n = op::opus_encode_float(enc, pcm.as_ptr(), FRAME as i32, out.as_mut_ptr(), out.len() as i32);
                 if n > 0 {
@@ -189,9 +202,9 @@ fn capture(kbps: u32, exclude: Option<u32>, include: Option<u32>, run: &AtomicBo
                     seq = seq.wrapping_add(1);
                     proto::raw(2, &pkt);
                 }
-                used += FRAME * 2;
+                next_tick += step;
+                emitted += 1;
             }
-            pending.drain(..used);
         }
         let _ = client.Stop();
         op::opus_encoder_destroy(enc);

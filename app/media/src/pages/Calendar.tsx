@@ -1,18 +1,31 @@
 import { useMemo, useState } from 'react';
 import { useCalendar, useCaps, type CalEntry } from '../api';
 import { useHost, useNav, useT } from '../host';
+import { fmtLocaleDate, fmtLocaleTime } from '../i18n';
 import { Img } from '../ui/Img';
 import { Icon } from '../ui/Icon';
 
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 type Src = 'library' | 'tv' | 'anime' | 'movies' | 'trakt';
+const CAL_SRC_KEY = 'majlis:cal-sources-v1';
+const VALID_SRCS = new Set<Src>(['library', 'tv', 'anime', 'movies', 'trakt']);
+const readCalSources = (): Src[] => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CAL_SRC_KEY) || 'null');
+    if (Array.isArray(parsed)) {
+      const clean = parsed.filter((x): x is Src => VALID_SRCS.has(x));
+      if (clean.length) return clean;
+    }
+  } catch {}
+  return ['library', 'anime'];
+};
 
 // A month of releases: episodes of the shows in the library, plus whatever sources are switched on
 export function Calendar() {
   const t = useT(), nav = useNav(), { lang } = useHost();
   const caps = useCaps().data;
   const [month, setMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
-  const [src, setSrc] = useState<Src[]>(['library', 'anime']);
+  const [src, setSrc] = useState<Src[]>(readCalSources);
   const [day, setDay] = useState<string | null>(ymd(new Date()));
   const from = month.getTime(), to = new Date(month.getFullYear(), month.getMonth() + 1, 1).getTime();
   const q = useCalendar(from, to, src);
@@ -26,15 +39,19 @@ export function Calendar() {
   const lead = (month.getDay() - first + 7) % 7;
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
   const cells: (Date | null)[] = [...Array(lead).fill(null), ...Array.from({ length: days }, (_, i) => new Date(month.getFullYear(), month.getMonth(), i + 1))];
-  const fmt = new Intl.DateTimeFormat(lang === 'ar' ? 'ar' : 'en', { month: 'long', year: 'numeric' });
-  const wk = new Intl.DateTimeFormat(lang === 'ar' ? 'ar' : 'en', { weekday: 'short' });
+  const fmt = new Intl.DateTimeFormat(lang === 'ar' ? 'ar-u-nu-latn' : 'en-US', { month: 'long', year: 'numeric' });
+  const wk = new Intl.DateTimeFormat(lang === 'ar' ? 'ar-u-nu-latn' : 'en-US', { weekday: 'short' });
   const weekdays = Array.from({ length: 7 }, (_, i) => wk.format(new Date(2024, 0, 7 + ((first + i) % 7)))); // 2024-01-07 is a Sunday (getDay 0)
   const today = ymd(new Date());
   const sources: { id: Src; label: string; on: boolean }[] = [
     { id: 'library', label: t('cal_library'), on: true }, { id: 'tv', label: t('cal_tv'), on: true }, { id: 'anime', label: t('anime'), on: true },
     { id: 'movies', label: t('cal_movies'), on: !!caps?.tmdb }, { id: 'trakt', label: 'Trakt', on: !!caps?.trakt },
   ];
-  const toggle = (s: Src) => setSrc((l) => (l.includes(s) ? l.filter((x) => x !== s) : [...l, s]));
+  const toggle = (s: Src) => setSrc((l) => {
+    const next = l.includes(s) ? l.filter((x) => x !== s) : [...l, s];
+    try { localStorage.setItem(CAL_SRC_KEY, JSON.stringify(next)); } catch {}
+    return next;
+  });
   const openE = (e: CalEntry) => { if (/^(tt|kitsu:|anilist:|tmdb:)/.test(e.id)) nav.open({ kind: 'title', type: e.type, id: e.id }); };
   const shift = (n: number) => setMonth(new Date(month.getFullYear(), month.getMonth() + n, 1));
   const list = day ? byDay.get(day) || [] : [];
@@ -75,7 +92,7 @@ export function Calendar() {
       {q.isFetching ? <div className="skel mt-6 h-24 rounded-xl" /> : null}
       {day && list.length ? (
         <section className="mt-8">
-          <h2 className="mb-4 text-xl font-semibold">{new Date(day + 'T12:00').toLocaleDateString(lang === 'ar' ? 'ar' : 'en', { weekday: 'long', day: 'numeric', month: 'long' })}</h2>
+          <h2 className="mb-4 text-xl font-semibold">{fmtLocaleDate(day + 'T12:00', lang, { weekday: 'long', day: 'numeric', month: 'long' })}</h2>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
             {list.map((e, i) => (
               <button key={i} onClick={() => openE(e)} className="flex items-center gap-3 rounded-xl bg-bg1 p-2.5 text-start ring-1 ring-line transition hover:bg-white/5">
@@ -86,7 +103,7 @@ export function Calendar() {
                     {e.season != null ? <span className="font-mono">S{e.season}E{e.episode} </span> : e.episode != null ? <span className="font-mono">{t('episode_n', { n: e.episode })} </span> : null}
                     <span dir="auto">{e.title}</span>
                   </span>
-                  <span className="mt-0.5 block text-[11px] text-fg3">{new Date(e.at).toLocaleTimeString(lang === 'ar' ? 'ar' : 'en', { hour: 'numeric', minute: '2-digit' })}</span>
+                  <span className="mt-0.5 block text-[11px] text-fg3">{fmtLocaleTime(e.at, lang, { hour: 'numeric', minute: '2-digit' })}</span>
                 </span>
               </button>
             ))}

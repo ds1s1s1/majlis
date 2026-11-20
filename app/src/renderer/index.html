@@ -2,12 +2,13 @@
 <html lang="ar" dir="rtl" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' blob:; worker-src 'self' blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: file: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' blob:; frame-src https://www.youtube-nocookie.com https://www.youtube.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Majlis</title>
+<link rel="modulepreload" href="media/cinema.js">
 <style>@layer properties, theme, base, app, cin, components, utilities; @import url("styles.css") layer(app);</style>
 <link rel="stylesheet" href="media/cinema.css">
 </head>
-<body>
+<body class="cin-on">
   <header class="titlebar">
     <div class="brand"><span class="brand-mark"></span><span class="brand-name" data-t="app"></span></div>
     <div class="tb-status" id="tbStatus"></div>
@@ -16,7 +17,7 @@
   <div class="shell">
     <nav class="rail" id="rail"></nav>
     <main class="view" id="view"></main>
-    <div class="cin-host" id="cinRoot" hidden></div>
+    <div class="cin-host" id="cinRoot"></div>
   </div>
 
   <section class="stage" id="stage" hidden>
@@ -26,6 +27,15 @@
       <div class="stage-wait" id="stageWait"></div>
     </div>
     <div class="hud" id="hud"></div>
+    <div class="micro-pill" id="microPill" hidden></div>
+    <div class="pad-hud" id="padHud" hidden></div>
+    <div class="privacy-curtain" id="privacyCurtain" hidden>
+      <div class="pc-card">
+        <strong id="pcTitle"></strong>
+        <span id="pcSub"></span>
+      </div>
+    </div>
+    <div class="spec-lounge" id="specLounge" hidden></div>
     <aside class="drawer" id="drawer"></aside>
   </section>
 

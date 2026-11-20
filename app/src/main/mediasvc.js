@@ -19,14 +19,19 @@ function exePath() {
 }
 
 class MediaService {
-  constructor() { this.ready = null; }
+  constructor({ getCacheDir = null } = {}) { this.ready = null; this.getCacheDir = getCacheDir; }
 
   _start() {
     if (this.ready) return this.ready;
     this.ready = new Promise((resolve, reject) => {
       const exe = exePath();
       if (!exe) return reject(new Error('majlis-media.exe not found'));
-      const p = spawn(exe, [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      const args = [];
+      try {
+        const dir = typeof this.getCacheDir === 'function' ? String(this.getCacheDir() || '').trim() : '';
+        if (dir) args.push('--cache-dir', dir);
+      } catch {}
+      const p = spawn(exe, args, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       this.p = p;
       let buf = '';
       const onData = (d) => {
@@ -43,6 +48,16 @@ class MediaService {
     return this.ready;
   }
 
+  async active() {
+    if (!this.p || !this.base || !this.key) return { dir: '', files: [] };
+    try {
+      const r = await fetch(`${this.base}/${this.key}/active`, { signal: AbortSignal.timeout(1500) });
+      if (!r.ok) return { dir: '', files: [] };
+      const j = await r.json();
+      return { dir: j.dir || '', files: Array.isArray(j.files) ? j.files : [] };
+    } catch { return { dir: '', files: [] }; }
+  }
+
   async call(route, body) {
     await this._start();
     const r = await fetch(`${this.base}/${this.key}/${route}`, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -54,7 +69,10 @@ class MediaService {
   // a stream path from /play as a URL mpv can open
   async url(p) { await this._start(); return this.base + p; }
 
-  stop() { try { this.p?.stdin.end(); } catch {} }
+  stop(immediate = false) {
+    try { this.p?.stdin.end(); } catch {}
+    if (immediate && this.p) { try { this.p.kill(); } catch {} this.p = null; this.ready = null; }
+  }
 }
 
 module.exports = { MediaService, DEFAULT_ADDONS, exePath };

@@ -83,7 +83,7 @@ function buildArgs(o) {
   const gop = String(o.fps);
   if (fam === 'nvenc') {
     // p1/ull is the fastest but softest; p4 with 'll' looks clearly better for ~1 ms more
-    const [pre, tune] = { speed: ['p1', 'ull'], balanced: ['p4', 'll'], quality: ['p6', 'll'] }[o.quality || 'balanced'];
+    const [pre, tune] = { speed: ['p1', 'ull'], balanced: ['p4', 'll'], quality: ['p6', 'll'] }[o.quality || 'balanced'] || ['p4', 'll'];
     a.push('-preset', pre, '-tune', tune, '-rc', 'cbr', '-b:v', `${kb}k`, '-maxrate', `${kb}k`, '-bufsize', `${buf}k`,
       '-zerolatency', '1', '-delay', '0', '-bf', '0', '-g', gop, '-intra-refresh', '1', '-no-scenecut', '1',
       // spatial AQ spends bits where the eye notices (text, faces) at no latency cost;

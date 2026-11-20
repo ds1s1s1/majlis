@@ -18,9 +18,12 @@ export default defineConfig({
     cssCodeSplit: false,
     sourcemap: false,
     rollupOptions: {
-      input: path.join(root, 'src/main.tsx'),
+      input: {
+        cinema: path.join(root, 'src/main.tsx'),
+        theater: path.join(root, 'src/theater.tsx'),
+      },
       preserveEntrySignatures: 'exports-only',
-      output: { format: 'es', entryFileNames: 'cinema.js', chunkFileNames: 'chunks/[name]-[hash].js', assetFileNames: 'cinema[extname]' },
+      output: { format: 'es', entryFileNames: '[name].js', chunkFileNames: 'chunks/[name]-[hash].js', assetFileNames: 'cinema[extname]' },
     },
   },
 });

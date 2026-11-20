@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useRows } from '../api';
-import { useT } from '../host';
+import { useHost, useT } from '../host';
+import { genreLabel } from '../config/genres';
 import { PosterGrid, Chips, useCatalogPages } from '../ui/Grid';
 import { useWatched } from '../ui/CatalogRow';
 
 // Stremio's Discover: pick a type, one of the addons' catalogs, a genre; scroll for more
 export function Catalogs() {
-  const t = useT();
+  const t = useT(), { lang } = useHost();
   const rows = useRows(), watched = useWatched();
   const all = rows.data || [];
   const types = [...new Set(all.map((r) => r.type))];
@@ -26,7 +27,7 @@ export function Catalogs() {
         <Chips value={ty} onChange={(v) => { setType(v); setCatKey(null); setGenre(null); }} options={types.map((x) => ({ id: x, label: typeName(x) }))} />
         <Chips value={cat ? `${cat.addon}|${cat.id}` : null} onChange={(v) => { setCatKey(v); setGenre(null); }}
           options={cats.map((r) => ({ id: `${r.addon}|${r.id}`, label: `${r.name} · ${r.addonName}` }))} />
-        {genres.length ? <Chips value={g} onChange={setGenre} options={[{ id: null, label: t('all') }, ...genres.map((x) => ({ id: x, label: x }))]} /> : null}
+        {genres.length ? <Chips value={g} onChange={setGenre} options={[{ id: null, label: t('all') }, ...genres.map((x) => ({ id: x, label: genreLabel(x, lang) }))]} /> : null}
       </div>
       <PosterGrid items={(pages.data?.pages || []).flat()} watched={watched} loading={pages.isFetching}
         onEnd={() => pages.hasNextPage && !pages.isFetching && pages.fetchNextPage()} />

@@ -1,12 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { cin, cinemetaRow, metahub, useCatalog, useCaps, useMarathons, useMeta, useTune, yearOf, type Preview, type Tune } from '../api';
+import { cin, cinemetaRow, metahub, useCatalog, useCaps, useDiscover, useMarathons, useMeta, useTune, yearOf, type Preview, type Tune } from '../api';
 import { useHost, useNav, useT } from '../host';
+import type { Key } from '../i18n';
+import { genreLabel } from '../config/genres';
 import { Img } from '../ui/Img';
 import { Icon } from '../ui/Icon';
 import { Row } from '../ui/Row';
 import { Poster, PosterSkeleton } from '../ui/Poster';
-import { useWatched } from '../ui/CatalogRow';
+import { isUnreleased, useWatched } from '../ui/CatalogRow';
+import { useSettingsStore } from '../settings/useSettingsStore';
 
 // genres the viewer leans to, strongest first (a 👍 adds, a 👎 takes away)
 function leanings(tune: Tune) {
@@ -15,12 +18,49 @@ function leanings(tune: Tune) {
   return [...w].filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([g]) => g);
 }
 
+const DISCOVER_GENRES = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Drama', 'Fantasy', 'Horror', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller'];
+const ERAS: { id: string; from?: number; to?: number; key?: Key }[] = [
+  { id: 'all', from: undefined, to: undefined },
+  { id: '2020s', from: 2020, to: 2026, key: 'era_2020s' },
+  { id: '2010s', from: 2010, to: 2019, key: 'era_2010s' },
+  { id: '2000s', from: 2000, to: 2009, key: 'era_2000s' },
+  { id: '1990s', from: 1990, to: 1999, key: 'era_1990s' },
+  { id: 'classic', from: 1950, to: 1989, key: 'era_classic' },
+];
+
 export function Discover() {
   const t = useT(), nav = useNav(), qc = useQueryClient(), { lang } = useHost();
   const tune = useTune().data || {};
   const caps = useCaps().data;
+  const watched = useWatched();
+  const hideWatched = useSettingsStore((s) => s.data.sources.hideWatchedCatalogs);
+  const hideUnreleased = useSettingsStore((s) => s.data.sources.hideUnreleasedCatalogs);
   const movies = useCatalog(cinemetaRow('movie'), []), shows = useCatalog(cinemetaRow('series'), []);
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
+
+  const [fType, setFType] = useState<'movie' | 'series'>('movie');
+  const [fGenre, setFGenre] = useState('');
+  const [fEra, setFEra] = useState('all');
+  const [fRating, setFRating] = useState(0);
+  const [fSort, setFSort] = useState<'popular' | 'rating' | 'newest'>('popular');
+  const [fPage, setFPage] = useState(1);
+  const [accItems, setAccItems] = useState<Preview[]>([]);
+
+  useEffect(() => { setFPage(1); setAccItems([]); }, [fType, fGenre, fEra, fRating, fSort]);
+
+  const eraObj = ERAS.find((e) => e.id === fEra) || ERAS[0];
+  const sortParam = fSort === 'rating' ? 'vote_average.desc' : fSort === 'newest' ? (fType === 'series' ? 'first_air_date.desc' : 'primary_release_date.desc') : 'popularity.desc';
+  const filtered = useDiscover({ type: fType, genre: fGenre || undefined, yearFrom: eraObj.from, yearTo: eraObj.to, minRating: fRating || undefined, sort: sortParam, page: fPage });
+
+  useEffect(() => {
+    if (!filtered.data) return;
+    if (fPage === 1) setAccItems(filtered.data);
+    else setAccItems((prev) => {
+      const seen = new Set(prev.map((x) => x.id));
+      return [...prev, ...filtered.data.filter((x) => !seen.has(x.id))];
+    });
+  }, [filtered.data, fPage]);
+
   // titles to rate: popular films and shows, in turn, that haven't been rated or skipped
   const pool = useMemo(() => {
     const a = movies.data || [], b = shows.data || [], out: Preview[] = [];
@@ -58,7 +98,7 @@ export function Discover() {
             <div className="mb-8">
               <div className="mb-1 text-xs uppercase tracking-wider text-fg3">{t('tune_q')}</div>
               <button onClick={() => nav.open({ kind: 'title', type: cur.type, id: cur.id })} className="mb-1 text-start text-2xl font-semibold hover:text-acc">{cur.name}</button>
-              <div className="mb-3 text-sm text-fg3">{[yearOf(cur), ...(m?.genres || cur.genres || []).slice(0, 3)].filter(Boolean).join(' · ')}</div>
+              <div className="mb-3 text-sm text-fg3">{[yearOf(cur), ...(m?.genres || cur.genres || []).slice(0, 3).map((g) => genreLabel(g, lang))].filter(Boolean).join(' · ')}</div>
               {desc ? <p dir="auto" className="clamp-3 mb-5 max-w-md text-sm leading-relaxed text-fg2">{desc}</p> : null}
               <div className="flex gap-3">
                 <TuneBtn icon="thumbup" label={t('like')} onClick={() => rate(1)} />
@@ -72,18 +112,69 @@ export function Discover() {
             <Icon n="dice" s={20} />{t('surprise')}
           </button>
         </div>
-        <div className="grid min-h-[460px] grid-cols-2 grid-rows-[1.4fr_1fr] gap-3">
-          {/* one big still, two more under it when TMDB has them */}
-          {cur ? (stills.length >= 3 ? [0, 1, 2] : [0]).map((i) => (
-            <div key={`${cur.id}${i}`} className={`relative overflow-hidden rounded-2xl bg-bg2 ring-1 ring-line fade-in ${i === 0 ? (stills.length >= 3 ? 'col-span-2' : 'col-span-2 row-span-2') : ''}`}>
-              <Img srcs={[stills[i] || stills[0], cur.poster]} className="absolute inset-0 h-full w-full object-cover" />
-              {i === 0 ? <>
-                <div className="shade-b absolute inset-0" />
-                <Img srcs={[m?.logo, metahub('logo', cur.id)]} className="absolute bottom-4 start-5 max-h-16 max-w-[50%] object-contain drop-shadow-[0_2px_10px_rgba(0,0,0,.7)]" />
-              </> : null}
-            </div>
-          )) : <div className="skel col-span-2 row-span-2 rounded-2xl" />}
+        <div className="grid min-h-[460px] grid-cols-3 grid-rows-[1.4fr_1fr] gap-3">
+          {/* 4-still masonry layout: one large still on top + 3 secondary stills underneath */}
+          {cur ? (stills.length >= 4 ? [0, 1, 2, 3] : stills.length >= 3 ? [0, 1, 2] : [0]).map((i) => {
+            const span = i === 0
+              ? (stills.length >= 4 ? 'col-span-3' : stills.length >= 3 ? 'col-span-3' : 'col-span-3 row-span-2')
+              : (stills.length === 3 && i === 1 ? 'col-span-2' : '');
+            return (
+              <div key={`${cur.id}${i}`} className={`relative overflow-hidden rounded-2xl bg-bg2 ring-1 ring-line fade-in ${span}`}>
+                <Img srcs={[stills[i] || stills[0], cur.poster]} className="absolute inset-0 h-full w-full object-cover" />
+                {i === 0 ? <>
+                  <div className="shade-b absolute inset-0" />
+                  <Img srcs={[m?.logo, metahub('logo', cur.id)]} className="absolute bottom-4 start-5 max-h-16 max-w-[50%] object-contain drop-shadow-[0_2px_10px_rgba(0,0,0,.7)]" />
+                </> : null}
+              </div>
+            );
+          }) : <div className="skel col-span-3 row-span-2 rounded-2xl" />}
         </div>
+      </section>
+
+      {/* Interactive Explore Filters Bar */}
+      <section className="mt-12 px-12">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <h2 className="text-xl font-bold">{t('discover_filters')}</h2>
+          <div className="flex rounded-full bg-white/8 p-0.5 text-xs">
+            {([['movie', t('type_movie')], ['series', t('type_series')]] as const).map(([id, label]) => (
+              <button key={id} onClick={() => setFType(id)} className={`rounded-full px-3.5 py-1 font-semibold transition ${fType === id ? 'bg-acc text-acc-ink' : 'text-fg2 hover:text-fg'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <select value={fGenre} onChange={(e) => setFGenre(e.target.value)} className="rounded-full bg-bg1 px-3.5 py-1.5 text-xs text-fg ring-1 ring-line">
+            <option value="">{t('all')}</option>
+            {DISCOVER_GENRES.map((g) => <option key={g} value={g}>{genreLabel(g, lang)}</option>)}
+          </select>
+          <select value={fEra} onChange={(e) => setFEra(e.target.value)} className="rounded-full bg-bg1 px-3.5 py-1.5 text-xs text-fg ring-1 ring-line">
+            {ERAS.map((e) => <option key={e.id} value={e.id}>{e.key ? t(e.key) : `${t('era')}: ${t('all')}`}</option>)}
+          </select>
+          <select value={fRating} onChange={(e) => setFRating(+e.target.value)} className="rounded-full bg-bg1 px-3.5 py-1.5 text-xs text-fg ring-1 ring-line">
+            <option value={0}>{t('min_rating')}: {t('all')}</option>
+            <option value={6}>★ 6+</option>
+            <option value={7}>★ 7+</option>
+            <option value={8}>★ 8+</option>
+          </select>
+          <select value={fSort} onChange={(e) => setFSort(e.target.value as 'popular' | 'rating' | 'newest')} className="rounded-full bg-bg1 px-3.5 py-1.5 text-xs text-fg ring-1 ring-line">
+            <option value="popular">{t('sort_popular')}</option>
+            <option value="rating">{t('sort_rating')}</option>
+            <option value="newest">{t('sort_newest')}</option>
+          </select>
+        </div>
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-x-4 gap-y-6">
+          {filtered.isLoading && fPage === 1 ? Array.from({ length: 12 }, (_, i) => <PosterSkeleton key={i} w={160} />)
+            : accItems
+                .filter((it) => (!hideWatched || !watched.has(it.id)) && (!hideUnreleased || !isUnreleased(it)))
+                .map((it) => <Poster key={it.id} item={it} w={160} watched={watched.has(it.id)} />)}
+        </div>
+        {(filtered.data?.length || 0) >= 12 ? (
+          <div className="mt-6 flex justify-center">
+            <button onClick={() => setFPage((p) => p + 1)} disabled={filtered.isFetching}
+              className="rounded-full bg-white/10 px-6 py-2 text-xs font-semibold text-fg hover:bg-acc hover:text-acc-ink disabled:opacity-50">
+              {filtered.isFetching ? '...' : t('see_all')}
+            </button>
+          </div>
+        ) : null}
       </section>
 
       {genres.map((g) => <GenreRow key={g} genre={g} />)}
@@ -116,13 +207,13 @@ function TuneBtn({ icon, label, onClick }: { icon: string; label: string; onClic
 
 // films and shows of a genre the viewer likes
 function GenreRow({ genre }: { genre: string }) {
-  const t = useT(), watched = useWatched();
+  const t = useT(), { lang } = useHost(), watched = useWatched();
   const a = useCatalog(cinemetaRow('movie'), [['genre', genre]]), b = useCatalog(cinemetaRow('series'), [['genre', genre]]);
   const list = useMemo(() => {
     const x = a.data || [], y = b.data || [], out: Preview[] = [];
     for (let i = 0; i < Math.max(x.length, y.length); i++) { if (x[i]) out.push(x[i]); if (y[i]) out.push(y[i]); }
     return out;
   }, [a.data, b.data]);
-  return <Row title={t('for_you', { g: genre })} items={list} width={168} height={262} loading={a.isLoading && b.isLoading} skeleton={<PosterSkeleton />}
+  return <Row title={t('for_you', { g: genreLabel(genre, lang) })} items={list} width={168} height={262} loading={a.isLoading && b.isLoading} skeleton={<PosterSkeleton />}
     render={(it) => <Poster item={it} watched={watched.has(it.id)} />} />;
 }

@@ -247,6 +247,7 @@ class RateControl {
     this.lastDrop = 0; this.lastUp = now(); this.lossEw = 0; this.jitEw = 0; this.congestions = 0; this.bad = 0;
   }
   setStability(on) { this.stability = on; }
+  setMin(k) { this.min = k; this.target = Math.max(this.target, k); }
   setMax(k) { this.max = k; this.target = Math.min(this.target, k); }
   get fecRatio() { return Math.min(0.5, Math.max(this.stability ? 0.1 : 0.05, this.lossEw * 2.5 + (this.stability ? 0.06 : 0.03))); }
 
@@ -338,6 +339,7 @@ class CoreRate {
   get target() { return this._r[0]; }
   set target(v) { this.c.rateSet(v, -1, -1, -1); this._sync(); }
   get max() { return this._max; }
+  setMin(k) { this.c.rateSet(-1, k, -1, -1); this._sync(); }
   setMax(k) { this._max = k; this.c.rateSet(-1, -1, k, -1); this._sync(); }
   get stability() { return this._stab; }
   setStability(on) { this._stab = !!on; this.c.rateSet(-1, -1, -1, on ? 1 : 0); }

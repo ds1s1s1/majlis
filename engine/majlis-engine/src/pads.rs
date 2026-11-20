@@ -135,6 +135,20 @@ impl Pads {
 
     pub fn remove_all(&mut self) { for s in self.pads.keys().copied().collect::<Vec<_>>() { self.remove(s); } }
 
+    pub fn reset(&mut self) -> Result<(), String> {
+        self.remove_all();
+        if let Some(b) = self.bus.take() {
+            unsafe { let _ = CloseHandle(b.0); }
+        }
+        self.next_serial = 1;
+        self.alive.lock().unwrap().clear();
+        if self.available() {
+            Ok(())
+        } else {
+            Err(self.error.clone().unwrap_or_else(|| "ViGEmBus unavailable".to_string()))
+        }
+    }
+
     // W3C "standard" gamepad button bits -> XUSB buttons
     pub fn state(&mut self, slot: i64, c: &Value) {
         let Some(bus) = self.bus else { return };

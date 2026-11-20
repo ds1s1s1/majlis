@@ -1,0 +1,65 @@
+@import "tailwindcss";
+@import "@fontsource/ibm-plex-sans-arabic/400.css";
+@import "@fontsource/ibm-plex-sans-arabic/500.css";
+@import "@fontsource/ibm-plex-sans-arabic/600.css";
+@import "@fontsource/ibm-plex-sans-arabic/700.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+:root {
+  --bg-canvas: #12100e;
+  --bg-icon-tile: #13110e;
+  --bg-surface: #181613;
+  --bg-surface-hover: #1f1c18;
+  --bg-surface-selected: #241d11;
+  --border-subtle: #26231f;
+  --border-card-hover: #38322a;
+  --border-selected: #695023;
+  --gold-primary: #e5a93c;
+  --gold-hover: #f0b952;
+  --gold-brass: #bd8b33;
+  --gold-bronze: #89662b;
+  --status-green: #6ba876;
+  --text-primary: #f2efe9;
+  --text-secondary: #c4beb4;
+  --text-muted: #7d776d;
+  --text-dim: #544f47;
+  --btn-primary-bg: #e5a93c;
+  --btn-primary-text: #12100e;
+  --btn-disabled-bg: #24211d;
+  --btn-disabled-text: #5e5850;
+}
+
+html,
+body,
+#root {
+  width: 940px;
+  height: 640px;
+  margin: 0;
+  padding: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono-tech {
+  font-family: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom warm scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2d2822;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #473e33;
+}

@@ -114,7 +114,7 @@ class Movie extends EventEmitter {
     this.clock = { pos: 0, at: 0, playing: false, run: 0 };
     this.hist = { high: [], low: [] }; this.ahist = [];
     this.configs = new Map();
-    this.gateTimer = setInterval(() => this._gateTick(), 100);
+    this.gateTimer = setInterval(() => this._gateTick(), 50);
   }
 
   async open(file, { pos = 0, enc, kbps = 12000, maxW = 1920, night = false } = {}) {
@@ -205,14 +205,11 @@ class Movie extends EventEmitter {
     vf.push('format=nv12');
     const kb = Math.round(kbps), fps = Math.round(i.video.fps) || 24;
     a.push('-map', '0:v:0', '-vf', vf.join(','), '-c:v', this.enc.name);
-    // keyframes every 3 s and a 1 s VBV: smaller, rarer spikes that don't look like congestion
-    // The full film aims at a quality and may peak; the light one rides weak lines, so it keeps
-    // to its bitrate (its real rate is what the line has to carry).
-    // (and a keyframe every 2 s, so a frame lost on a weak line costs less)
-    if (this.enc.fam === 'nvenc' && ov.low) a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.15)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2), '-forced-idr', '1', '-spatial-aq', '1');
-    else if (this.enc.fam === 'nvenc') a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '22', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.3)}k`, '-bufsize', `${kb}k`, '-bf', '0', '-g', String(fps * 3), '-forced-idr', '1', '-spatial-aq', '1');
-    else if (this.enc.fam === 'sw') a.push('-preset', 'veryfast', '-tune', 'film', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2));
-    else a.push('-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb * 2}k`, '-bf', '0', '-g', String(fps * 2));
+    // keyframes every 2 s and a 0.75 s VBV: smaller, smoother GOP cadence without periodic 3-4 s pacer spikes
+    if (this.enc.fam === 'nvenc' && ov.low) a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.15)}k`, '-bufsize', `${Math.round(kb * 0.75)}k`, '-bf', '0', '-g', String(fps * 2), '-forced-idr', '1', '-spatial-aq', '1');
+    else if (this.enc.fam === 'nvenc') a.push('-preset', 'p5', '-tune', 'hq', '-rc', 'vbr', '-cq', '22', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.3)}k`, '-bufsize', `${Math.round(kb * 0.75)}k`, '-bf', '0', '-g', String(fps * 2), '-forced-idr', '1', '-spatial-aq', '1');
+    else if (this.enc.fam === 'sw') a.push('-preset', 'veryfast', '-tune', 'film', '-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb}k`, '-bf', '0', '-g', String(fps * 2));
+    else a.push('-b:v', `${kb}k`, '-maxrate', `${Math.round(kb * 1.4)}k`, '-bufsize', `${kb}k`, '-bf', '0', '-g', String(fps * 2));
     // a replacement light film lines up a keyframe exactly where the one it replaces stopped
     if (ov.keyAt > 0.05) a.push('-force_key_frames', ov.keyAt.toFixed(3));
     a.push('-an', '-flush_packets', '1', '-f', 'flv', 'pipe:1');
@@ -305,12 +302,12 @@ class Movie extends EventEmitter {
   _gateTick() {
     if (!this.info) return;
     const cur = this.curMs();
-    if (this.proc?.held && this.hiLast - cur < LEAD.high - 1000) this.proc.hold(false);
+    if (this.proc?.held && this.hiLast - cur < LEAD.high - 250) this.proc.hold(false);
     const lo = this.low;
-    if (lo?.proc?.held && lo.last - cur < LEAD.low - 1000) lo.proc.hold(false);
+    if (lo?.proc?.held && lo.last - cur < LEAD.low - 250) lo.proc.hold(false);
     // a replacement light film waiting to take over only needs to stay a little ahead
     const nx = this.lowNext;
-    if (nx?.proc?.held && nx.pending?.length && nx.pending[nx.pending.length - 1].pts - cur < LEAD.low - 1000) nx.proc.hold(false);
+    if (nx?.proc?.held && nx.pending?.length && nx.pending[nx.pending.length - 1].pts - cur < LEAD.low - 250) nx.proc.hold(false);
     this._audioOut();
     // keep what a late joiner needs: from the last keyframe before the picture onward
     for (const r of ['high', 'low']) {

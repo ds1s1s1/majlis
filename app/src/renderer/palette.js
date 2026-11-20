@@ -44,7 +44,14 @@ export function initPalette({ t, icon, esc, commands }) {
   }
 
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.shiftKey && !e.altKey) { e.preventDefault(); open(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.shiftKey && !e.altKey) {
+      if (document.body.classList.contains('cin-on')) {
+        close();
+        return;
+      }
+      e.preventDefault();
+      open();
+    }
   });
   return { open, close };
 }

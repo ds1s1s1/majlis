@@ -2,3 +2,12 @@
 # libopus (audiopus_sys) is built with CMake; its CMakeLists predates CMake 4
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 CMAKE = "C:/Program Files/CMake/bin/cmake.exe"
+
+[build]
+rustflags = [
+  "--remap-path-prefix", "A:\\ss\\majlis=/majlis",
+  "--remap-path-prefix", "C:\\Users\\gaawo=/u",
+  "--remap-path-prefix", "C:\\Users\\gaawo\\.cargo=/cargo",
+  "--remap-path-prefix", "C:\\Users\\gaawo\\.rustup=/rustup",
+  "-C", "link-arg=/DEBUG:NONE",
+]

@@ -25,12 +25,19 @@ export function PosterGrid({ items, watched, onEnd, loading, w = 160 }: { items:
     io.observe(end.current);
     return () => io.disconnect();
   }, [onEnd, items.length]);
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
+  const DUPLICATE_LIMIT = 3;
+  const deduped = items.filter((m) => {
+    const c = seen.get(m.id) || 0;
+    if (c >= DUPLICATE_LIMIT) return false;
+    seen.set(m.id, c + 1);
+    return true;
+  });
   return (
     <>
       <div className="grid gap-x-4 gap-y-6" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${w}px, 1fr))` }}>
-        {items.filter((m) => !seen.has(m.id) && seen.add(m.id)).map((m) => (
-          <div key={m.id} className="[content-visibility:auto] [contain-intrinsic-size:auto_260px]"><Poster item={m} w={w} watched={watched?.has(m.id)} /></div>
+        {deduped.map((m, idx) => (
+          <div key={`${m.id}-${idx}`} className="[content-visibility:auto] [contain-intrinsic-size:auto_260px]"><Poster item={m} w={w} watched={watched?.has(m.id)} /></div>
         ))}
         {loading ? Array.from({ length: 12 }, (_, i) => <PosterSkeleton key={`s${i}`} w={w} />) : null}
       </div>
