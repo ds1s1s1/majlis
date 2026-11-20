@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="96" height="96" role="img" aria-label="Majlis">
+  <defs>
+    <linearGradient id="mTop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F2BF5E" />
+      <stop offset="100%" stop-color="#D9A441" />
+    </linearGradient>
+    <linearGradient id="mSide" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D9A441" />
+      <stop offset="100%" stop-color="#B6842D" />
+    </linearGradient>
+    <linearGradient id="mBase" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A87826" />
+      <stop offset="100%" stop-color="#7B561B" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="92" height="92" rx="22" fill="#13110E" stroke="#2D261E" stroke-width="2" />
+  <polygon points="50,14 68,32 50,50 32,32" fill="url(#mTop)" />
+  <polygon points="50,50 68,68 50,86 32,68" fill="url(#mBase)" />
+  <polygon points="27,39 38,50 27,61 16,50" fill="url(#mSide)" />
+  <polygon points="73,39 84,50 73,61 62,50" fill="url(#mSide)" />
+  <polygon points="50,46 54,50 50,54 46,50" fill="#FFF7E6" fill-opacity="0.55" />
+</svg>

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1360 320" width="1360" height="320" role="img" aria-label="Majlis · مجلس">
+  <defs>
+    <linearGradient id="goldTopL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E5A93C" />
+      <stop offset="100%" stop-color="#C8922E" />
+    </linearGradient>
+    <linearGradient id="goldSideL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C8922E" />
+      <stop offset="100%" stop-color="#A47420" />
+    </linearGradient>
+    <linearGradient id="goldBaseL" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8F631A" />
+      <stop offset="100%" stop-color="#6B4912" />
+    </linearGradient>
+    <linearGradient id="saduLineL" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#C8922E" stop-opacity="0.9" />
+      <stop offset="70%" stop-color="#C8922E" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#C8922E" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Majlis 4-Diamond Sadu Emblem inside Rounded Obsidian Frame -->
+  <g transform="translate(24, 32)">
+    <rect x="0" y="0" width="256" height="256" rx="56" fill="#12100E" stroke="#C8922E" stroke-width="3.5" />
+    <rect x="10" y="10" width="236" height="236" rx="48" fill="none" stroke="#E5A93C" stroke-opacity="0.22" stroke-width="1.5" />
+    <g transform="translate(8, 8) scale(2.4)">
+      <!-- Top Large Diamond -->
+      <polygon points="50,14 68,32 50,50 32,32" fill="url(#goldTopL)" />
+      <!-- Bottom Large Diamond -->
+      <polygon points="50,50 68,68 50,86 32,68" fill="url(#goldBaseL)" />
+      <!-- Left Small Diamond -->
+      <polygon points="27,39 38,50 27,61 16,50" fill="url(#goldSideL)" />
+      <!-- Right Small Diamond -->
+      <polygon points="73,39 84,50 73,61 62,50" fill="url(#goldSideL)" />
+      <!-- Subtle center spark -->
+      <polygon points="50,45 55,50 50,55 45,50" fill="#FFF7E6" fill-opacity="0.6" />
+    </g>
+  </g>
+
+  <!-- Wordmark: MAJLIS · مجلس -->
+  <text x="322" y="182" font-family="'IBM Plex Sans', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif" font-size="136" font-weight="800" letter-spacing="4" fill="#12100E">MAJLIS</text>
+  <polygon points="884,136 900,120 916,136 900,152" fill="#C8922E" />
+  <text x="948" y="182" font-family="'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, sans-serif" font-size="132" font-weight="700" fill="#B58021">مجلس</text>
+
+  <!-- Sadu Geometric Accent & Subtitle Bar -->
+  <rect x="326" y="218" width="960" height="2.5" fill="url(#saduLineL)" />
+  <g fill="#C8922E" fill-opacity="0.85">
+    <polygon points="334,219 341,212 348,219 341,226" />
+    <polygon points="356,219 361,214 366,219 361,224" fill-opacity="0.55" />
+    <polygon points="374,219 379,214 384,219 379,224" fill-opacity="0.35" />
+  </g>
+  <text x="326" y="256" font-family="'IBM Plex Mono', 'Cascadia Mono', Consolas, monospace" font-size="22" font-weight="600" letter-spacing="5" fill="#595044">CINEMA &middot; WATCH PARTY &middot; CO-OP PLAY</text>
+</svg>
