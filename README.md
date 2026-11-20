@@ -5,6 +5,10 @@
 
 <br/>
 
+<img src="/docs/media/icon.png" width="108" height="108" alt="Majlis App Icon">
+
+<br/>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="/docs/media/majlis-wordmark-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="/docs/media/majlis-wordmark-light.svg">
