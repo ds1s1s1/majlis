@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.1.0-beta",
+  "version": "0.1.1-beta",
   "description": "Cinema-first media center with embedded libmpv, Stremio addons, Watch Party, and ultra-low-latency Co-op gaming.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",
@@ -9,7 +9,7 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-timeout=20000 test/*.test.js",
     "fonts": "node scripts/copy-fonts.js",
     "dist": "npm run media && npm run core && npm run mpv && npm run ytdlp && electron-builder --win dir",
     "core": "node -e \"require('fs').mkdirSync('native',{recursive:true});require('fs').copyFileSync('../engine/target/release/majlis_core.dll','native/majlis-core.node')\"",

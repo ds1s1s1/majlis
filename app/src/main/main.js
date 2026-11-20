@@ -240,7 +240,7 @@ function createTray() {
         { label: ar ? 'اللعب الجماعي' : 'Co-op Room', click: () => showWin('home') },
         { label: ar ? 'الإعدادات' : 'Settings', click: () => showWin('settings') },
         { type: 'separator' },
-        { label: ar ? 'إيقاف / تشغيل المشغل' : 'Play / Pause', click: () => { try { theater?.pauseIfPlaying?.(); } catch {} } },
+        { label: ar ? 'إيقاف / تشغيل المشغل' : 'Play / Pause', click: () => { try { theater?.togglePause?.(); } catch {} } },
         { type: 'separator' },
         { label: ar ? 'إغلاق نهائي' : 'Quit Majlis', click: () => { quitting = true; shutdown(); app.quit(); } },
       ]);
@@ -428,6 +428,59 @@ function registerShortcuts() {
   tryReg(store.get('replayKey'), async () => { const r = await replay.save(); emit('replay', r); });
 }
 
+// mini player / PiP: small, always on top, aspect-matched to active video
+let normalState = null;
+let pipSettleTimer = null;
+function setMiniMode(want) {
+  if (!win || win.isDestroyed()) return false;
+  const next = !!want;
+  if (pipSettleTimer) { clearTimeout(pipSettleTimer); pipSettleTimer = null; }
+  if (!next) {
+    if (!normalState) return false;
+    const prev = normalState;
+    normalState = null;
+    win.setIgnoreMouseEvents(false);
+    win.setAspectRatio(0);
+    win.setResizable(true);
+    win.setAlwaysOnTop(!!store.get('alwaysOnTop'), 'floating');
+    win.setMinimumSize(980, 640);
+    win.setBounds(prev.bounds);
+    if (prev.wasFullscreen) win.setFullScreen(true);
+    else if (prev.wasMaximized) win.maximize();
+    theater?.setPipMode?.(false);
+    emit('mini', { on: false, isFullscreen: !!prev.wasFullscreen });
+    win.show();
+    win.focus();
+    win.webContents.focus();
+    pipSettleTimer = setTimeout(() => {
+      pipSettleTimer = null;
+      if (!win || win.isDestroyed()) return;
+      win.setIgnoreMouseEvents(false);
+      win.focus();
+      win.webContents.focus();
+      theater?.setPipMode?.(false);
+    }, 80);
+    return false;
+  }
+  if (normalState) return true;
+  const wasFullscreen = win.isFullScreen();
+  const wasMaximized = win.isMaximized();
+  if (wasFullscreen) win.setFullScreen(false);
+  if (wasMaximized) win.unmaximize();
+  normalState = { bounds: win.getBounds(), wasMaximized, wasFullscreen };
+  const aspect = theater?.videoAspect?.() || (16 / 9);
+  const w = 460;
+  const h = Math.max(200, Math.min(360, Math.round(w / aspect)));
+  const wa = screen.getDisplayMatching(normalState.bounds).workArea;
+  win.setMinimumSize(320, 180);
+  win.setAspectRatio(aspect);
+  win.setBounds({ width: w, height: h, x: wa.x + wa.width - w - 20, y: wa.y + wa.height - h - 20 });
+  win.setAlwaysOnTop(true, 'floating');
+  theater?.setPipMode?.(true);
+  emit('mini', { on: true, isFullscreen: false });
+  return true;
+}
+
 // ------------------------------------------------------------------------------- IPC
 function handlers() {
   ipcMain.handle('state', () => snapshot());
@@ -477,42 +530,6 @@ function handlers() {
   ipcMain.handle('datasaver', (e, on) => guest.setDataSaver(on));
   ipcMain.handle('clip:send-host', () => guest.ctrl({ t: 'clip', text: clipboard.readText().slice(0, 10000) }));
   ipcMain.handle('clip:send-guest', (e, sid) => host.sendClip(sid, clipboard.readText()));
-  // mini player / PiP: small, always on top, aspect-matched to active video
-  let normalState = null;
-  function setMiniMode(want) {
-    if (!win || win.isDestroyed()) return false;
-    const next = !!want;
-    if (!next) {
-      if (!normalState) return false;
-      win.setAspectRatio(0);
-      win.setResizable(true);
-      win.setAlwaysOnTop(!!store.get('alwaysOnTop'), 'floating');
-      win.setMinimumSize(980, 640);
-      win.setBounds(normalState.bounds);
-      if (normalState.wasMaximized) win.maximize();
-      normalState = null;
-      theater?.setPipMode?.(false);
-      emit('mini', { on: false });
-      return false;
-    }
-    if (normalState) return true;
-    const wasFullscreen = win.isFullScreen();
-    const wasMaximized = win.isMaximized();
-    if (wasFullscreen) win.setFullScreen(false);
-    if (wasMaximized) win.unmaximize();
-    normalState = { bounds: win.getBounds(), wasMaximized, wasFullscreen };
-    const aspect = theater?.videoAspect?.() || (16 / 9);
-    const w = 460;
-    const h = Math.max(200, Math.min(360, Math.round(w / aspect)));
-    const wa = screen.getDisplayMatching(normalState.bounds).workArea;
-    win.setMinimumSize(320, 180);
-    win.setAspectRatio(aspect);
-    win.setBounds({ width: w, height: h, x: wa.x + wa.width - w - 20, y: wa.y + wa.height - h - 20 });
-    win.setAlwaysOnTop(true, 'floating');
-    theater?.setPipMode?.(true);
-    emit('mini', { on: true });
-    return true;
-  }
   ipcMain.handle('mini', (e, force) => setMiniMode(typeof force === 'boolean' ? force : !normalState));
   ipcMain.handle('cancel', () => guest.cancel());
   ipcMain.handle('leave', () => guest.leave());
@@ -525,9 +542,45 @@ function handlers() {
     return host.stats();
   });
   ipcMain.handle('ffmpeg:get', () => ensureFfmpeg());
-  ipcMain.handle('host:code', (e, revoke) => {
-    if (!revoke && !requireServerForSession()) return null;
-    return host.newCode(revoke);
+  ipcMain.handle('host:code', async (e, revoke) => {
+    const myId = store.identity().id;
+    const hasServer = !!(store.hasServer?.() && !net?.noServer && !net?.authFailed);
+    if (revoke) {
+      if (hasServer) host.newCode(true);
+      host.code = null;
+      emit('party-updated', { kind: 'code' });
+      return { ok: true, code: null, exp: null, inviteUrl: inviteLink(myId), myId, fallback: 'id', hasServer };
+    }
+    if (!hasServer) {
+      return { ok: true, code: null, exp: null, inviteUrl: inviteLink(myId), myId, fallback: 'id', hasServer: false };
+    }
+    if (!host.enabled) {
+      host.setEnabled(true);
+      if (!helper.p) helper.start();
+      ensureFfmpeg();
+    }
+    if (host.code?.code && host.code.exp > Date.now() + 15000) {
+      return { ok: true, code: host.code.code, exp: host.code.exp, inviteUrl: inviteLink(host.code.code), myId, fallback: null, hasServer: true };
+    }
+    const c = await new Promise((resolve) => {
+      let done = false;
+      const finish = (val) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        net.off('code', onCode);
+        resolve(val);
+      };
+      const onCode = (msg) => finish(msg?.code ? msg : null);
+      const timer = setTimeout(() => finish(null), 2500);
+      net.on('code', onCode);
+      host.newCode(false);
+    });
+    if (c?.code) {
+      emit('party-updated', { kind: 'code' });
+      return { ok: true, code: c.code, exp: c.exp || null, inviteUrl: inviteLink(c.code), myId, fallback: null, hasServer: true };
+    }
+    return { ok: true, code: null, exp: null, inviteUrl: inviteLink(myId), myId, fallback: 'id', hasServer: true };
   });
   ipcMain.handle('host:decide', (e, d) => host.decide(d.sid, d));
   ipcMain.handle('host:role', (e, { sid, role }) => host.setRole(sid, role));
@@ -636,6 +689,11 @@ function handlers() {
   ipcMain.handle('react', (e, r) => host.react({ r: String(r).slice(0, 8), idx: 0, from: store.get('nick') || '' }));
   ipcMain.handle('ready:check', () => host.readyCheck());
   ipcMain.handle('ready:go', () => host.countdown());
+  ipcMain.handle('ready:ack', (_e, on = true) => {
+    if (host.enabled || host.guests.size) return host.setHostReady(on !== false);
+    if (guest.link) { guest.ctrl({ t: 'ready', on: on !== false }); return true; }
+    return false;
+  });
   ipcMain.handle('host:watch-control', (_e, { mode, holderId } = {}) => host.setWatchControl(mode, holderId || null));
   ipcMain.handle('host:privacy', (_e, { on } = {}) => host.setPrivacy(on, true));
   ipcMain.handle('host:pads-reset', () => host.resetPads());
@@ -996,6 +1054,7 @@ app.whenReady().then(async () => {
   guest.on('vote', (items) => { emit('vote', { items, host: false }); theater?.onPartyEvent?.('vote', items); });
   guest.on('activity', (a) => theater.saveFriend(a));
   guest.on('sync', (st) => theater.onSync('guest', st));
+  guest.on('sync-peers', (st) => theater.onSyncPeers?.(st));
   registerShortcuts();
 
   let firstReg = true;
@@ -1024,8 +1083,8 @@ app.whenReady().then(async () => {
     }
   });
   host.on('knock-gone', (k) => emit('knock-gone', k));
-  host.on('joined', (g) => { emit('joined', g); if (store.get('replay')) replay.start(store.get('display')); });
-  host.on('left', (g) => { emit('left', g); if (!host.guests.size) replay.stop(); });
+  host.on('joined', (g) => { emit('joined', g); emit('party-updated', { kind: 'roster' }); if (store.get('replay')) replay.start(store.get('display')); });
+  host.on('left', (g) => { emit('left', g); emit('party-updated', { kind: 'roster' }); if (!host.guests.size) replay.stop(); });
   host.on('update', () => { emit('host', host.stats()); boost(host.guests.size > 0 || !!guest.link); });
   host.on('stats', (s) => { emit('host', s); if (s.guests.length) logStats('host', { tiers: s.tiers, guests: s.guests.map((g) => ({ rtt: g.rtt, kbps: g.kbps, target: g.target, loss: g.loss, qd: g.qd, jitter: g.jitter, fps: g.fps, path: g.path?.kind, label: g.path?.label, fec: g.fec, stab: g.stability, r: g.rendition, role: g.role })), movie: s.movie ? { playing: s.movie.playing, pos: Math.round(s.movie.pos) } : null }); });
   host.on('hand', (h) => emit('hand', h));
@@ -1037,28 +1096,39 @@ app.whenReady().then(async () => {
   host.on('movie', (v) => emit('movie', v));
   host.on('chat', (c) => { emit('chat', c); theater?.onPartyEvent?.('chat', c); });
   host.on('react', (r) => { emit('react', r); theater?.onPartyEvent?.('react', r); });
-  host.on('countdown', (c) => { emit('countdown', c); theater?.onPartyEvent?.('countdown', c); });
-  host.on('ready-state', (s) => { emit('ready-state', s); theater?.onPartyEvent?.('ready', s); });
+  host.on('countdown', (c) => { emit('countdown', c); theater?.onPartyEvent?.('countdown', c); emit('party-updated', { kind: 'countdown' }); });
+  host.on('ready-state', (s) => { emit('ready-state', s); theater?.onPartyEvent?.('ready', s); emit('party-updated', { kind: 'ready' }); });
   host.on('watch-control', (w) => { emit('watch-control', w); theater?.onPartyEvent?.('control', w); emit('party-updated', { kind: 'control' }); });
   host.on('askpause', (a) => emit('askpause', a));
   host.on('movie-by', (a) => emit('movie-by', a));
   host.on('launch', ({ by, id }) => launchGame(id, by));
 
-  guest.on('state', (s) => { emit('guest', s); boost(s.state === 'linked' || host.guests.size > 0); });
+  guest.on('state', (s) => { emit('guest', s); emit('party-updated', { kind: 'guest-state' }); boost(s.state === 'linked' || host.guests.size > 0); });
   guest.on('ctrl', (m) => {
     emit('guest-ctrl', m);
     if (m?.t === 'chat') theater?.onPartyEvent?.('chat', m);
     else if (m?.t === 'react') theater?.onPartyEvent?.('react', m);
-    else if (m?.t === 'ready?') theater?.onPartyEvent?.('ready', { active: true, peers: [], prompt: true });
-    else if (m?.t === 'countdown') theater?.onPartyEvent?.('countdown', { ms: m.ms, startAt: m.startAt || (Date.now() + (m.ms || 3000)) });
+    else if (m?.t === 'ready?') {
+      theater?.onPartyEvent?.('ready', { active: true, peers: guest.readyState?.peers || [], prompt: true });
+      emit('party-updated', { kind: 'ready' });
+    }
+    else if (m?.t === 'ready_state') {
+      theater?.onPartyEvent?.('ready', { active: !!m.active, hostReady: !!m.hostReady, peers: Array.isArray(m.peers) ? m.peers : [] });
+      emit('party-updated', { kind: 'ready' });
+    }
+    else if (m?.t === 'countdown') {
+      theater?.onPartyEvent?.('countdown', { ms: m.ms, startAt: m.startAt || (Date.now() + (m.ms || 3000)) });
+      emit('party-updated', { kind: 'countdown' });
+    }
     else if (m?.t === 'watch_control') { theater?.onPartyEvent?.('control', m); emit('party-updated', { kind: 'control' }); }
     else if (m?.t === 'roster') {
       const peers = [
         { id: 'host', name: m.host || 'Host', ready: !!m.hostReady, isHost: true },
         ...(m.list || []).map((p) => ({ id: p.id || String(p.idx), name: p.name, ready: !!p.ready, isHost: false })),
       ];
-      theater?.onPartyEvent?.('ready', { active: !!m.readyActive, peers });
+      theater?.onPartyEvent?.('ready', { active: !!m.readyActive, hostReady: !!m.hostReady, peers });
       if (m.watchControl) theater?.onPartyEvent?.('control', { ...m.watchControl, canControl: !!m.canControl });
+      emit('party-updated', { kind: 'roster' });
     }
   });
   guest.on('stats', (s) => { emit('guest-stats', s); logStats('guest', { rtt: s.rtt, kbps: s.kbps, loss: s.loss, lost: s.lost, fps: s.fps, qd: s.qd, jitter: s.jitter, path: s.path?.kind, label: s.path?.label, dec: s.dec }); });
@@ -1122,7 +1192,6 @@ app.whenReady().then(async () => {
     }, +(process.env.MAJLIS_SHOT_DELAY || 4000));
     if (process.env.MAJLIS_PARTY) setTimeout(() => { const n = theater.mpv?.props; if (n && host.guests.size) { const p = Math.round((n['time-pos'] || 0) * 1000); console.log('[party] start at', p); } theater.partyStart().catch((e) => console.log('[party]', e.message)); }, +process.env.MAJLIS_PARTY);
     if (process.env.MAJLIS_PLAY_PAUSE) setTimeout(() => theater.mpv?.set('pause', true).catch(() => {}), 11000);
-    if (process.env.MAJLIS_PLAY) setTimeout(() => theater.play({ type: 'movie', id: 'dev-play', card: { name: 'Test', type: 'movie' }, stream: { url: process.env.MAJLIS_PLAY } }).catch((e) => console.log('[play]', e.message)), 4000);
     if (process.env.MAJLIS_JOIN) setTimeout(() => emit('deeplink', { kind: 'join', target: process.env.MAJLIS_JOIN }), 3000);
   }
 });

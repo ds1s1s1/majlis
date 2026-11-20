@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, ExternalLink, Plus, RefreshCw, ShieldAlert, Trash2, Wifi } from 'lucide-react';
+import { Check, Copy, ExternalLink, Plus, RefreshCw, Trash2, Wifi } from 'lucide-react';
 import { cin, invoke, social, useCaps } from '../../api';
 import { DOCS_URL } from '../../config/appBrand';
 import { inlinePoster } from '../../data/profileMockSeed';
@@ -43,7 +43,6 @@ export function AccountSetupPage({ pageId }: { pageId: SettingsPageId }) {
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(prof.saved.general.alias);
   const [newProfileName, setNewProfileName] = useState('');
-  const [sportsModal, setSportsModal] = useState(false);
   const [relayLatency, setRelayLatency] = useState<number | null>(null);
   const [relayUrlDraft, setRelayUrlDraft] = useState(data.account.relayServerUrl);
   const [relayKeyDraft, setRelayKeyDraft] = useState(data.account.relayAccessKey);
@@ -142,51 +141,6 @@ export function AccountSetupPage({ pageId }: { pageId: SettingsPageId }) {
               },
             ]}
           />
-        </SettingSection>
-
-        <SettingSection title={ar ? 'الرياضة' : 'Sports'}>
-          <ToggleRow
-            label={ar ? 'البث الرياضي المباشر' : 'Live Sports'}
-            checked={data.account.sportsLive}
-            onChange={(v) => update((s) => { s.account.sportsLive = v; })}
-          />
-          <ToggleRow
-            label={ar ? 'جداول المباريات والترتيب' : 'Match Schedules & Standings'}
-            checked={data.account.sportsSchedules}
-            onChange={(v) => update((s) => { s.account.sportsSchedules = v; })}
-          />
-          <div className="pt-3">
-            <InfoBanner
-              title={ar ? 'إشعار استخدام البث الرياضي' : 'Sports & Live Metadata Notice'}
-              body={ar ? 'تعتمد الجداول الحية على مزودات إضافات الطرف الثالث ويمكن تعطيلها في أي وقت.' : 'Live sports schedules rely on enabled metadata & catalog addons and can be toggled off anytime.'}
-              action={
-                <button type="button" onClick={() => setSportsModal(true)} className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold hover:bg-white/20">
-                  {ar ? 'مراجعة الإشعار' : 'Review Sports Notice'}
-                </button>
-              }
-            />
-          </div>
-          {sportsModal ? (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setSportsModal(false); }}>
-              <div className="w-full max-w-md rounded-2xl border border-white/15 bg-[#161310] p-5 space-y-4">
-                <div className="flex items-center gap-2 text-base font-bold"><ShieldAlert size={18} className="text-[var(--accent)]" />{ar ? 'إشعار المحتوى الرياضي' : 'Sports Feature Notice'}</div>
-                <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-                  {ar ? 'يعمل قسم الرياضة فقط مع مزودات الجداول والمصادر التي تضيفها بنفسك. لا يستضيف التطبيق أي بث مركزي.' : 'Sports schedules and streams operate strictly via user-configured addons and metadata providers.'}
-                </p>
-                <div className="flex justify-end gap-2">
-                  <button type="button" onClick={() => setSportsModal(false)} className="rounded-full bg-white/10 px-4 py-1.5 text-xs">{ar ? 'إغلاق' : 'Close'}</button>
-                  <button
-                    type="button"
-                    onClick={() => { update((s) => { s.account.sportsConsentAccepted = true; }); setSportsModal(false); }}
-                    className="rounded-full px-4 py-1.5 text-xs font-semibold"
-                    style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
-                  >
-                    {ar ? 'فهمت' : 'Acknowledge'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
         </SettingSection>
 
         <SettingSection title={ar ? 'اجعله يناسب ذوقك' : 'Make it yours'}>

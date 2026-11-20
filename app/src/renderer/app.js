@@ -307,17 +307,24 @@ function askPin(target) {
 }
 
 async function doConnect(raw, pin) {
-  const target = toLatin(raw).replace(/\D/g, '');
-  if (!(target.length === 9 || target.length === 6)) { $$('#digits input').find((b) => !b.value)?.focus(); return; }
+  const norm = toLatin(raw).trim();
+  const urlMatch = /^(?:majlis:\/\/(?:join|code)\/|https?:\/\/[^/\s]+\/[jc]\/)([A-Za-z0-9_-]{4,24})/i.exec(norm);
+  const flat = (urlMatch ? urlMatch[1] : norm).replace(/[\s-]+/g, '');
+  const target = /^\d{9}$/.test(flat) ? flat : (/^[A-Za-z0-9]{6}$/.test(flat) ? flat.toUpperCase() : '');
+  if (!target) { $$('#digits input').find((b) => !b.value)?.focus(); toast(t('fail_bad_target') || 'Invalid room code or ID', { bad: true }); return; }
   if (target === S.st.id) return;
   S.connect = { state: 'knocking', target };
   renderKnockLine();
   const caps = await decodeCaps();
   const scr = { w: Math.round(screen.width * devicePixelRatio), h: Math.round(screen.height * devicePixelRatio), hz: S.hz };
   const padType = [...navigator.getGamepads()].find(Boolean)?.id.match(/054c/i) ? 'ds4' : 'x360';
-  const r = await api.invoke('connect', { target, caps: { codecs: caps.codecs, screen: scr, padType }, pin });
+  const r = await api.invoke('connect', { target, caps: { codecs: caps.codecs, maxKbps: S.st.settings.maxMbps, screen: scr, padType }, pin });
   if (!r.ok && r.reason === 'pin') { S.connect = { state: 'idle', target }; renderKnockLine(); return askPin(target); }
-  if (!r.ok) { S.connect = { state: 'failed', reason: r.reason, target }; renderKnockLine(); }
+  if (!r.ok) {
+    S.connect = { state: 'failed', reason: r.reason, target };
+    renderKnockLine();
+    toast(t(`fail_${r.reason}`) || r.reason || 'Connection failed', { bad: true });
+  }
 }
 
 function renderKnockLine() {
@@ -1465,7 +1472,8 @@ function handleEvent(m) {
       if (m.t === 'chat') watchUI().addChat(m);
       if (m.t === 'react') watchUI().floatReaction(m.r);
       if (m.t === 'ready?') { if (!S.theaterOpen) watchUI().readyAsk(); }
-      if (m.t === 'countdown') { if (!S.theaterOpen) watchUI().countdown(m.ms); }
+      if (m.t === 'ready_state') { if (!S.theaterOpen) watchUI().readySync?.(m); }
+      if (m.t === 'countdown') { $$('.readyask')?.forEach?.((x) => x.remove()); if (!S.theaterOpen) watchUI().countdown(m.ms); }
       if (m.t === 'watch_control') { c.canControl = !!m.canControl; c.watchControl = { mode: m.mode, holderId: m.holderId, holderName: m.holderName }; }
       if (m.t === 'role') { c.role = m.role; c.slot = m.slot; renderSpecLounge(); toast(t('your_role', { role: t(`role_${m.role}`) })); }
       if (m.t === 'roster') { c.roster = m; syncSavedFriendGains(); renderSpecLounge(); }

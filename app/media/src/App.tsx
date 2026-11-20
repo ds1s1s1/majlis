@@ -31,6 +31,7 @@ import { Person } from './pages/Person';
 import { EntityBrowse } from './pages/EntityBrowse';
 import { TheaterApp } from './theater/TheaterApp';
 import { CommandPalette } from './ui/CommandPalette';
+import { JoinFriendModal } from './ui/JoinFriendModal';
 import { PosterContextMenuHost } from './ui/PosterContextMenu';
 import { PlayQueueDrawer } from './ui/PlayQueueDrawer';
 import { usePlayQueueStore } from './store/usePlayQueueStore';
@@ -76,6 +77,8 @@ export function App() {
   const [modeOpen, setModeOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [joinOpen, setJoinOpen] = useState(false);
+  const [updateBanner, setUpdateBanner] = useState<{ latestTag: string; releaseUrl?: string } | null>(null);
   const profilePopRef = useRef<HTMLDivElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragDepth = useRef(0);
@@ -87,6 +90,21 @@ export function App() {
     const onVis = () => setDocVisible(document.visibilityState !== 'hidden');
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
+  useEffect(() => {
+    const updPrefs = useSettingsStore.getState().data.updates;
+    if (updPrefs.autoCheckOnStartup === false) return;
+    const timer = setTimeout(() => {
+      cin<{ updateAvailable?: boolean; latestTag?: string; releaseUrl?: string }>('updater-check', {
+        betaChannel: !!useSettingsStore.getState().data.updates.betaChannel,
+      }).then((r) => {
+        if (r?.updateAvailable && r.latestTag) {
+          setUpdateBanner({ latestTag: r.latestTag, releaseUrl: r.releaseUrl });
+        }
+      }).catch(() => {});
+    }, 3000);
+    return () => clearTimeout(timer);
   }, []);
   const appStateQ = useQuery({
     queryKey: ['app-state'],
@@ -127,8 +145,8 @@ export function App() {
 
   const hostActive = docVisible && host.visible !== false && !host.theaterOpen;
 
-  const go = useCallback((x: Tab) => { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); setStack([]); setTab(x); setSeen((s) => (s.has(x) ? s : new Set(s).add(x))); }, []);
-  const open = useCallback((r: Route) => { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); setStack((s) => [...s, r]); }, []);
+  const go = useCallback((x: Tab) => { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); setJoinOpen(false); setStack([]); setTab(x); setSeen((s) => (s.has(x) ? s : new Set(s).add(x))); }, []);
+  const open = useCallback((r: Route) => { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); setJoinOpen(false); setStack((s) => [...s, r]); }, []);
   const back = useCallback(() => setStack((s) => s.slice(0, -1)), []);
   const nav: Nav = useMemo(() => ({ tab, go, open, back, depth: stack.length }), [tab, go, open, back, stack.length]);
 
@@ -141,6 +159,7 @@ export function App() {
     const offMajlis = window.majlis?.on?.((m: any) => {
       if (m?.type === 'incognito') qc.invalidateQueries({ queryKey: ['prefs'] });
       else if (m?.type === 'profile-changed') qc.invalidateQueries();
+      else if (m?.type === 'party-updated' || m?.type === 'ready-state') qc.invalidateQueries({ queryKey: ['social-room'] });
     });
     return () => {
       bus.removeEventListener('open', h); bus.removeEventListener('go', g);
@@ -162,6 +181,7 @@ export function App() {
     const key = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); go('settings'); return; }
       if (e.key === 'Escape') {
+        if (joinOpen) { setJoinOpen(false); return; }
         if (moreOpen || notifOpen || modeOpen || profileOpen) { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); return; }
         if (stack.length && !(e.target as HTMLElement)?.matches?.('input')) back();
       }
@@ -382,6 +402,17 @@ export function App() {
           </div>
 
           <div className="app-no-drag relative flex flex-none items-center gap-2">
+            <button
+              type="button"
+              data-testid="header-join-btn"
+              onClick={() => { setModeOpen(false); setMoreOpen(false); setNotifOpen(false); setProfileOpen(false); setJoinOpen(true); }}
+              aria-label={t('join_btn')}
+              title={t('join_btn')}
+              className="flex h-10 items-center gap-1.5 rounded-full bg-white/8 px-3.5 text-xs font-semibold text-fg ring-1 ring-white/15 backdrop-blur-xl transition hover:bg-acc hover:text-acc-ink"
+            >
+              <Icon n="users" s={15} />
+              <span className="hidden md:inline">{t('join_btn')}</span>
+            </button>
             <button onClick={() => { setModeOpen(false); setMoreOpen(false); setProfileOpen(false); setNotifOpen((o) => !o); }} aria-label={t('notifications')} title={t('notifications')}
               className={`relative grid size-10 place-items-center rounded-full ring-1 ring-white/10 backdrop-blur-xl transition ${notifOpen ? 'bg-fg text-bg' : 'bg-black/35 hover:bg-white/15'}`}>
               <Icon n="bell" s={18} />
@@ -541,6 +572,35 @@ export function App() {
               <Icon n="film" s={38} className="text-acc" />
               <div className="text-lg font-bold text-fg">{t('drop_overlay_title')}</div>
             </div>
+          </div>
+        ) : null}
+        <JoinFriendModal open={joinOpen} onClose={() => setJoinOpen(false)} />
+        {updateBanner && !host.theaterOpen ? (
+          <div
+            data-testid="startup-update-banner"
+            className="fixed bottom-5 start-5 z-40 flex items-center gap-3 rounded-2xl border border-acc/35 bg-bg1/95 px-4 py-2.5 text-xs shadow-2xl backdrop-blur-xl fade-in"
+          >
+            <Icon n="spark" s={15} className="text-acc shrink-0" />
+            <span className="font-semibold text-fg">{t('upd_available_banner', { tag: updateBanner.latestTag })}</span>
+            <button
+              type="button"
+              onClick={() => {
+                useSettingsStore.getState().setActivePage('updates-backup');
+                setUpdateBanner(null);
+                go('settings');
+              }}
+              className="rounded-full bg-acc px-3 py-1 font-bold text-acc-ink hover:brightness-110"
+            >
+              {t('upd_view_update')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setUpdateBanner(null)}
+              aria-label={t('close')}
+              className="grid size-6 place-items-center rounded-full bg-white/8 text-fg2 hover:bg-white/15"
+            >
+              <Icon n="x" s={12} />
+            </button>
           </div>
         ) : null}
         {prefs && prefs.cinemaOnboarded !== true ? <Onboarding /> : null}

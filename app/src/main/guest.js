@@ -18,16 +18,18 @@ class Guest extends EventEmitter {
     this.state = 'idle';
     this.canControl = false;
     this.watchControl = { mode: 'host', holderId: null, holderName: null };
+    this.readyState = null;
   }
 
-  async connect(target, caps, { pin, reconnect } = {}) {
+  async connect(target, caps = {}, { pin, reconnect } = {}) {
     if (this.link) this.leave();
     if (!reconnect) this.retries = 0;
     this.leaving = false;
+    this.readyState = null;
     this.state = 'knocking'; this.target = target; this.caps = caps; this.pin = pin || this.pin;
     this.emit('state', { state: reconnect ? 'reconnecting' : 'knocking', target });
     try {
-      const link = await this.net.connect(target, { caps: { codecs: caps.codecs, maxKbps: this._maxKbps() }, pin: this.pin });
+      const link = await this.net.connect(target, { caps: { codecs: caps?.codecs || [], maxKbps: caps?.maxKbps || this._maxKbps() }, pin: this.pin });
       this._attach(link);
       return { ok: true };
     } catch (e) {
@@ -108,6 +110,7 @@ class Guest extends EventEmitter {
       case 'fclock': this.fclock = m; this._postClock(); break;
       // watch together on our own line: the host's shared state (or the end of it)
       case 'sync_state': this.syncEpoch = m.epoch; this.emit('sync', m); break;
+      case 'sync_peers': this.emit('sync-peers', m); break;
       case 'activity': this.emit('activity', { id: this.hostId, name: this.link?.peer?.nick, items: m.items }); break;
       case 'vote_state': this.emit('vote', Array.isArray(m.items) ? m.items : []); break;
       case 'party_msg': this.emit('party-msg', m.msg); break;
@@ -115,6 +118,26 @@ class Guest extends EventEmitter {
         this.roster = m;
         if (typeof m.canControl === 'boolean') this.canControl = m.canControl;
         if (m.watchControl) this.watchControl = m.watchControl;
+        this.readyState = {
+          active: !!m.readyActive,
+          hostReady: !!m.hostReady,
+          peers: [
+            { id: 'host', name: m.host || 'Host', ready: !!m.hostReady, isHost: true },
+            ...(m.list || []).map((p) => ({ id: p.id || String(p.idx), name: p.name, ready: !!p.ready, isHost: false })),
+          ],
+        };
+        this.emit('ctrl', m);
+        break;
+      case 'ready?':
+        this.readyState = { active: true, hostReady: false, peers: this.readyState?.peers || [], prompt: true };
+        this.emit('ctrl', m);
+        break;
+      case 'ready_state':
+        this.readyState = { active: !!m.active, hostReady: !!m.hostReady, peers: Array.isArray(m.peers) ? m.peers : [] };
+        this.emit('ctrl', m);
+        break;
+      case 'countdown':
+        this.readyState = null;
         this.emit('ctrl', m);
         break;
       case 'welcome':

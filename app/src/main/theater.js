@@ -18,7 +18,7 @@ const { resolveVideoStream, isYouTubeUrl } = require('./media/ytdlp');
 const { parseTorrentBuffer } = require('./media/torrent-parse');
 const { prepareSubtitleFile, formatAddonSubTitle, langDisplay, parseSrtCueStarts } = require('./media/sub-rtl');
 const { MediaService } = require('./mediasvc');
-const { SyncViewer } = require('./sync');
+const { SyncViewer, expected } = require('./sync');
 const { findFfmpeg } = require('./encoder');
 const { CinemaDimmer } = require('./dimmer');
 const { detectDoubleLength } = require('./media/multi-ep');
@@ -108,6 +108,11 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   let curWarmTint = Math.max(0, Math.min(100, Number(store.get('cinemaWarmTint')) || 0));
   let curNight = false;
   let lastPartyState = null, partyVotes = [], lastMismatch = null;
+  const THROTTLED_STATS = new Set(['demuxer-cache-duration', 'cache-speed', 'video-bitrate', 'estimated-vf-fps', 'avsync', 'frame-drop-count']);
+  let lastPosEmitAt = 0;
+  let lastStructSig = '';
+  let lastPeersEmitAt = 0;
+  const lastStatEmitAt = new Map();
   const incog = () => !!isIncognito?.();
   const applyAudioFilters = () => {
     if (!mpv || mpv.stopped) return Promise.resolve();
@@ -225,19 +230,12 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     } catch { return 60; }
   }
 
-  // Keep embedded libmpv FBO at a clean video-aspect-matched resolution (up to 1080p) so window
-  // dragging never tears down GPU FBOs/PBOs on every pixel change.
+  // Keep embedded libmpv FBO sized to the actual physical window viewport so libmpv
+  // upscalers (spline36 / ewa_lanczossharp) and libass vector subtitles render at crisp native DPI.
   function getRenderSize() {
     try {
       const maxW = pipActive ? 960 : 3840;
       const maxH = pipActive ? 540 : 2160;
-      const vp = mpv?.props?.['video-params'];
-      const vw = vp?.w || 0;
-      const vh = vp?.h || 0;
-      if (vw > 64 && vh > 64) {
-        const s = Math.min(1, maxW / vw, maxH / vh);
-        return { rw: Math.max(64, Math.round(vw * s) & ~1), rh: Math.max(64, Math.round(vh * s) & ~1) };
-      }
       const w = getWin();
       if (!w || w.isDestroyed()) return { rw: 1280, rh: 720 };
       const b = w.getContentBounds();
@@ -304,7 +302,6 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
             const d = screen.getDisplayMatching(w.getBounds());
             if (d && d.id !== lastDisplayId) {
               lastDisplayId = d.id;
-              if (d.displayFrequency) mpv.set('display-fps-override', Math.max(24, Math.min(60, Math.round(d.displayFrequency)))).catch(() => {});
               if (curDisplayProfile === 'auto') applyDisplayProfile('auto', false);
               if (curDimmerPct > 0) dimmer.apply({ activeWin: w, opacity: curDimmerPct });
               fit(true);
@@ -396,7 +393,9 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     };
     if (embed) {
       const { rw, rh } = getRenderSize();
-      mpv = new LibMpv({ MpvPlayer: core.MpvPlayer, dll: libmpvPath(), ...commonOpts, width: rw, height: rh, displayFps: getDisplayHz() });
+      const maxH = Number(store.get('mediaMaxHeight')) || 1080;
+      const videoQualityPreset = maxH >= 2160 ? 'max' : 'balanced';
+      mpv = new LibMpv({ MpvPlayer: core.MpvPlayer, dll: libmpvPath(), ...commonOpts, width: rw, height: rh, videoQualityPreset });
       mpv.on('frame', (f) => {
         if (shown && onFrame) {
           if (ackSafetyTimer) clearTimeout(ackSafetyTimer);
@@ -477,11 +476,15 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
           now.postCredits = { ...now.card.postCredits, ...(now.postCredits || {}) };
           toOverlay({ type: 'post-credits', ...now.postCredits });
         }
-        getMediaHub().skips(key, value).then((list) => {
+        getMediaHub().skips(key, value, now.meta?.imdb_id || now.card?.imdbId || null).then((list) => {
           if (now?.key !== key || !shown) return;
-          if (list.length) {
-            toOverlay({ type: 'skips', list });
-            const ed = list.find((s) => s.kind === 'ed');
+          if (!app.isPackaged && process.env.MAJLIS_TEST_SKIPS && (!Array.isArray(list) || !list.length)) {
+            list = [{ kind: 'op', start: 0, end: 12 }];
+          }
+          now.skips = Array.isArray(list) ? list : [];
+          if (now.skips.length) {
+            toOverlay({ type: 'skips', list: now.skips });
+            const ed = now.skips.find((s) => s.kind === 'ed');
             if (ed && value > 180 && value - ed.end >= 25) {
               now.postCredits = { after: true, during: false, ...(now.card?.postCredits || {}), ...(now.postCredits || {}), resumeAt: ed.end };
               toOverlay({ type: 'post-credits', ...now.postCredits });
@@ -502,9 +505,21 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
           toOverlay({ type: 'post-credits', ...now.postCredits });
         }
       }
+      let shouldEmitProp = true;
+      if (name === 'time-pos') {
+        const tsNow = Date.now();
+        if (now?.hasFirstFrame && Number(value) >= 0.25 && tsNow - lastPosEmitAt < 200) shouldEmitProp = false;
+        else lastPosEmitAt = tsNow;
+      } else if (THROTTLED_STATS.has(name)) {
+        const tsNow = Date.now();
+        if (tsNow - (lastStatEmitAt.get(name) || 0) < 1000) shouldEmitProp = false;
+        else lastStatEmitAt.set(name, tsNow);
+      }
       const sentVal = name === 'volume' && duckGain < 0.99 ? userVol : value;
-      toOverlay({ type: 'player', name, value: sentVal });
-      if (!useEmbedded) emit('player', { name, value: sentVal });
+      if (shouldEmitProp) {
+        toOverlay({ type: 'player', name, value: sentVal });
+        if (!useEmbedded) emit('player', { name, value: sentVal });
+      }
       const markMultiCovered = () => {
         if (incog() || !now?.multiEp?.coveredIds?.length || now.multiMarked || !now.card?.metaId) return;
         const lib = getMediaHub()?.library();
@@ -733,7 +748,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
   // the URL mpv opens and the per-file options it needs
   async function resolve(stream) {
-    if (!app.isPackaged && stream.url && /^av:\/\//i.test(stream.url)) return { url: stream.url, opts: {} };
+    if (!app.isPackaged && stream.url && (/^av:\/\//i.test(stream.url) || (path.isAbsolute(stream.url) && fs.existsSync(stream.url)))) return { url: stream.url, opts: {} };
     if (stream.majlisDownload) {
       const hub = getMediaHub();
       const f = hub?.downloadFile(stream.majlisDownload);
@@ -1119,7 +1134,13 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     mpv.set('hwdec', !curHwAccel || store.get('decoderMode') === 2 ? 'no' : (mpv.isEmbedded ? 'd3d11va-copy' : ((vsr || rtxHdr) ? 'd3d11va' : 'auto-safe'))).catch(() => {});
     mpv.set('audio-spdif', store.get('audioPassthrough') ? SPDIF_CODECS : '').catch(() => {});
     mpv.set('tone-mapping', curTone).catch(() => {});
-    mpv.set('target-colorspace-hint', store.get('playerHdr') === false ? 'no' : 'yes').catch(() => {});
+    if (mpv.isEmbedded) {
+      mpv.set('target-colorspace-hint', 'no').catch(() => {});
+      mpv.set('target-prim', 'bt.709').catch(() => {});
+      mpv.set('target-trc', 'srgb').catch(() => {});
+    } else {
+      mpv.set('target-colorspace-hint', store.get('playerHdr') === false ? 'no' : 'yes').catch(() => {});
+    }
     mpv.set('sub-filter-sdh', curSdh ? 'yes' : 'no').catch(() => {});
     mpv.set('sub-filter-sdh-harder', curSdh ? 'yes' : 'no').catch(() => {});
     if (store.get('playerAnime4k')) {
@@ -1598,7 +1619,12 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     if (cmdName === 'toggle') return mpv.set('pause', !mpv.props.pause);
     if (cmdName === 'pause') return mpv.set('pause', !!c.on);
     if (cmdName === 'seek') {
-      const res = await mpv.command('seek', c.to, c.abs ? 'absolute+exact' : 'relative+exact');
+      lastPosEmitAt = 0;
+      const dur = Number(mpv.props?.duration) || 0;
+      const target = c.abs && dur > 0
+        ? Math.max(0, Math.min(Number(c.to) || 0, Math.max(0, dur - 1)))
+        : (Number(c.to) || 0);
+      const res = await mpv.command('seek', target, c.abs ? 'absolute+exact' : 'relative+exact');
       setTimeout(() => onPresenceChange(), 180);
       return res;
     }
@@ -1653,11 +1679,6 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         if ((cur?.scaleFactor || 1) !== (target.scaleFactor || 1)) w.setBounds(targetRect);
         if (wasFs || c.fullscreen) w.setFullScreen(true);
         else if (wasMax) w.maximize();
-        try {
-          if (mpv && !mpv.stopped && target.displayFrequency) {
-            mpv.set('display-fps-override', Math.max(24, Math.min(60, Math.round(target.displayFrequency)))).catch(() => {});
-          }
-        } catch {}
         if (curDisplayProfile === 'auto') applyDisplayProfile('auto', false);
         if (curDimmerPct > 0) dimmer.apply({ activeWin: w, opacity: curDimmerPct });
         fit(true);
@@ -1692,10 +1713,11 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         aspect: curAspect, toneMapping: curTone, partyState: lastPartyState, partyVotes,
         phase: curPhase, statusMsg: curStatusMsg, loading: shown && !(mpv?.props?.['time-pos'] > 0.01),
         loadedSubMap: now?.loadedSubMap || {},
+        skips: now?.skips || [],
         bookmarks: getBookmarks(),
         partyNotes: getSocial?.()?.getPartyNotes?.(now?.key || now?.card?.metaId) || [],
         watchControl: getHost()?.guests?.size ? getHost().getWatchControl?.() : (getGuest()?.watchControl || null),
-        readyState: getHost()?.guests?.size ? getHost().readySnapshot?.() : null,
+        readyState: (getHost()?.enabled || getHost()?.guests?.size) ? getHost().readySnapshot?.() : (getGuest()?.link ? getGuest().readyState || null : null),
         canControl: party?.role === 'guest' ? !!getGuest()?.canControl : true,
         partyQueue: getMediaHub()?.getQueue?.() || [],
         now: now ? { card: now.card, id: now.key, type: now.type, ranked: now.ranked || [], nextVideoId: now.nextVideoId || null, episodes: now.episodes || null } : null,
@@ -1765,16 +1787,16 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       return partyVotes;
     }
     if (c.cmd === 'party-ready-check') {
-      if (getHost()?.guests?.size) return getHost().readyCheck();
+      if (getHost()?.enabled || getHost()?.guests?.size) return getHost().readyCheck();
       return null;
     }
     if (c.cmd === 'party-ready-ack') {
-      if (getHost()?.guests?.size) return getHost().setHostReady(c.on !== false);
+      if (getHost()?.enabled || getHost()?.guests?.size) return getHost().setHostReady(c.on !== false);
       if (getGuest()?.link) { getGuest().ctrl({ t: 'ready', on: c.on !== false }); return true; }
       return false;
     }
     if (c.cmd === 'party-countdown') {
-      if (getHost()?.guests?.size) return getHost().countdown(c.ms || 3000);
+      if (getHost()?.enabled || getHost()?.guests?.size) return getHost().countdown(c.ms || 3000);
       return false;
     }
     if (c.cmd === 'party-remote') {
@@ -1825,7 +1847,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     if (['toggle', 'pause', 'seek', 'speed'].includes(c.cmd)) return runControlCmd(c.cmd, c);
     switch (c.cmd) {
       case 'volume': {
-        userVol = Math.min(200, Math.max(0, Number(c.v) || 0));
+        userVol = Math.min(200, Math.max(0, Math.round(Number(c.v) || 0)));
+        if (mpv.props) mpv.props.volume = userVol;
         store.set('playerVolume', userVol);
         if (now?.card?.metaId || now?.key) getMediaHub()?.streamsBucket?.saveItemState?.(now.card?.metaId || now.key, { volume: userVol });
         return mpv.set('volume', Math.round(userVol * duckGain));
@@ -2234,11 +2257,21 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   // A state from the party (ours as host, or the host's as guest). A new film: open it here on
   // our own line (unless it's what's already playing). null: the party is over.
   async function onSync(role, st) {
-    if (!st) { if (party?.role === role) { finalizePartySession(); party = null; lastPartyState = null; lastMismatch = null; toOverlay({ type: 'party', state: null }); if (!shown) stopActiveTimers(); } return; }
+    if (!st) { if (party?.role === role) { finalizePartySession(); party = null; lastPartyState = null; lastMismatch = null; lastPeersJson = ''; lastStructSig = ''; toOverlay({ type: 'party', state: null }); if (!shown) stopActiveTimers(); } return; }
     startActiveTimers();
     if (!party || party.epoch !== st.epoch) {
-      party = { role, viewer: new SyncViewer({ smartCatchUp: store.get('smartCatchUp') !== false }), epoch: st.epoch, lastCatchUp: false };
+      party = {
+        role,
+        viewer: new SyncViewer({ smartCatchUp: store.get('smartCatchUp') !== false, speedCooldownMs: 1000, seekCooldownMs: 2500 }),
+        epoch: st.epoch,
+        lastCatchUp: false,
+        seekSettleUntil: 0,
+        lastAnchorAt: 0,
+      };
       lastMismatch = null;
+      lastPeersJson = '';
+      lastStructSig = '';
+      lastPeersEmitAt = 0;
       const src = st.src || {};
       if (role === 'guest' && src.stream && (src.stream.majlisDownload || src.stream.majlisLocalFile || src.stream.externalUrl)) {
         toOverlay({ type: 'player-error', message: 'blocked unsafe remote stream', ranked: [] });
@@ -2250,7 +2283,10 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
       startPartySession(role);
     }
-    party.viewer.accept(st);
+    const accepted = party.viewer.accept(st);
+    if (accepted && st.reason === 'seek') {
+      party.seekSettleUntil = Date.now() + 1200;
+    }
     if (role === 'guest' && !lastMismatch && st.src && (mpv?.props?.duration || now?.stream)) {
       const localFn = now?.stream?.behaviorHints?.filename || now?.stream?.title || '';
       const mismatch = detectSourceMismatch({ hostDur: st.src.durationSec || 0, localDur: mpv?.props?.duration || 0, hostFilename: st.src.filename || '', localFilename: localFn });
@@ -2263,6 +2299,25 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     const control = party.role === 'host' ? getHost()?.getWatchControl?.() : (getGuest()?.watchControl || null);
     const canControl = party.role === 'host' ? true : !!getGuest()?.canControl;
     lastPartyState = { reason: st.reason, waitingFor: st.waitingFor || [], waitEndsAt: st.waitEndsAt || 0, brb: st.brb || null, playing: st.playing, role, peers, control, canControl, mismatch: lastMismatch };
+    toOverlay({ type: 'party', state: lastPartyState });
+  }
+
+  function onSyncPeers(st) {
+    if (!party || !st || party.epoch !== st.epoch) return;
+    const peers = st.peers || lastPartyState?.peers || [];
+    lastPartyState = {
+      ...(lastPartyState || {}),
+      reason: st.reason ?? lastPartyState?.reason,
+      waitingFor: st.waitingFor || [],
+      waitEndsAt: st.waitEndsAt || 0,
+      brb: st.brb !== undefined ? st.brb : (lastPartyState?.brb || null),
+      playing: st.playing !== undefined ? st.playing : lastPartyState?.playing,
+      role: party.role,
+      peers,
+      control: lastPartyState?.control || getGuest()?.watchControl || null,
+      canControl: party.role === 'host' ? true : !!getGuest()?.canControl,
+      mismatch: lastMismatch,
+    };
     toOverlay({ type: 'party', state: lastPartyState });
   }
 
@@ -2305,17 +2360,49 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         if (!party || !mpv?.props) return;
         const p = mpv.props;
         const local = Math.round((p['time-pos'] || 0) * 1000);
-        const hostNow = party.role === 'host' ? Date.now() : getGuest()?.hostNow() ?? Date.now();
-        party.viewer.setSmartCatchUp?.(store.get('smartCatchUp') !== false);
-        const o = party.viewer.step(local, hostNow, !!p.pause, p.speed ?? 1);
-        if (o.pause != null) mpv.set('pause', o.pause).catch(() => {});
-        if (o.seek != null) mpv.command('seek', o.seek / 1000, 'absolute+exact').catch(() => {});
-        if (o.speed != null) mpv.set('speed', o.speed).catch(() => {});
-        if (!!o.catchUp !== !!party.lastCatchUp) {
-          party.lastCatchUp = !!o.catchUp;
-          toOverlay({ type: 'party-catchup', active: !!o.catchUp, speed: o.speed || party.viewer.speed, driftMs: o.driftMs || 0 });
+        if (party.role === 'host') {
+          // Host is the clock authority: NEVER warp host playback speed or self-seek via SyncViewer
+          const h = getHost();
+          const st = h?.sync?.state;
+          if (st) {
+            const wantPaused = !st.playing;
+            if (p.pause !== undefined && !!p.pause !== wantPaused) mpv.set('pause', wantPaused).catch(() => {});
+            const targetRate = st.rate || 1;
+            if (!wantPaused && Math.abs((p.speed ?? 1) - targetRate) > 0.005) {
+              mpv.set('speed', targetRate).catch(() => {});
+            }
+            if (st.playing && !p.pause && !p['paused-for-cache'] && p['time-pos'] != null) {
+              const hostDrift = local - expected(st, Date.now());
+              if (Math.abs(hostDrift) > 1500 && Date.now() - (party.lastAnchorAt || 0) > 3000) {
+                party.lastAnchorAt = Date.now();
+                h._syncSend(h.sync._set({ pos: local }, 'play'));
+              }
+            }
+          }
+          if (party.lastCatchUp) {
+            party.lastCatchUp = false;
+            toOverlay({ type: 'party-catchup', active: false, speed: 1, driftMs: 0 });
+          }
+        } else {
+          const hostNow = getGuest()?.hostNow() ?? Date.now();
+          party.viewer.setSmartCatchUp?.(store.get('smartCatchUp') !== false);
+          const o = party.viewer.step(local, hostNow, !!p.pause, p.speed ?? 1, {
+            buffering: !!p['paused-for-cache'],
+            seeking: Date.now() < (party.seekSettleUntil || 0),
+          });
+          if (o.pause != null) mpv.set('pause', o.pause).catch(() => {});
+          if (o.seek != null) {
+            party.seekSettleUntil = Date.now() + 1200;
+            lastPosEmitAt = 0;
+            mpv.command('seek', o.seek / 1000, 'absolute+exact').catch(() => {});
+          }
+          if (o.speed != null) mpv.set('speed', o.speed).catch(() => {});
+          if (!!o.catchUp !== !!party.lastCatchUp) {
+            party.lastCatchUp = !!o.catchUp;
+            toOverlay({ type: 'party-catchup', active: !!o.catchUp, speed: o.speed || party.viewer.speed, driftMs: o.driftMs || 0 });
+          }
+          if (process.env.MAJLIS_DEBUG && tick % 8 === 0) { console.log('[sync]', JSON.stringify({ role: party.role, local, drift: Math.round(local - expected(party.viewer.state, hostNow)), speed: party.viewer.speed, playing: party.viewer.state?.playing, reason: party.viewer.state?.reason })); }
         }
-        if (process.env.MAJLIS_DEBUG && tick % 8 === 0) { const { expected } = require('./sync'); console.log('[sync]', JSON.stringify({ role: party.role, local, drift: Math.round(local - expected(party.viewer.state, hostNow)), speed: party.viewer.speed, playing: party.viewer.state?.playing, reason: party.viewer.state?.reason })); }
         if (++tick % 2) return;
         const r = { stalled: !!p['paused-for-cache'] || (party.viewer.state?.playing && p['time-pos'] == null), cache: p['demuxer-cache-duration'] || 0, cacheSpeed: p['cache-speed'] || 0, name: store.get('nick') || '' };
         if (party.role === 'host') {
@@ -2325,11 +2412,18 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
           if (st) {
             const peers = h.sync.peers((id) => (id === 'host' ? store.get('nick') || 'Host' : h.guests?.get(id)?.nick || id));
             st.peers = peers;
-            const pj = JSON.stringify({ w: st.waitingFor, we: st.waitEndsAt, p: peers, re: st.reason, brb: st.brb?.endsAt });
-            if (pj !== lastPeersJson) {
-              lastPeersJson = pj;
-              for (const g of h.guests?.values() || []) g.link.ctrl({ t: 'sync_state', ...st });
-              toOverlay({ type: 'party', state: { reason: st.reason, waitingFor: st.waitingFor || [], waitEndsAt: st.waitEndsAt || 0, brb: st.brb || null, playing: st.playing, role: 'host', peers } });
+            const normPeers = peers.map((x) => [x.id, !!x.stalled, Math.round(x.cache || 0), !!x.ready]);
+            const structSig = JSON.stringify({ w: st.waitingFor || [], we: st.waitEndsAt || 0, re: st.reason, pl: st.playing, brb: st.brb?.endsAt || 0, sr: normPeers.map((x) => [x[0], x[1], x[3]]) });
+            const fullSig = JSON.stringify([structSig, normPeers]);
+            const nowTs = Date.now();
+            if (structSig !== lastStructSig || (fullSig !== lastPeersJson && nowTs - lastPeersEmitAt >= 2000)) {
+              lastStructSig = structSig;
+              lastPeersJson = fullSig;
+              lastPeersEmitAt = nowTs;
+              const msg = { t: 'sync_peers', epoch: st.epoch, peers, waitingFor: st.waitingFor || [], waitEndsAt: st.waitEndsAt || 0, reason: st.reason, brb: st.brb || null, playing: st.playing };
+              for (const g of h.guests?.values() || []) g.link.ctrl(msg);
+              lastPartyState = { ...(lastPartyState || {}), reason: st.reason, waitingFor: st.waitingFor || [], waitEndsAt: st.waitEndsAt || 0, brb: st.brb || null, playing: st.playing, role: 'host', peers, control: h.getWatchControl?.(), canControl: true, mismatch: lastMismatch };
+              toOverlay({ type: 'party', state: lastPartyState });
             }
           }
         } else {
@@ -2429,7 +2523,7 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   };
 
   return {
-    play, quickplay, partyStart, close, onSync, onVoice, onPartyEvent, info, activity, saveFriend, ackFrame,
+    play, quickplay, partyStart, close, onSync, onSyncPeers, onVoice, onPartyEvent, info, activity, saveFriend, ackFrame,
     videoAspect, setPipMode,
     playbackSnapshot: () => ({ open: shown && !!now, paused: !!mpv?.props?.pause, hasNext: !!now?.nextVideoId }),
     togglePause: () => runControlCmd('toggle'),

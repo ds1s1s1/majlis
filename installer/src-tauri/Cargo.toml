@@ -1,6 +1,6 @@
 [package]
 name = "majlis-setup"
-version = "0.1.0-beta"
+version = "0.1.1-beta"
 description = "Majlis Windows Installer"
 authors = ["Majlis Contributors"]
 edition = "2021"

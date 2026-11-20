@@ -5,6 +5,7 @@ import { useHost, useNav, useT } from '../host';
 import { Icon } from '../ui/Icon';
 import { QrCode } from '../ui/QrCode';
 import { SocialAvatar } from '../ui/Social';
+import { JoinFriendModal } from '../ui/JoinFriendModal';
 
 const fmtId = (id: string) => (id.length === 9 ? `${id.slice(0, 3)} ${id.slice(3, 6)} ${id.slice(6)}` : id);
 
@@ -45,9 +46,39 @@ export function Friends() {
     toast(t(discordMsg ? 'discord_copied' : 'copy_friend_link'));
   };
 
+  const [joinOpen, setJoinOpen] = useState(false);
+
   const joinFriend = async (id: string) => {
-    await invoke('connect', { target: id });
-    toast(t('party_started'));
+    const res = await invoke<{ ok?: boolean; reason?: string }>('connect', {
+      target: id,
+      caps: {
+        codecs: [],
+        screen: {
+          w: Math.round(window.screen.width * (window.devicePixelRatio || 1)),
+          h: Math.round(window.screen.height * (window.devicePixelRatio || 1)),
+          hz: 60,
+        },
+      },
+    }).catch((e) => ({ ok: false, reason: (e as Error)?.message || 'bad' }));
+    if (res?.ok) {
+      toast(t('join_requested'));
+      return;
+    }
+    if (res?.reason === 'pin') {
+      setJoinOpen(true);
+      return;
+    }
+    const map: Record<string, Parameters<typeof t>[0]> = {
+      no_server: 'fail_no_server',
+      server_access: 'fail_server_access',
+      offline: 'fail_offline',
+      declined: 'fail_declined',
+      timeout: 'fail_timeout',
+      rate: 'fail_rate',
+      bad: 'fail_bad',
+    };
+    const key = map[String(res?.reason || 'bad')];
+    toast(key ? t(key) : String(res?.reason || t('fail_bad')));
   };
 
   const accept = async (id: string) => { await social('accept', { id }); refresh(); toast(t('friend_added')); };
@@ -92,9 +123,13 @@ export function Friends() {
             <button onClick={() => copyLink(true)} className="flex items-center gap-1.5 rounded-full bg-acc/20 px-4 py-2 text-sm font-semibold text-acc ring-1 ring-acc/30 transition hover:bg-acc hover:text-acc-ink">
               <Icon n="copy" s={15} />{t('share_discord')}
             </button>
+            <button data-testid="friends-join-btn" onClick={() => setJoinOpen(true)} className="flex items-center gap-1.5 rounded-full bg-white/10 px-4 py-2 text-sm font-semibold text-fg ring-1 ring-white/15 transition hover:bg-acc hover:text-acc-ink">
+              <Icon n="users" s={15} />{t('join_by_code')}
+            </button>
             <button onClick={() => nav.go('party')} className="flex items-center gap-1.5 rounded-full bg-fg px-4 py-2 text-sm font-semibold text-bg transition hover:bg-acc hover:text-acc-ink">
               <Icon n="users" s={15} />{t('party')}
             </button>
+            <JoinFriendModal open={joinOpen} onClose={() => setJoinOpen(false)} />
           </div>
         </div>
 
@@ -168,9 +203,9 @@ export function Friends() {
                   <button onClick={() => nav.open({ kind: 'friend', id: f.id })} className="rounded-full bg-white/8 px-3 py-1.5 text-xs font-medium hover:bg-white/15">
                     {t('view_profile')}
                   </button>
-                  {f.inParty && f.trust !== 'block' ? (
+                  {(f.inParty || f.online) && f.trust !== 'block' ? (
                     <button onClick={() => joinFriend(f.id)} className="rounded-full bg-acc px-3 py-1.5 text-xs font-semibold text-acc-ink hover:brightness-110">
-                      {t('start_party')}
+                      {t('join_friend')}
                     </button>
                   ) : null}
                   <span className="flex-1" />

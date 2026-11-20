@@ -146,7 +146,9 @@ class Host extends EventEmitter {
     this.chatLog = [];
 
     this.tick = setInterval(() => this._tick(), 500);
+    this.tick.unref?.();
     this.peakTimer = setInterval(() => this._recordPeak(), 60000);
+    this.peakTimer.unref?.();
   }
 
   // ------------------------------------------------------------------ hosting on/off
@@ -289,9 +291,7 @@ class Host extends EventEmitter {
       }
       case 'ready': {
         g.ready = !!m.on;
-        this._roster();
-        this.emit('ready-state', this.readySnapshot());
-        this.emit('update');
+        if (!this._maybeTriggerReadyCountdown()) this._broadcastReady();
         break;
       }
       // watch together (each on their own line): requests from those who may control, and
@@ -357,27 +357,38 @@ class Host extends EventEmitter {
     };
   }
 
-  setHostReady(on) {
-    this._hostReady = !!on;
-    if (this._readyCheckActive && this._hostReady && [...this.guests.values()].every((g) => g.ready)) {
-      this._readyCheckActive = false;
-    }
+  _broadcastReady(snap = this.readySnapshot()) {
+    for (const g of this.guests.values()) g.link.ctrl({ t: 'ready_state', ...snap });
     this._roster();
-    const snap = this.readySnapshot();
     this.emit('ready-state', snap);
     this.emit('update');
     return snap;
   }
 
+  _maybeTriggerReadyCountdown() {
+    if (!this._readyCheckActive || !this._hostReady) return false;
+    const guests = [...this.guests.values()];
+    if (!guests.length || !guests.every((g) => g.ready)) return false;
+    this._readyCheckActive = false;
+    this._broadcastReady();
+    this.countdown(3000);
+    return true;
+  }
+
+  setHostReady(on) {
+    this._hostReady = !!on;
+    if (this._maybeTriggerReadyCountdown()) return this.readySnapshot();
+    return this._broadcastReady();
+  }
+
   readyCheck() {
     this._readyCheckActive = true;
     this._hostReady = false;
+    if (this.sync.state && this.sync.state.playing) {
+      this._syncSend(this.sync.request({ epoch: this.sync.state.epoch, action: 'pause', from: 'host' }));
+    }
     for (const g of this.guests.values()) { g.ready = false; g.link.ctrl({ t: 'ready?' }); }
-    this._roster();
-    const snap = this.readySnapshot();
-    this.emit('ready-state', snap);
-    this.emit('update');
-    return snap;
+    return this._broadcastReady();
   }
 
   countdown(ms = 3000) {
@@ -394,6 +405,7 @@ class Host extends EventEmitter {
       if (this.sync.state) this.syncForceResume();
       else this.movieCtl('play');
     }, dur);
+    this.cdTimer.unref?.();
     return { ok: true, ms: dur, startAt };
   }
 
@@ -1274,6 +1286,7 @@ class Host extends EventEmitter {
   }
 
   dispose() {
+    clearTimeout(this.cdTimer);
     clearInterval(this.tick); clearInterval(this.peakTimer);
     this._saveResume(); this.movie.dispose();
     this._stopEncoders();

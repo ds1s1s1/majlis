@@ -201,6 +201,10 @@ class SyncViewer {
   constructor(opts = {}) {
     this.state = null; this.speed = 1; this.ownSeq = -1; this.lastReqAt = 0; this.lastReqAction = null;
     this.smartCatchUp = opts?.smartCatchUp !== false;
+    this.speedCooldownMs = Number(opts?.speedCooldownMs) || 0;
+    this.seekCooldownMs = Number(opts?.seekCooldownMs) || 0;
+    this.lastSpeedAt = 0;
+    this.lastSeekAt = 0;
     this.catchingUp = false;
   }
 
@@ -227,7 +231,7 @@ class SyncViewer {
   // every ~250 ms with the player's position (ms), the host's clock now, and the speed the
   // player really runs at (not what we last asked for: a request sent before the player was up
   // is lost, and the viewer stayed a second behind for good): { pause?, seek?, speed?, catchUp?, driftMs? }
-  step(localMs, nowHost, paused, speed = this.speed) {
+  step(localMs, nowHost, paused, speed = this.speed, stepOpts = null) {
     this.speed = speed;
     const s = this.state;
     if (!s) { this.catchingUp = false; return {}; }
@@ -235,17 +239,37 @@ class SyncViewer {
     if (paused !== !s.playing) out.pause = !s.playing;
     const want = expected(s, nowHost);
     const baseRate = s.rate || 1;
+    const nowMs = Number(stepOpts?.nowMs ?? Date.now());
     if (!s.playing) {
       this.catchingUp = false;
-      if (Math.abs(localMs - want) > 250) out.seek = want;
-      if (Math.abs(this.speed - baseRate) > 0.005) { out.speed = baseRate; this.speed = baseRate; }
+      if (Math.abs(localMs - want) > 250 && (this.seekCooldownMs <= 0 || nowMs - this.lastSeekAt >= this.seekCooldownMs)) {
+        out.seek = want;
+        this.lastSeekAt = nowMs;
+      }
+      if (Math.abs(this.speed - baseRate) > 0.005) { out.speed = baseRate; this.speed = baseRate; this.lastSpeedAt = nowMs; }
+      return out;
+    }
+    if (stepOpts?.buffering || stepOpts?.seeking) {
+      this.catchingUp = false;
+      out.catchUp = false;
+      out.driftMs = Math.round(localMs - want);
       return out;
     }
     const c = correct(localMs, want, this.speed / baseRate, { smartCatchUp: this.smartCatchUp });
     this.catchingUp = !!c.catchUp;
     const nextSpeed = Math.min(4, Math.round(baseRate * c.speed * 1000) / 1000);
-    if (c.seek != null) out.seek = c.seek;
-    if (Math.abs(nextSpeed - this.speed) > 0.002) { out.speed = nextSpeed; this.speed = nextSpeed; }
+    if (c.seek != null && (this.seekCooldownMs <= 0 || nowMs - this.lastSeekAt >= this.seekCooldownMs)) {
+      out.seek = c.seek;
+      this.lastSeekAt = nowMs;
+    }
+    if (Math.abs(nextSpeed - this.speed) > 0.002) {
+      const returningToBase = Math.abs(nextSpeed - baseRate) <= 0.002;
+      if (returningToBase || this.speedCooldownMs <= 0 || nowMs - this.lastSpeedAt >= this.speedCooldownMs) {
+        out.speed = nextSpeed;
+        this.speed = nextSpeed;
+        this.lastSpeedAt = nowMs;
+      }
+    }
     out.catchUp = this.catchingUp;
     out.driftMs = Math.round(localMs - want);
     return out;

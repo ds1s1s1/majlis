@@ -14,7 +14,7 @@ const ALLOWED_INVOKE = new Set([
   'media:close', 'media:friends-on', 'media:letterboxd-import', 'media:play',
   'mini', 'mode', 'movie:ctl', 'movie:open', 'movie:pick', 'movie:sub-file',
   'net:isp-bench', 'netcheck', 'open', 'party:end', 'party:info', 'party:preset-del', 'party:preset-launch', 'party:preset-save', 'party:presets', 'party:start', 'perms', 'pick:file',
-  'player:cmd', 'player:next', 'quit', 'react', 'ready:check', 'ready:go', 'replay:save',
+  'player:cmd', 'player:next', 'quit', 'react', 'ready:ack', 'ready:check', 'ready:go', 'replay:save',
   'routerlock', 'settings', 'shot', 'show-file', 'sources', 'state', 'vigem',
   'vote:cast', 'vote:clear', 'vote:nominate', 'vote:room', 'vote:winner',
   'win:close', 'win:is-maximized', 'win:maximize', 'win:minimize', 'windows',
@@ -38,7 +38,7 @@ const ALLOWED_INVOKE = new Set([
   'cin:store', 'cin:store-categories', 'cin:streams', 'cin:stremio-login', 'cin:stremio-logout',
   'cin:stremio-sync', 'cin:subtitles', 'cin:torrent-health', 'cin:tracker-import', 'cin:tracker-out',
   'cin:trackers', 'cin:tracker-start', 'cin:trending', 'cin:tune', 'cin:tune-set', 'cin:upcoming',
-  'cin:updater-check',
+  'cin:updater-check', 'cin:updater-download', 'cin:updater-install',
   // Social & profile channels
   'social:accept', 'social:add', 'social:block', 'social:brb', 'social:comment-add', 'social:comment-del',
   'social:compare', 'social:cursor', 'social:decline', 'social:friends', 'social:me',

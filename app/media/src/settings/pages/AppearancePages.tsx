@@ -299,7 +299,25 @@ export function AppearancePage({ pageId }: { pageId: SettingsPageId }) {
 
   if (pageId === 'player-layout') {
     const pl = ap.playerLayout;
-    const ALL_HUD = ['play', 'seek', 'volume', 'time', 'subtitles', 'audio', 'streams', 'speed', 'night', 'aspect', 'pip', 'fullscreen'];
+    const HUD_OPTIONS: { id: string; label: string }[] = [
+      { id: 'play', label: t('th_hud_btn_play') },
+      { id: 'time', label: t('th_hud_btn_time') },
+      { id: 'volume', label: t('th_hud_btn_volume') },
+      { id: 'subtitles', label: t('th_hud_btn_subtitles') },
+      { id: 'audio', label: t('th_hud_btn_audio') },
+      { id: 'more', label: t('th_hud_btn_more') },
+      { id: 'pip', label: t('th_hud_btn_pip') },
+      { id: 'fullscreen', label: t('th_hud_btn_fullscreen') },
+      { id: 'seek', label: t('th_hud_btn_seek') },
+      { id: 'sources', label: t('th_hud_btn_sources') },
+      { id: 'episodes', label: t('th_hud_btn_episodes') },
+      { id: 'chapters', label: t('th_hud_btn_chapters') },
+      { id: 'speed', label: t('th_hud_btn_speed') },
+      { id: 'video', label: t('th_hud_btn_video') },
+      { id: 'tools', label: t('th_hud_btn_tools') },
+      { id: 'said', label: t('th_hud_btn_said') },
+      { id: 'lock', label: t('th_hud_btn_lock') },
+    ];
     return (
       <>
         <SettingSection
@@ -326,45 +344,82 @@ export function AppearancePage({ pageId }: { pageId: SettingsPageId }) {
               <span>{pl.timeFormat === 'elapsed-only' ? '42:15' : pl.timeFormat === 'elapsed-remaining' ? '42:15 / -1:04:10' : '42:15 / 1:46:25'}</span>
             </div>
             <div className="relative flex items-center" style={{ height: `${Math.max(pl.seekHeightPx + 10, pl.seekDotSizePx + 4)}px` }}>
-              <div className="w-full overflow-hidden rounded-full bg-white/15" style={{ height: `${pl.seekHeightPx}px` }}>
-                {pl.bufferFill ? <div className="h-full bg-white" style={{ width: '68%', opacity: pl.bufferBrightnessPct / 100 }} /> : null}
-                <div className="h-full -mt-full" style={{ width: '42%', background: pl.seekColor, height: `${pl.seekHeightPx}px` }} />
+              <div className="relative w-full overflow-hidden rounded-full bg-white/15" style={{ height: `${pl.seekHeightPx}px` }}>
+                {pl.bufferFill ? <div className="absolute inset-y-0 start-0 bg-white" style={{ width: '68%', opacity: pl.bufferBrightnessPct / 100 }} /> : null}
+                <div className="absolute inset-y-0 start-0" style={{ width: '42%', background: pl.seekColor }} />
               </div>
               <div
-                className="absolute -translate-x-1/2 shadow"
+                className={`absolute -translate-x-1/2 shadow ${pl.seekDotShape === 'custom' ? 'rotate-45' : ''}`}
                 style={{
                   left: '42%',
                   width: `${pl.seekDotSizePx}px`,
                   height: `${pl.seekDotSizePx}px`,
                   background: pl.seekColor,
-                  borderRadius: pl.seekDotShape === 'circle' ? '9999px' : '2px',
+                  borderRadius: pl.seekDotShape === 'circle' ? '9999px' : pl.seekDotShape === 'square' ? '2px' : '4px',
                 }}
               />
             </div>
           </div>
 
-          <SegmentedRow label={ar ? 'شكل شريط التقديم' : 'Seek bar style'} value={pl.seekStyle} options={[{ value: 'pinstripe', label: 'Pinstripe' }, { value: 'boldline', label: 'Boldline' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.seekStyle = v; s.appearance.playerLayout.seekHeightPx = v === 'pinstripe' ? 2 : 5; })} />
+          <SegmentedRow
+            label={ar ? 'حجم أزرار الشريط' : 'HUD scale'}
+            value={pl.hudScale || 'default'}
+            options={[
+              { value: 'compact', label: ar ? 'مضغوط' : 'Compact' },
+              { value: 'default', label: ar ? 'قياسي' : 'Default' },
+              { value: 'spacious', label: ar ? 'واسع' : 'Spacious' },
+            ]}
+            onChange={(v) => update((s) => { s.appearance.playerLayout.hudScale = v; })}
+          />
+          <SegmentedRow
+            label={ar ? 'مدة إخفاء الشريط تلقائياً' : 'Auto-hide HUD delay'}
+            value={String(pl.autoHideDelaySec || 3)}
+            options={[
+              { value: '2', label: ar ? '2 ث' : '2s' },
+              { value: '3', label: ar ? '3 ث' : '3s' },
+              { value: '5', label: ar ? '5 ث' : '5s' },
+              { value: '8', label: ar ? '8 ث' : '8s' },
+            ]}
+            onChange={(v) => update((s) => { s.appearance.playerLayout.autoHideDelaySec = Number(v) as 2 | 3 | 5 | 8; })}
+          />
+          <SegmentedRow
+            label={ar ? 'شكل شريط الصوت' : 'Volume control style'}
+            value={pl.volumeControl}
+            options={[
+              { value: 'slider', label: ar ? 'شريط أفقي' : 'Slider' },
+              { value: 'vertical', label: ar ? 'عمودي' : 'Vertical' },
+              { value: 'stepper', label: ar ? 'أزرار −/+' : 'Stepper' },
+              { value: 'icon', label: ar ? 'أيقونة فقط' : 'Icon only' },
+            ]}
+            onChange={(v) => update((s) => { s.appearance.playerLayout.volumeControl = v; })}
+          />
+          <SegmentedRow label={ar ? 'شكل شريط التقديم' : 'Seek bar style'} value={pl.seekStyle} options={[{ value: 'pinstripe', label: ar ? 'خط رفيع' : 'Pinstripe' }, { value: 'boldline', label: ar ? 'عريض' : 'Boldline' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.seekStyle = v; s.appearance.playerLayout.seekHeightPx = v === 'pinstripe' ? 2 : 5; })} />
           <SliderRow label={ar ? 'ارتفاع الشريط' : 'Bar height'} value={pl.seekHeightPx} min={2} max={12} unit="px" defaultValue={4} onChange={(v) => update((s) => { s.appearance.playerLayout.seekHeightPx = v; })} />
           <ColorSwatchPicker label={ar ? 'لون شريط التقديم' : 'Bar color'} value={pl.seekColor} onChange={(c) => update((s) => { s.appearance.playerLayout.seekColor = c; })} />
           <ToggleRow label={ar ? 'إظهار النقطة عند التمرير فقط' : 'Reveal the dot on hover'} checked={pl.revealDotHover} onChange={(v) => update((s) => { s.appearance.playerLayout.revealDotHover = v; })} />
           <ToggleRow label={ar ? 'شريط التخزين المؤقت (Buffer)' : 'Buffer fill'} checked={pl.bufferFill} onChange={(v) => update((s) => { s.appearance.playerLayout.bufferFill = v; })} />
-          <SegmentedRow label={ar ? 'شكل مقبض التقديم' : 'Seek dot shape'} value={pl.seekDotShape} options={[{ value: 'circle', label: 'Circle' }, { value: 'square', label: 'Square' }, { value: 'custom', label: 'Custom' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.seekDotShape = v; })} />
+          {pl.bufferFill ? (
+            <SliderRow label={ar ? 'سطوع شريط التخزين المؤقت' : 'Buffer brightness'} value={pl.bufferBrightnessPct} min={10} max={85} unit="%" defaultValue={35} onChange={(v) => update((s) => { s.appearance.playerLayout.bufferBrightnessPct = v; })} />
+          ) : null}
+          <SegmentedRow label={ar ? 'شكل مقبض التقديم' : 'Seek dot shape'} value={pl.seekDotShape} options={[{ value: 'circle', label: ar ? 'دائري' : 'Circle' }, { value: 'square', label: ar ? 'مربع' : 'Square' }, { value: 'custom', label: ar ? 'معين' : 'Diamond' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.seekDotShape = v; })} />
           <SliderRow label={ar ? 'حجم المقبض' : 'Dot size'} value={pl.seekDotSizePx} min={8} max={22} unit="px" defaultValue={14} onChange={(v) => update((s) => { s.appearance.playerLayout.seekDotSizePx = v; })} />
-          <SegmentedRow label={ar ? 'صيغة الوقت' : 'Time format'} value={pl.timeFormat} options={[{ value: 'elapsed-total', label: 'Elapsed / Total' }, { value: 'elapsed-remaining', label: 'Elapsed / -Rem' }, { value: 'elapsed-only', label: 'Elapsed' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.timeFormat = v; })} />
+          <SegmentedRow label={ar ? 'صيغة الوقت' : 'Time format'} value={pl.timeFormat} options={[{ value: 'elapsed-total', label: ar ? 'المنقضي / الكلي' : 'Elapsed / Total' }, { value: 'elapsed-remaining', label: ar ? 'المنقضي / المتبقي' : 'Elapsed / -Rem' }, { value: 'elapsed-only', label: ar ? 'المنقضي فقط' : 'Elapsed' }]} onChange={(v) => update((s) => { s.appearance.playerLayout.timeFormat = v; })} />
           <ToggleRow label={ar ? 'الساعة في ملء الشاشة' : 'Fullscreen clock'} checked={pl.fullscreenClock} onChange={(v) => update((s) => { s.appearance.playerLayout.fullscreenClock = v; })} />
+          <ToggleRow label={ar ? 'معاينة الإطار عند التمرير على الشريط' : 'Hover thumbnail preview'} checked={pl.hoverThumbPreview} onChange={(v) => update((s) => { s.appearance.playerLayout.hoverThumbPreview = v; })} />
+          <ToggleRow label={ar ? 'دعم قفل عناصر التحكم' : 'Enable control lock toggle'} checked={pl.showControlLock} onChange={(v) => update((s) => { s.appearance.playerLayout.showControlLock = v; })} />
         </SettingSection>
         {hudModalOpen ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) setHudModalOpen(false); }}>
             <div className="w-full max-w-md rounded-2xl border border-white/15 bg-[#161310] p-5 space-y-3">
               <h3 className="text-sm font-bold">{ar ? 'عناصر شريط المشغل' : 'Customize HUD Controls'}</h3>
               <div className="flex flex-wrap gap-2">
-                {ALL_HUD.map((ctrl) => {
-                  const on = pl.visibleControls.includes(ctrl);
+                {HUD_OPTIONS.map((ctrl) => {
+                  const on = pl.visibleControls.includes(ctrl.id);
                   return (
-                    <button key={ctrl} type="button" onClick={() => update((s) => {
-                      s.appearance.playerLayout.visibleControls = on ? pl.visibleControls.filter((x) => x !== ctrl) : [...pl.visibleControls, ctrl];
-                    })} className={`rounded-full px-3 py-1 text-xs font-medium capitalize ${on ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'bg-white/8 text-white/60'}`}>
-                      {ctrl}
+                    <button key={ctrl.id} type="button" onClick={() => update((s) => {
+                      s.appearance.playerLayout.visibleControls = on ? pl.visibleControls.filter((x) => x !== ctrl.id) : [...pl.visibleControls, ctrl.id];
+                    })} className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${on ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'bg-white/8 text-white/75 hover:bg-white/15'}`}>
+                      {ctrl.label}
                     </button>
                   );
                 })}

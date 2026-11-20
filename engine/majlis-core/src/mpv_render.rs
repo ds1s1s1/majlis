@@ -504,6 +504,7 @@ struct GlPipeline {
     h: i32,
     slot: usize,
     slot_filled: [bool; 2],
+    last_submit: Option<std::time::Instant>,
 }
 
 impl GlPipeline {
@@ -671,7 +672,7 @@ impl GlPipeline {
         Ok(Self {
             hwnd, hdc, hglrc, gl, vao, prog_y, prog_uv,
             main_fbo, main_tex, y_fbo, y_tex, uv_fbo, uv_tex, pbo_y, pbo_uv, pbo_rgba, use_rgba,
-            w, h, slot: 0, slot_filled: [false, false],
+            w, h, slot: 0, slot_filled: [false, false], last_submit: None,
         })
     }
 
@@ -719,13 +720,14 @@ impl GlPipeline {
             self.w = nw; self.h = nh;
             self.slot = 0;
             self.slot_filled = [false, false];
+            self.last_submit = None;
         }
     }
 
     unsafe fn render_to_pbo(&mut self, api: &MpvApi, rctx: *mut mpv_render_context) {
         let mut fbo = mpv_opengl_fbo { fbo: self.main_fbo as c_int, w: self.w, h: self.h, internal_format: GL_RGBA8 as c_int };
         let mut flip_y: c_int = 0;
-        let mut block: c_int = 0;
+        let mut block: c_int = 1;
         let mut params = [
             mpv_render_param { param_type: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
             mpv_render_param { param_type: MPV_RENDER_PARAM_FLIP_Y, data: &mut flip_y as *mut _ as *mut c_void },
@@ -777,19 +779,19 @@ impl GlPipeline {
 
         self.slot_filled[cur] = true;
         self.slot = 1 - cur;
+        self.last_submit = Some(std::time::Instant::now());
     }
 
     unsafe fn read_slot_frame(&mut self, slot: usize) -> Option<(&'static str, Vec<u8>)> {
         if self.use_rgba {
             let bytes = (self.w as usize) * (self.h as usize) * 4;
-            let mut out = vec![0u8; bytes];
             (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, self.pbo_rgba[slot]);
             let p = (self.gl.map_buffer_range)(GL_PIXEL_PACK_BUFFER, 0, bytes as isize, GL_MAP_READ_BIT) as *const u8;
             if p.is_null() {
                 (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, 0);
                 return None;
             }
-            std::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), bytes);
+            let out = std::slice::from_raw_parts(p, bytes).to_vec();
             (self.gl.unmap_buffer)(GL_PIXEL_PACK_BUFFER);
             (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, 0);
             return Some(("rgba", out));
@@ -797,7 +799,7 @@ impl GlPipeline {
 
         let y_bytes = (self.w * self.h) as usize;
         let uv_bytes = ((self.w / 2) * (self.h / 2) * 2) as usize;
-        let mut out = vec![0u8; y_bytes + uv_bytes];
+        let mut out = Vec::with_capacity(y_bytes + uv_bytes);
 
         (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, self.pbo_y[slot]);
         let yp = (self.gl.map_buffer_range)(GL_PIXEL_PACK_BUFFER, 0, y_bytes as isize, GL_MAP_READ_BIT) as *const u8;
@@ -805,7 +807,7 @@ impl GlPipeline {
             (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, 0);
             return None;
         }
-        std::ptr::copy_nonoverlapping(yp, out.as_mut_ptr(), y_bytes);
+        out.extend_from_slice(std::slice::from_raw_parts(yp, y_bytes));
         (self.gl.unmap_buffer)(GL_PIXEL_PACK_BUFFER);
 
         (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, self.pbo_uv[slot]);
@@ -814,7 +816,7 @@ impl GlPipeline {
             (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, 0);
             return None;
         }
-        std::ptr::copy_nonoverlapping(uvp, out.as_mut_ptr().add(y_bytes), uv_bytes);
+        out.extend_from_slice(std::slice::from_raw_parts(uvp, uv_bytes));
         (self.gl.unmap_buffer)(GL_PIXEL_PACK_BUFFER);
 
         (self.gl.bind_buffer)(GL_PIXEL_PACK_BUFFER, 0);
@@ -951,7 +953,7 @@ fn render_loop(
             let need_render = {
                 let mut d = shared.wake.dirty.lock().unwrap();
                 if !*d && !shared.stopping.load(Ordering::SeqCst) {
-                    let wait = if gl_pipe.as_ref().map(|g| g.has_pending()).unwrap_or(false) { 1 } else { 100 };
+                    let wait = if gl_pipe.as_ref().map(|g| g.has_pending()).unwrap_or(false) { 4 } else { 100 };
                     let (guard, _) = shared.wake.cv.wait_timeout(d, std::time::Duration::from_millis(wait)).unwrap();
                     d = guard;
                 }
@@ -984,7 +986,8 @@ fn render_loop(
                         }
                     }
                 } else if let Some(flush_slot) = gp.latest_filled_slot() {
-                    if try_acquire_slot(&shared.in_flight) {
+                    let ready_to_flush = gp.last_submit.map(|t| t.elapsed() >= std::time::Duration::from_millis(12)).unwrap_or(true);
+                    if ready_to_flush && try_acquire_slot(&shared.in_flight) {
                         if let Some((fmt, data)) = gp.read_slot_frame(flush_slot) {
                             gp.slot_filled[flush_slot] = false;
                             on_frame.call(FramePacket { w: gp.w as u32, h: gp.h as u32, fmt, data }, ThreadsafeFunctionCallMode::NonBlocking);

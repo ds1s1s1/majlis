@@ -140,3 +140,37 @@ test('track 3: forceResume, setBrb, cacheSpeed, and waitEndsAt state synchroniza
   assert.strictEqual(resumed.brb, null);
 });
 
+test('guest sync cooldown & buffering guard prevent rapid speed/seek oscillations', () => {
+  let t = 0;
+  const h = new SyncHost(() => t);
+  const s0 = h.open({}, {});
+  const st = h.request({ epoch: s0.epoch, action: 'play' });
+  const v = new SyncViewer({ speedCooldownMs: 1000, seekCooldownMs: 2500 });
+  v.accept(st);
+
+  // Buffering skips drift speed/seek correction completely
+  const buf = v.step(-3000, 1000, false, 1, { buffering: true, nowMs: 1000 });
+  assert.strictEqual(buf.seek, undefined);
+  assert.strictEqual(buf.speed, undefined);
+
+  // Speed change respects 1000ms cooldown once applied (260ms ahead -> ~0.978x, then 450ms ahead -> ~0.97x)
+  const s1 = v.step(1260, 1000, false, 1, { nowMs: 1000 });
+  assert.ok(s1.speed && s1.speed < 1);
+  const s2 = v.step(1700, 1250, false, s1.speed, { nowMs: 1250 });
+  assert.strictEqual(s2.speed, undefined, 'cooldown suppresses rapid speed change');
+  const s3 = v.step(2550, 2100, false, s1.speed, { nowMs: 2100 });
+  assert.ok(s3.speed !== undefined && s3.speed < s1.speed);
+
+  // Returning back to 1.0x bypasses cooldown cleanly
+  const settle = v.step(2080, 2100, false, s3.speed, { nowMs: 2150 });
+  assert.strictEqual(settle.speed, 1);
+
+  // Seek respects 2500ms cooldown (ahead >= 1500ms triggers hard seek)
+  const k1 = v.step(7000, 5000, false, 1, { nowMs: 5000 });
+  assert.strictEqual(k1.seek, 5000);
+  const k2 = v.step(8000, 6000, false, 1, { nowMs: 6000 });
+  assert.strictEqual(k2.seek, undefined, 'cooldown suppresses back-to-back seek');
+  const k3 = v.step(9600, 7600, false, 1, { nowMs: 7600 });
+  assert.strictEqual(k3.seek, 7600);
+});
+

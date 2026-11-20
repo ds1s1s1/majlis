@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  AudioLines, Camera, Coffee, EyeOff, Gauge, Info, Layers, ListVideo, Lock, Maximize, MessageSquare,
-  MessageSquareQuote, Mic, MicOff, Minimize, Monitor, Pause, PictureInPicture2, Play, RotateCcw,
-  RotateCw, SlidersHorizontal, Subtitles, Tv, Unlock, Users, Volume2, VolumeX, X,
+  AudioLines, Camera, Coffee, EyeOff, Gauge, Layers, ListVideo, Lock, Maximize, MessageSquare,
+  MessageSquareQuote, Mic, MicOff, Minimize, Minus, MoreHorizontal, Pause, PictureInPicture2, Play, Plus, RotateCcw,
+  RotateCw, SlidersHorizontal, Subtitles, Tv, Unlock, Users, Volume1, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { metahub, type DisplayTarget, type PartyNoteItem, type Ranked, type ReadyStateView, type Stream } from '../api';
 import { useHost } from '../host';
@@ -48,6 +48,10 @@ interface PostCreditsInfo { after?: boolean; during?: boolean; resumeAt?: number
 export function TheaterApp() {
   const host = useHost();
   const playbackCfg = useSettingsStore((s) => s.data.playback);
+  const apCfg = useSettingsStore((s) => s.data.appearance);
+  const ctrlCfg = useSettingsStore((s) => s.data.controls);
+  const pl = apCfg.playerLayout;
+  const maxVol = playbackCfg.maxVolumeBoost || 150;
   const [lang, setLang] = useState<Lang>(host?.lang === 'en' ? 'en' : 'ar');
   const [theme, setTheme] = useState(host?.theme || 'majlis');
   const [accent, setAccent] = useState<string | null>(null);
@@ -116,6 +120,10 @@ export function TheaterApp() {
   const [miniToast, setMiniToast] = useState('');
   const [failoverPrompt, setFailoverPrompt] = useState<{ reason: string; candidate: Ranked; autoSwitchSec: number; posMs: number } | null>(null);
   const [volBoostVal, setVolBoostVal] = useState<number | null>(null);
+  const [volUi, setVolUi] = useState<number>(100);
+  const [volMenuOpen, setVolMenuOpen] = useState(false);
+  const [controlsLocked, setControlsLocked] = useState(false);
+  const [drawerFromMore, setDrawerFromMore] = useState(false);
   const [holdSpeed, setHoldSpeed] = useState(false);
 
   const [sources, setSources] = useState<{ streams: Ranked[]; current: Stream | null; loading: boolean }>({ streams: [], current: null, loading: false });
@@ -136,6 +144,7 @@ export function TheaterApp() {
   const [partyNotes, setPartyNotes] = useState<PartyNoteItem[]>([]);
   const [partyQueue, setPartyQueue] = useState<PlayQueueItem[]>(() => usePlayQueueStore.getState().items);
   const [readyState, setReadyState] = useState<ReadyStateView | null>(null);
+  const [myReadyLocal, setMyReadyLocal] = useState(false);
   const [countdownEnd, setCountdownEnd] = useState<number>(0);
   const [countdownNum, setCountdownNum] = useState<number>(0);
   const [catchUp, setCatchUp] = useState<{ active: boolean; speed: number; driftMs: number } | null>(null);
@@ -166,16 +175,43 @@ export function TheaterApp() {
     miniToastTimerRef.current = setTimeout(() => setMiniToast(''), 2200);
   }, []);
 
-  const setVolume = useCallback((next: number) => {
-    const clamped = Math.max(0, Math.min(200, Math.round(next)));
+  const volLockUntilRef = useRef(0);
+  const draggingVolRef = useRef(false);
+  const lastNonZeroVolRef = useRef(100);
+  const maxVolRef = useRef(maxVol);
+  maxVolRef.current = maxVol;
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const volUiRef = useRef(volUi);
+  volUiRef.current = volUi;
+  const playbackPopupRef = useRef(playbackCfg.volumePopup);
+  playbackPopupRef.current = playbackCfg.volumePopup;
+  const autoHideMsRef = useRef(3000);
+  autoHideMsRef.current = Math.max(1500, (pl.autoHideDelaySec || 3) * 1000);
+
+  const setVolume = useCallback((next: number, showPopup = true) => {
+    const cap = maxVolRef.current || 150;
+    const clamped = Math.max(0, Math.min(cap, Math.round(next)));
+    if (clamped > 0) lastNonZeroVolRef.current = clamped;
+    volLockUntilRef.current = Date.now() + 380;
+    setVolUi(clamped);
     cmd('volume', { v: clamped });
-    if (clamped > 100) {
+    if (propsRef.current.mute && clamped > 0) cmd('mute');
+    if (clamped > 100 || (showPopup && playbackPopupRef.current)) {
       setVolBoostVal(clamped);
       if (volBoostTimerRef.current) clearTimeout(volBoostTimerRef.current);
-      volBoostTimerRef.current = setTimeout(() => setVolBoostVal(null), 1500);
-    } else {
-      setVolBoostVal(null);
+      volBoostTimerRef.current = setTimeout(() => setVolBoostVal(null), 1300);
     }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    if (propsRef.current.mute && volUiRef.current <= 0) {
+      const restore = Math.max(10, Math.min(maxVolRef.current || 150, lastNonZeroVolRef.current || 100));
+      volLockUntilRef.current = Date.now() + 380;
+      setVolUi(restore);
+      cmd('volume', { v: restore });
+    }
+    cmd('mute');
   }, []);
 
   const refreshPartyButton = () => api.invoke('party:info').then((r) => r && setPartyInfo(r)).catch(() => {});
@@ -187,16 +223,36 @@ export function TheaterApp() {
   const handleVoiceMode = (mode: 'off' | 'ptt' | 'open') => { (window as any).__majlisVoice?.setMode?.(mode); };
   const handleVoicePtt = (down: boolean) => { (window as any).__majlisVoice?.setPtt?.(down); };
 
-  const wake = (curPause?: boolean, curDrawer?: DrawerKind) => {
-    if (focusModeRef.current) return;
-    setIdle(false);
-    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-    const p = curPause ?? props.pause;
-    const d = curDrawer !== undefined ? curDrawer : drawer;
-    idleTimerRef.current = setTimeout(() => { if (!p && !d) setIdle(true); }, 2800);
-  };
   const focusModeRef = useRef(focusMode);
   focusModeRef.current = focusMode;
+  const pauseRef = useRef(false);
+  pauseRef.current = !!props.pause;
+  const drawerRef = useRef<DrawerKind>(drawer);
+  drawerRef.current = drawer;
+
+  const wake = useCallback((curPause?: boolean, curDrawer?: DrawerKind) => {
+    if (focusModeRef.current) return;
+    setIdle(false);
+    setSkipHidden(false);
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    const p = curPause ?? pauseRef.current;
+    const d = curDrawer !== undefined ? curDrawer : drawerRef.current;
+    idleTimerRef.current = setTimeout(() => { if (!p && !d) setIdle(true); }, autoHideMsRef.current);
+  }, []);
+  const wakeRef = useRef(wake);
+  wakeRef.current = wake;
+
+  useEffect(() => {
+    let lastWakeAt = 0;
+    const onPointerMove = () => {
+      const nowTs = Date.now();
+      if (nowTs - lastWakeAt < 120) return;
+      lastWakeAt = nowTs;
+      wakeRef.current?.();
+    };
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    return () => window.removeEventListener('pointermove', onPointerMove);
+  }, []);
 
   useEffect(() => {
     const syncVoice = (ev?: Event) => {
@@ -247,13 +303,13 @@ export function TheaterApp() {
     return () => clearInterval(iv);
   }, [countdownEnd]);
 
-  const needCountdown = !!brbState?.active || partyState?.reason === 'buffering';
+  const needCountdown = (isFullscreen && pl.fullscreenClock) || !!brbState?.active || partyState?.reason === 'buffering';
   useEffect(() => {
     if (!needCountdown) return;
     setNowMs(Date.now());
-    const id = setInterval(() => setNowMs(Date.now()), 500);
+    const id = setInterval(() => setNowMs(Date.now()), (brbState?.active || partyState?.reason === 'buffering') ? 500 : 10000);
     return () => clearInterval(id);
-  }, [needCountdown]);
+  }, [needCountdown, brbState?.active, partyState?.reason]);
 
   useEffect(() => {
     const el = shellRef.current;
@@ -347,6 +403,11 @@ export function TheaterApp() {
       if (st.multiEp) setMultiEp(st.multiEp);
       if (st.postCredits) setPostCredits(st.postCredits);
       if (st.loadedSubMap) setLoadedSubMap(st.loadedSubMap);
+      if (Array.isArray(st.skips)) setSkips(st.skips);
+      if (typeof st.volume === 'number') {
+        if (st.volume > 0) lastNonZeroVolRef.current = st.volume;
+        setVolUi(Math.max(0, Math.min(maxVolRef.current || 150, st.volume)));
+      }
       if (Array.isArray(st.bookmarks)) setBookmarks(st.bookmarks);
       if (st.aspect) setAspect(st.aspect);
       if (st.toneMapping) setTone(st.toneMapping);
@@ -366,6 +427,12 @@ export function TheaterApp() {
     const off = api.on((m) => {
       if (m.type === 'player') {
         setProps((prev) => ({ ...prev, [m.name]: m.value }));
+        if (m.name === 'volume' && typeof m.value === 'number') {
+          if (m.value > 0) lastNonZeroVolRef.current = m.value;
+          if (!draggingVolRef.current && Date.now() > volLockUntilRef.current) {
+            setVolUi(Math.max(0, Math.min(maxVolRef.current || 150, m.value)));
+          }
+        }
         if (m.name === 'time-pos' && typeof m.value === 'number' && m.value > 0.01) {
           setHasFirstFrame(true);
           setErrorInfo(null);
@@ -461,9 +528,19 @@ export function TheaterApp() {
         }
         else if (m.text) showMiniToast(String(m.text));
       } else if (m.type === 'mini') {
-        setMiniOn(!!m.on);
-        if (m.on) { setDrawer(null); setFocusMode(false); }
-        else setPipLocked(false);
+        const on = !!m.on;
+        setMiniOn(on);
+        setTip(null);
+        if (on) {
+          setDrawer(null);
+          setFocusMode(false);
+        } else {
+          setPipLocked(false);
+          setFocusMode(false);
+          setDrawer(null);
+          if (typeof m.isFullscreen === 'boolean') setIsFullscreen(m.isFullscreen);
+          wakeRef.current?.(false, null);
+        }
       } else if (m.type === 'bookmarks') {
         setBookmarks(Array.isArray(m.list) ? m.list : []);
       } else if (m.type === 'next-meta') {
@@ -480,6 +557,7 @@ export function TheaterApp() {
       } else if (m.type === 'party-catchup') {
         setCatchUp(m.active ? { active: true, speed: Number(m.speed) || 1.15, driftMs: Number(m.driftMs) || 0 } : null);
       } else if (m.type === 'party-ready') {
+        if (m.prompt) setMyReadyLocal(false);
         setReadyState((prev) => ({
           active: m.active !== undefined ? !!m.active : !!prev?.active,
           hostReady: m.hostReady ?? prev?.hostReady,
@@ -488,6 +566,7 @@ export function TheaterApp() {
         }));
         if (m.active || m.prompt) playSfx('ready');
       } else if (m.type === 'party-countdown') {
+        setMyReadyLocal(false);
         setReadyState(null);
         const startAt = Number(m.startAt) || (Date.now() + (Number(m.ms) || 3000));
         setCountdownEnd(startAt);
@@ -579,21 +658,31 @@ export function TheaterApp() {
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === 'Enter' && !drawer && !miniOn && activeSkipRef.current) {
+        e.preventDefault();
+        const sk = activeSkipRef.current;
+        cmd('seek', { to: sk.to, abs: true });
+        setSkipHidden(true);
+        showMiniToast(translate(langRef.current, 'th_skip_done', { s: translate(langRef.current, sk.labelKey) }));
+        return;
+      }
       wake();
       if (e.code === 'Space' && !e.repeat) {
         e.preventDefault();
         spaceTimer = setTimeout(() => { holdingSpace = true; setHoldSpeed(true); cmd('speed', { v: 2 }); }, 280);
         return;
       }
+      const backSec = ctrlCfg.seekBackSec || 10;
+      const fwdSec = ctrlCfg.seekFwdSec || 10;
       switch (e.key.toLowerCase()) {
         case 'k': e.preventDefault(); cmd('toggle'); break;
-        case 'arrowleft': e.preventDefault(); flashSeek(lang === 'ar' ? '+10s' : '−10s'); cmd('seek', { to: lang === 'ar' ? 10 : -10 }); break;
-        case 'arrowright': e.preventDefault(); flashSeek(lang === 'ar' ? '−10s' : '+10s'); cmd('seek', { to: lang === 'ar' ? -10 : 10 }); break;
-        case 'j': flashSeek('−10s'); cmd('seek', { to: -10 }); break;
-        case 'l': flashSeek('+10s'); cmd('seek', { to: 10 }); break;
-        case 'arrowup': e.preventDefault(); setVolume((props.volume ?? 100) + 10); break;
-        case 'arrowdown': e.preventDefault(); setVolume((props.volume ?? 100) - 10); break;
-        case 'm': cmd('mute'); break;
+        case 'arrowleft': e.preventDefault(); flashSeek(lang === 'ar' ? `+${fwdSec}s` : `−${backSec}s`); cmd('seek', { to: lang === 'ar' ? fwdSec : -backSec }); break;
+        case 'arrowright': e.preventDefault(); flashSeek(lang === 'ar' ? `−${backSec}s` : `+${fwdSec}s`); cmd('seek', { to: lang === 'ar' ? -backSec : fwdSec }); break;
+        case 'j': flashSeek(`−${backSec}s`); cmd('seek', { to: -backSec }); break;
+        case 'l': flashSeek(`+${fwdSec}s`); cmd('seek', { to: fwdSec }); break;
+        case 'arrowup': e.preventDefault(); setVolume(volUiRef.current + 5, true); break;
+        case 'arrowdown': e.preventDefault(); setVolume(volUiRef.current - 5, true); break;
+        case 'm': toggleMute(); break;
         case 'f': cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {}); break;
         case 'p': api.invoke('mini').catch(() => {}); break;
         case 'i': setStatsOpen((x) => !x); break;
@@ -620,6 +709,9 @@ export function TheaterApp() {
           if (focusModeRef.current) { setFocusMode(false); setIdle(false); }
           else if (drawer) setDrawer(null);
           else if (miniOn) api.invoke('mini').catch(() => {});
+          else if (isFullscreen && ctrlCfg.escExitsFullscreenFirst) {
+            cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {});
+          }
           else cmd('close');
           break;
       }
@@ -639,15 +731,23 @@ export function TheaterApp() {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
-  }, [lang, drawer, card.type, props.volume, shotWithSubs, miniOn, setVolume]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lang, drawer, card.type, shotWithSubs, miniOn, isFullscreen, setVolume, toggleMute, ctrlCfg.seekBackSec, ctrlCfg.seekFwdSec, ctrlCfg.escExitsFullscreenFirst]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const flashSeek = (label: string) => {
     setSeekFlash(label);
     setTimeout(() => setSeekFlash((cur) => (cur === label ? '' : cur)), 650);
   };
 
-  const openDrawer = async (next: DrawerKind) => {
-    if (drawer === next) { setDrawer(null); return; }
+  const triggerWhatSaid = useCallback(async () => {
+    const s = await cmd('sub-text').catch(() => '');
+    setSaidText(s || t('th_said_none'));
+    setTimeout(() => setSaidText(''), 4200);
+  }, [t]);
+
+  const openDrawer = async (next: DrawerKind, fromMore = false) => {
+    setVolMenuOpen(false);
+    if (drawer === next) { setDrawer(null); setDrawerFromMore(false); return; }
+    setDrawerFromMore(fromMore && (next === 'sources' || next === 'episodes' || next === 'chapters'));
     setDrawer(next);
     wake(undefined, next);
     if (next === 'sources') {
@@ -669,6 +769,9 @@ export function TheaterApp() {
       if (Array.isArray(bms)) setBookmarks(bms);
     } else if (next === 'video') {
       cmd('displays').then((d) => Array.isArray(d) && setDisplays(d)).catch(() => {});
+    } else if (next === 'more') {
+      cmd('displays').then((d) => Array.isArray(d) && setDisplays(d)).catch(() => {});
+      cmd('bookmark-list').then((bms) => Array.isArray(bms) && setBookmarks(bms)).catch(() => {});
     }
   };
 
@@ -751,6 +854,8 @@ export function TheaterApp() {
     }
     return null;
   }, [skips, pos, dur, card.type, chapters, curChapIdx]);
+  const activeSkipRef = useRef(activeSkip);
+  activeSkipRef.current = activeSkip;
 
   useEffect(() => {
     if (!hasFirstFrame || !activeSkip || partyState?.role === 'guest' || miniOn) return;
@@ -799,6 +904,7 @@ export function TheaterApp() {
     const r = seekRef.current.getBoundingClientRect();
     setHoverSec(sec);
     setHoverX(Math.max(88, Math.min(r.width - 88, e.clientX - r.left)));
+    if (!pl.hoverThumbPreview) { setHoverThumb(null); return; }
     const cached = thumbsRef.current.get(bucket);
     if (cached) { setHoverThumb(cached); return; }
     setHoverThumb(null);
@@ -816,20 +922,27 @@ export function TheaterApp() {
   const onWheel = (e: React.WheelEvent) => {
     if (drawer) return;
     wake();
-    if (e.ctrlKey || e.altKey) {
-      const delta = e.deltaY < 0 ? 6 : -6;
-      setVolume((props.volume ?? 100) + delta);
-    } else if (dur > 0) {
-      const s = e.deltaY < 0 ? 5 : -5;
-      flashSeek(s > 0 ? '+5s' : '−5s');
-      cmd('seek', { to: s });
+    if (e.shiftKey) {
+      if (dur > 0) {
+        const s = e.deltaY < 0 ? 5 : -5;
+        flashSeek(s > 0 ? '+5s' : '−5s');
+        cmd('seek', { to: s });
+      }
+    } else {
+      const delta = e.deltaY < 0 ? 5 : -5;
+      setVolume(volUiRef.current + delta, true);
     }
   };
 
   const displayTitle = useMemo(() => {
     const clean = (s?: string) => (s && !RAW_ID_RE.test(s.trim()) ? s.trim() : '');
-    return clean(card.name) || clean(card.seriesName) || t('playing');
-  }, [card.name, card.seriesName, t]);
+    const main = clean(card.name);
+    const ser = clean(card.seriesName);
+    if (apCfg.seriesNameFirstPlayer && ser && main && !main.startsWith(ser)) {
+      return `${ser} · ${main}`;
+    }
+    return main || ser || t('playing');
+  }, [card.name, card.seriesName, apCfg.seriesNameFirstPlayer, t]);
 
   const bgUrl = card.background || (card.metaId ? metahub('background', card.metaId, 'large') : null) || card.poster;
   const logoUrl = card.logo || (card.metaId ? metahub('logo', card.metaId, 'large') : null);
@@ -957,20 +1070,25 @@ export function TheaterApp() {
       {/* 0b. Subtle Top Window Drag Handle when HUD auto-hides (or full drag surface in PiP mini-player) */}
       {miniOn ? (
         <>
-          <div onDoubleClick={() => api.invoke('mini').catch(() => {})} className="app-drag absolute inset-0 z-20" />
+          <div onDoubleClick={() => api.invoke('mini', false).catch(() => {})} className="app-drag absolute inset-0 z-20" />
           <div className="pointer-events-none absolute inset-0 z-30 flex flex-col justify-between bg-gradient-to-t from-black/80 via-transparent to-black/70 p-2.5 opacity-0 transition-opacity group-hover/pip:opacity-100">
             <div className="flex items-center justify-between gap-2">
               <span dir="auto" className="truncate text-[11px] font-bold text-fg drop-shadow">{displayTitle}</span>
               <div className="app-no-drag pointer-events-auto flex items-center gap-1">
                 <button
+                  onMouseDown={(e) => e.stopPropagation()}
                   onClick={() => { const next = !pipLocked; setPipLocked(next); cmd('pip-lock', { locked: next }).catch(() => {}); }}
                   data-tip={t(pipLocked ? 'th_pip_unlock' : 'th_pip_lock')}
                   className={`grid size-6 place-items-center rounded-full ${pipLocked ? 'bg-acc text-acc-ink' : 'bg-white/15 text-fg hover:bg-white/25'}`}
                 >
                   {pipLocked ? <Lock size={11} strokeWidth={2} /> : <Unlock size={11} strokeWidth={2} />}
                 </button>
-                <button onClick={() => api.invoke('mini').catch(() => {})} data-tip={t('th_pip_return')}
-                  className="rounded-full bg-white/15 px-2.5 py-1 text-[10.5px] font-semibold text-fg hover:bg-acc hover:text-acc-ink">
+                <button
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); api.invoke('mini', false).catch(() => {}); }}
+                  data-tip={t('th_pip_return')}
+                  className="rounded-full bg-white/15 px-2.5 py-1 text-[10.5px] font-semibold text-fg hover:bg-acc hover:text-acc-ink"
+                >
                   {t('th_pip_return')}
                 </button>
                 <button onClick={() => cmd('close')} data-tip={t('th_close_player')}
@@ -1060,9 +1178,18 @@ export function TheaterApp() {
 
       {/* 3. Transparent Video Click Surface */}
       {!miniOn ? (
-        <div onClick={() => (drawer ? setDrawer(null) : cmd('toggle'))}
-          onDoubleClick={() => cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {})}
-          className="absolute inset-0 z-10" />
+        <div
+          onClick={() => {
+            if (controlsLocked) { wake(); showMiniToast(t('th_controls_locked_hint')); return; }
+            if (drawer) setDrawer(null);
+            else cmd('toggle');
+          }}
+          onDoubleClick={() => {
+            if (controlsLocked) { wake(); showMiniToast(t('th_controls_locked_hint')); return; }
+            cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {});
+          }}
+          className="absolute inset-0 z-10"
+        />
       ) : null}
 
       {/* 3b. Subtle Pause Metadata Overlay */}
@@ -1085,8 +1212,14 @@ export function TheaterApp() {
         </div>
       ) : null}
       {volBoostVal != null ? (
-        <div className="pointer-events-none absolute start-1/2 top-16 z-30 -translate-x-1/2 rounded-full bg-black/80 px-4 py-1.5 text-xs font-bold text-acc ring-1 ring-acc/50 shadow-xl backdrop-blur-xl fade-in">
-          🔊 {t('th_vol_boost', { v: volBoostVal })}
+        <div className={`pointer-events-none fixed top-16 z-30 rounded-full bg-black/82 px-4 py-1.5 text-xs font-bold ring-1 shadow-xl backdrop-blur-xl fade-in ${
+          playbackCfg.volumePopupPos === 'top-left'
+            ? 'left-6'
+            : playbackCfg.volumePopupPos === 'top-right'
+              ? 'right-6'
+              : 'start-1/2 -translate-x-1/2 rtl:translate-x-1/2'
+        } ${volBoostVal > 100 ? 'text-acc ring-acc/50' : 'text-fg ring-white/25'}`}>
+          🔊 {volBoostVal > 100 ? t('th_vol_boost', { v: volBoostVal }) : `${Math.round(volBoostVal)}%`}
         </div>
       ) : miniToast ? (
         <div className="pointer-events-none absolute start-1/2 top-16 z-30 -translate-x-1/2 rounded-full bg-black/80 px-4 py-1.5 text-xs font-semibold text-fg ring-1 ring-white/20 shadow-xl backdrop-blur-xl fade-in">
@@ -1174,27 +1307,40 @@ export function TheaterApp() {
       ) : null}
 
       {/* Ready Check Banner */}
-      {!miniOn && !focusMode && (readyState?.active || readyState?.prompt) ? (
-        <div className="pointer-events-auto absolute start-1/2 top-20 z-30 flex max-w-[92vw] -translate-x-1/2 flex-wrap items-center gap-2.5 rounded-2xl bg-[#0e0d0c]/94 px-4 py-2.5 text-xs ring-1 ring-acc/50 shadow-2xl backdrop-blur-xl fade-in">
-          <span className="font-bold text-fg">{t('party_ready_prompt')}</span>
-          {(readyState.peers || []).map((rp) => (
-            <span key={rp.id} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${rp.ready ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/40' : 'bg-white/10 text-fg3'}`}>
-              {rp.name} {rp.ready ? '✓' : '…'}
-            </span>
-          ))}
-          <button
-            onClick={() => { cmd('party-ready-ack', { on: true }); setReadyState((s) => s ? { ...s, prompt: false } : null); }}
-            className="rounded-full bg-acc px-3 py-1 text-[11px] font-bold text-acc-ink hover:brightness-110"
-          >
-            {t('party_ready_yes')} ✓
-          </button>
-          {partyState?.role === 'host' ? (
-            <button onClick={() => cmd('party-countdown', { ms: 3000 })} className="rounded-full bg-white/15 px-3 py-1 text-[11px] font-bold text-fg hover:bg-white/25">
-              3-2-1
+      {!miniOn && !focusMode && (readyState?.active || readyState?.prompt) ? (() => {
+        const isHostRole = partyState?.role === 'host';
+        const isMeReady = isHostRole ? !!readyState?.hostReady : myReadyLocal;
+        return (
+          <div data-testid="th-ready-banner" className="pointer-events-auto absolute start-1/2 top-20 z-[35] flex max-w-[92vw] -translate-x-1/2 flex-wrap items-center gap-2.5 rounded-2xl bg-[#0e0d0c]/94 px-4 py-2.5 text-xs ring-1 ring-acc/50 shadow-2xl backdrop-blur-xl fade-in">
+            <span className="font-bold text-fg">{t('party_ready_prompt')}</span>
+            {(readyState.peers || []).map((rp) => (
+              <span key={rp.id} className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${rp.ready ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/40' : 'bg-white/10 text-fg3'}`}>
+                {rp.name} {rp.ready ? '✓' : '…'}
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isMeReady;
+                if (!isHostRole) setMyReadyLocal(next);
+                cmd('party-ready-ack', { on: next });
+              }}
+              className={`rounded-full px-3.5 py-1 text-[11px] font-bold transition ${
+                isMeReady
+                  ? 'bg-emerald-500 text-black ring-1 ring-emerald-300'
+                  : 'bg-acc text-acc-ink hover:brightness-110'
+              }`}
+            >
+              {isMeReady ? t('party_ready_toggle_on') : `${t('party_ready_yes')} ✓`}
             </button>
-          ) : null}
-        </div>
-      ) : null}
+            {isHostRole ? (
+              <button onClick={() => cmd('party-countdown', { ms: 3000 })} className="rounded-full bg-white/15 px-3 py-1 text-[11px] font-bold text-fg hover:bg-white/25">
+                3-2-1
+              </button>
+            ) : null}
+          </div>
+        );
+      })() : null}
 
       {/* 4b. Persistent Watch Party Overlays (Who's Buffering, BRB Pause, Post-Credits 1–10 Rating) */}
       {!miniOn && partyState?.reason === 'buffering' && !brbState?.active && waitingNames ? (
@@ -1299,7 +1445,7 @@ export function TheaterApp() {
         </div>
       ) : null}
 
-      {/* 6. Proportional Top Glass Bar */}
+      {/* 6. Proportional Decluttered Top Glass Bar */}
       {!miniOn && !focusMode ? (
         <header
           onDoubleClick={(e) => { if (e.target === e.currentTarget && !isFullscreen) api.invoke('win:maximize').catch(() => {}); }}
@@ -1309,7 +1455,14 @@ export function TheaterApp() {
             <X size={19} strokeWidth={2} />
           </button>
           <div className="min-w-0">
-            <div dir="auto" className="truncate text-[clamp(15px,1.3vw,22px)] font-bold leading-snug drop-shadow">{displayTitle}</div>
+            {apCfg.useTitleArtworkPlayer && logoUrl ? (
+              <div className="flex items-center gap-2.5">
+                <Img srcs={[logoUrl]} alt={displayTitle} className="max-h-[clamp(28px,3.2vh,44px)] max-w-[clamp(120px,16vw,220px)] object-contain drop-shadow" />
+                <span dir="auto" className="truncate font-semibold text-fg2" style={{ fontSize: `calc(clamp(13px,1vw,16px) * ${(apCfg.playerTitleSizePct || 100) / 100})` }}>{displayTitle}</span>
+              </div>
+            ) : (
+              <div dir="auto" className="truncate font-bold leading-snug drop-shadow" style={{ fontSize: `calc(clamp(15px,1.3vw,22px) * ${(apCfg.playerTitleSizePct || 100) / 100})` }}>{displayTitle}</div>
+            )}
             <div className="flex flex-wrap items-center gap-2 text-[clamp(11px,0.85vw,13px)] text-fg2">
               {resTag ? <span dir="ltr" className="rounded bg-white/15 px-1.5 py-0.5 font-mono font-semibold">{resTag}</span> : null}
               {hwTag ? <span dir="ltr" className="rounded bg-white/15 px-1.5 py-0.5 font-mono">{hwTag}</span> : null}
@@ -1321,6 +1474,11 @@ export function TheaterApp() {
             </div>
           </div>
           <span className="flex-1" />
+          {isFullscreen && pl.fullscreenClock ? (
+            <span dir="ltr" data-testid="th-fs-clock" className="rounded-full bg-black/50 px-3 py-1 font-mono text-[clamp(11.5px,0.88vw,13.5px)] font-semibold text-fg ring-1 ring-white/15 backdrop-blur-xl">
+              {fmtLocaleTime(nowMs, lang, { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          ) : null}
           {!compactW && partyState?.peers?.length ? (
             <div className="app-no-drag flex flex-wrap items-center gap-1.5">
               {(partyState.peers || []).map((p) => (
@@ -1364,31 +1522,12 @@ export function TheaterApp() {
               <MessageSquare size={17} strokeWidth={2} />
             </button>
           ) : null}
-          {displays.length > 1 ? (
-            <button
-              onClick={async () => {
-                const cur = Math.max(0, displays.findIndex((d) => d.current));
-                const nxt = displays[(cur + 1) % displays.length];
-                await handlePopoverCmd('move-display', { displayId: nxt?.id });
-              }}
-              data-tip={t('th_move_display')}
-              className="app-no-drag grid size-[clamp(36px,2.7vw,46px)] flex-none place-items-center rounded-full bg-black/50 text-[#f5efe6] ring-1 ring-white/20 backdrop-blur-xl hover:bg-white/20 hover:text-acc"
-            >
-              <Monitor size={17} strokeWidth={2} />
-            </button>
-          ) : null}
-          <button onClick={() => { setFocusMode(true); setDrawer(null); setIdle(true); showMiniToast(t('th_focus_hint')); }} data-tip={t('th_focus_mode')} className="app-no-drag grid size-[clamp(36px,2.7vw,46px)] flex-none place-items-center rounded-full bg-black/50 text-[#f5efe6] ring-1 ring-white/20 backdrop-blur-xl hover:bg-white/20 hover:text-acc">
-            <EyeOff size={17} strokeWidth={2} />
-          </button>
-          <button onClick={() => setStatsOpen((s) => !s)} data-tip={t('th_stats_shortcut')} className={`app-no-drag grid size-[clamp(36px,2.7vw,46px)] flex-none place-items-center rounded-full backdrop-blur-xl ring-1 ${statsOpen ? 'bg-acc text-acc-ink ring-acc' : 'bg-black/50 text-[#f5efe6] ring-white/20 hover:bg-white/20 hover:text-acc'}`}>
-            <Info size={17} strokeWidth={2} />
-          </button>
         </header>
       ) : null}
 
-      {/* 7. Skip Intro Pill + Final 20s Next Episode Countdown Card */}
+      {/* 7. Skip Intro Pill + Final 20s Next Episode Countdown Card (clear of footer gradient) */}
       {!miniOn && !focusMode ? (
-        <div className="pointer-events-none absolute bottom-[clamp(90px,9.2vh,126px)] end-[clamp(18px,2vw,32px)] z-20 flex flex-col items-end gap-2.5">
+        <div className="pointer-events-none absolute bottom-[clamp(112px,12vh,148px)] end-[clamp(18px,2vw,32px)] z-[25] flex flex-col items-end gap-2.5">
           {showNextCountdown ? (
             <div className="pointer-events-auto w-[min(320px,84vw)] overflow-hidden rounded-2xl bg-[#0e0d0c]/95 p-3 ring-1 ring-white/20 shadow-2xl backdrop-blur-2xl fade-in">
               <div className="flex items-center gap-3">
@@ -1422,9 +1561,17 @@ export function TheaterApp() {
           ) : null}
           <div className="flex gap-2.5">
             {activeSkip != null && playbackCfg.showSkipButton && !skipHidden ? (
-              <button onClick={() => cmd('seek', { to: activeSkip.to, abs: true })}
-                className="pointer-events-auto rounded-full bg-white/95 px-[clamp(14px,1.1vw,20px)] py-[clamp(8px,0.75vh,12px)] text-[clamp(13px,0.95vw,16px)] font-bold text-black shadow-xl transition hover:scale-105 hover:bg-acc hover:text-acc-ink">
-                {t(activeSkip.labelKey)}
+              <button
+                data-testid="th-skip-btn"
+                onClick={() => {
+                  cmd('seek', { to: activeSkip.to, abs: true });
+                  setSkipHidden(true);
+                  showMiniToast(t('th_skip_done', { s: t(activeSkip.labelKey) }));
+                }}
+                className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-white/95 px-[clamp(14px,1.1vw,20px)] py-[clamp(8px,0.75vh,12px)] text-[clamp(13px,0.95vw,16px)] font-bold text-black shadow-xl transition hover:scale-105 hover:bg-acc hover:text-acc-ink"
+              >
+                <span>{t(activeSkip.labelKey)}</span>
+                <kbd dir="ltr" className="rounded bg-black/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-black/75">Enter</kbd>
               </button>
             ) : null}
             {showNextEpPill ? (
@@ -1437,114 +1584,179 @@ export function TheaterApp() {
         </div>
       ) : null}
 
-      {/* 8. Proportional Bottom Control Dock */}
-      {!miniOn && !focusMode ? (
-        <footer className={`shade-b absolute inset-x-0 bottom-0 z-20 px-[clamp(18px,2.4vw,40px)] pb-[clamp(16px,2.2vh,32px)] pt-[clamp(36px,5vh,64px)] transition-opacity duration-300 ${idle && !drawer ? 'pointer-events-none opacity-0' : 'opacity-100'}`}>
-          <div ref={seekRef} onMouseMove={onSeekMove} onMouseLeave={() => { setHoverSec(null); setHoverThumb(null); }}
-            onClick={(e) => dur && cmd('seek', { to: seekAt(e.clientX), abs: true })}
-            className="group/seek relative mb-[clamp(8px,1vh,14px)] flex h-[clamp(22px,2vh,30px)] cursor-pointer items-center">
-            <div className="relative h-[clamp(5px,0.55vh,8px)] w-full overflow-hidden rounded-full bg-white/25 transition-all group-hover/seek:h-[clamp(8px,0.8vh,11px)]">
-              <div className="absolute inset-y-0 start-0 bg-white/35" style={{ width: `${cacheEnd}%` }} />
-              {dur > 0 && skips.map((s, idx) => {
-                const startPct = Math.max(0, Math.min(100, (s.start / dur) * 100));
-                const endPct = Math.max(startPct, Math.min(100, (s.end / dur) * 100));
-                const cls = s.kind === 'recap' ? 'bg-sky-400/60' : s.kind === 'ed' ? 'bg-purple-400/60' : 'bg-amber-300/75';
-                return <span key={`seg-${idx}`} className={`pointer-events-none absolute inset-y-0 ${cls}`} style={{ insetInlineStart: `${startPct}%`, width: `${Math.max(0.4, endPct - startPct)}%` }} />;
-              })}
-              <div className="absolute inset-y-0 start-0 bg-acc" style={{ width: `${pct}%` }} />
-              {chapters.map((c, idx) => dur ? (
-                <span key={`ch-${idx}`} className="absolute inset-y-0 w-[2px] bg-black/75" style={{ insetInlineStart: `${(c.time / dur) * 100}%` }} />
+      {/* 8. Control Lock Pill OR Proportional Bottom Control Dock */}
+      {!miniOn && !focusMode && controlsLocked ? (
+        <div className={`fixed bottom-6 start-1/2 z-40 -translate-x-1/2 transition-opacity duration-200 ${idle ? 'opacity-30' : 'opacity-100'}`}>
+          <button
+            data-testid="th-unlock-btn"
+            onClick={() => setControlsLocked(false)}
+            className="inline-flex items-center gap-2 rounded-full bg-black/82 px-4 py-2 text-xs font-bold text-acc ring-1 ring-acc/50 shadow-2xl backdrop-blur-xl hover:bg-acc hover:text-acc-ink"
+          >
+            <Lock size={14} strokeWidth={2} />
+            <span>{t('th_unlock_controls')}</span>
+          </button>
+        </div>
+      ) : !miniOn && !focusMode ? (() => {
+        const hudScale = pl.hudScale || 'default';
+        const visibleSet = new Set(pl.visibleControls?.length ? pl.visibleControls : ['play', 'time', 'volume', 'subtitles', 'audio', 'more', 'pip', 'fullscreen']);
+        const hasCtrl = (id: string) => visibleSet.has(id);
+        const dockPad = hudScale === 'compact'
+          ? 'px-[clamp(14px,1.8vw,28px)] pb-[clamp(10px,1.4vh,20px)] pt-[clamp(24px,3.2vh,40px)]'
+          : hudScale === 'spacious'
+            ? 'px-[clamp(22px,2.8vw,46px)] pb-[clamp(20px,2.8vh,38px)] pt-[clamp(42px,5.8vh,72px)]'
+            : 'px-[clamp(18px,2.4vw,40px)] pb-[clamp(16px,2.2vh,32px)] pt-[clamp(36px,5vh,64px)]';
+        const rowGap = hudScale === 'compact' ? 'gap-[clamp(2px,0.3vw,5px)]' : hudScale === 'spacious' ? 'gap-[clamp(5px,0.65vw,11px)]' : 'gap-[clamp(3px,0.45vw,8px)]';
+        const seekBaseH = Math.max(2, Math.min(12, pl.seekStyle === 'pinstripe' ? Math.min(4, pl.seekHeightPx || 2) : (pl.seekHeightPx || 4)));
+        const seekColor = pl.seekColor || '#E5A93C';
+        const dotSize = Math.max(8, Math.min(22, pl.seekDotSizePx || 14));
+        const dotCls = pl.seekDotShape === 'square' ? 'rounded-[3px]' : pl.seekDotShape === 'custom' ? 'rounded-[3px] rotate-45' : 'rounded-full';
+        const backSec = ctrlCfg.seekBackSec || 10;
+        const fwdSec = ctrlCfg.seekFwdSec || 10;
+        const timeText = pl.timeFormat === 'elapsed-only'
+          ? fmtTime(pos)
+          : pl.timeFormat === 'elapsed-remaining' && dur > 0
+            ? `${fmtTime(pos)} / -${fmtTime(Math.max(0, dur - pos))}`
+            : `${showRemaining && dur > 0 ? `-${fmtTime(Math.max(0, dur - pos))}` : fmtTime(pos)} / ${fmtTime(dur)}`;
+        return (
+          <footer
+            data-hud-scale={hudScale}
+            className={`shade-b pointer-events-none absolute inset-x-0 bottom-0 z-[35] transition-opacity duration-300 ${dockPad} ${idle && !drawer ? 'opacity-0' : 'opacity-100'}`}
+          >
+            <div ref={seekRef} onMouseMove={onSeekMove} onMouseLeave={() => { setHoverSec(null); setHoverThumb(null); }}
+              onClick={(e) => dur && cmd('seek', { to: seekAt(e.clientX), abs: true })}
+              data-testid="th-seek-bar"
+              className={`group/seek relative mb-[clamp(8px,1vh,14px)] flex h-[clamp(22px,2vh,30px)] cursor-pointer items-center ${idle && !drawer ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+              <div
+                className="relative w-full overflow-hidden rounded-full bg-white/25 transition-all"
+                style={{ height: `${seekBaseH}px` }}
+              >
+                {pl.bufferFill !== false ? (
+                  <div className="absolute inset-y-0 start-0 bg-white" style={{ width: `${cacheEnd}%`, opacity: (pl.bufferBrightnessPct ?? 35) / 100 }} />
+                ) : null}
+                {dur > 0 && skips.map((s, idx) => {
+                  const startPct = Math.max(0, Math.min(100, (s.start / dur) * 100));
+                  const endPct = Math.max(startPct, Math.min(100, (s.end / dur) * 100));
+                  const cls = s.kind === 'recap' ? 'bg-sky-400/60' : s.kind === 'ed' ? 'bg-purple-400/60' : 'bg-amber-300/75';
+                  return <span key={`seg-${idx}`} className={`pointer-events-none absolute inset-y-0 ${cls}`} style={{ insetInlineStart: `${startPct}%`, width: `${Math.max(0.4, endPct - startPct)}%` }} />;
+                })}
+                <div className="absolute inset-y-0 start-0" style={{ width: `${pct}%`, background: seekColor }} />
+                {chapters.map((c, idx) => dur ? (
+                  <span key={`ch-${idx}`} className="absolute inset-y-0 w-[2px] bg-black/75" style={{ insetInlineStart: `${(c.time / dur) * 100}%` }} />
+                ) : null)}
+                {dur > 0 && postCredits?.resumeAt ? (
+                  <span className="pointer-events-none absolute top-1/2 size-2 -translate-y-1/2 rounded-full bg-emerald-400 ring-1 ring-black/80" style={{ insetInlineStart: `${Math.min(99.5, (postCredits.resumeAt / dur) * 100)}%` }} />
+                ) : null}
+              </div>
+              {bookmarks.map((bm) => dur ? (
+                <button
+                  key={bm.id}
+                  onClick={(e) => { e.stopPropagation(); cmd('seek', { to: bm.t, abs: true }); }}
+                  data-tip={`${bm.label || t('th_bookmarks')} · ${fmtTime(bm.t)}`}
+                  style={{ insetInlineStart: `${Math.max(0.5, Math.min(99.5, (bm.t / dur) * 100))}%` }}
+                  className="absolute top-1/2 size-2.5 -translate-x-1/2 rtl:translate-x-1/2 -translate-y-1/2 rotate-45 bg-acc ring-2 ring-black/70 transition hover:scale-150"
+                />
               ) : null)}
-              {dur > 0 && postCredits?.resumeAt ? (
-                <span className="pointer-events-none absolute top-1/2 size-2 -translate-y-1/2 rounded-full bg-emerald-400 ring-1 ring-black/80" style={{ insetInlineStart: `${Math.min(99.5, (postCredits.resumeAt / dur) * 100)}%` }} />
-              ) : null}
+              {partyNotes.map((pn) => dur ? (
+                <button
+                  key={pn.id}
+                  onClick={(e) => { e.stopPropagation(); cmd('seek', { to: pn.t, abs: true }); }}
+                  data-tip={`${pn.authorName}: ${pn.text} · ${fmtTime(pn.t)}`}
+                  style={{ insetInlineStart: `${Math.max(0.5, Math.min(99.5, (pn.t / dur) * 100))}%`, background: pn.accent || '#38bdf8' }}
+                  className="absolute top-1/2 size-2.5 -translate-x-1/2 rtl:translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-black/75 transition hover:scale-150"
+                />
+              ) : null)}
+              <div
+                data-testid="th-seek-dot"
+                className={`pointer-events-none absolute -translate-x-1/2 rtl:translate-x-1/2 shadow ring-4 ring-white/20 transition ${dotCls} ${pl.revealDotHover !== false ? 'opacity-0 group-hover/seek:opacity-100' : 'opacity-100'}`}
+                style={{ insetInlineStart: `${pct}%`, width: `${dotSize}px`, height: `${dotSize}px`, background: seekColor }}
+              />
+              {hoverSec != null ? (() => {
+                const skHit = skips.find((s) => hoverSec >= s.start && hoverSec <= s.end);
+                let chHit = '';
+                for (let i = chapters.length - 1; i >= 0; i--) {
+                  if (hoverSec >= (chapters[i]?.time || 0)) { chHit = chapters[i]?.title || ''; break; }
+                }
+                const segLabel = skHit
+                  ? t(skHit.kind === 'recap' ? 'th_seg_recap' : skHit.kind === 'ed' ? 'th_seg_credits' : 'th_seg_intro')
+                  : chHit;
+                return (
+                  <div style={{ left: hoverX }} className="pointer-events-none absolute bottom-8 -translate-x-1/2 overflow-hidden rounded-xl bg-black/92 p-1.5 text-center ring-1 ring-white/20 shadow-2xl">
+                    {pl.hoverThumbPreview !== false && hoverThumb ? <img src={hoverThumb} alt="" className="mb-1.5 h-24 w-44 rounded-lg object-cover" /> : null}
+                    <div dir="ltr" className="font-mono text-[clamp(12px,0.9vw,14px)] font-semibold text-fg">{fmtTime(hoverSec)}</div>
+                    {segLabel ? <div dir="auto" className="mt-0.5 max-w-[176px] truncate text-[10.5px] font-medium text-acc">{segLabel}</div> : null}
+                  </div>
+                );
+              })() : null}
             </div>
-            {bookmarks.map((bm) => dur ? (
-              <button
-                key={bm.id}
-                onClick={(e) => { e.stopPropagation(); cmd('seek', { to: bm.t, abs: true }); }}
-                data-tip={`${bm.label || t('th_bookmarks')} · ${fmtTime(bm.t)}`}
-                style={{ insetInlineStart: `${Math.max(0.5, Math.min(99.5, (bm.t / dur) * 100))}%` }}
-                className="absolute top-1/2 size-2.5 -translate-x-1/2 rtl:translate-x-1/2 -translate-y-1/2 rotate-45 bg-acc ring-2 ring-black/70 transition hover:scale-150"
-              />
-            ) : null)}
-            {partyNotes.map((pn) => dur ? (
-              <button
-                key={pn.id}
-                onClick={(e) => { e.stopPropagation(); cmd('seek', { to: pn.t, abs: true }); }}
-                data-tip={`${pn.authorName}: ${pn.text} · ${fmtTime(pn.t)}`}
-                style={{ insetInlineStart: `${Math.max(0.5, Math.min(99.5, (pn.t / dur) * 100))}%`, background: pn.accent || '#38bdf8' }}
-                className="absolute top-1/2 size-2.5 -translate-x-1/2 rtl:translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-black/75 transition hover:scale-150"
-              />
-            ) : null)}
-            <div className="pointer-events-none absolute size-[clamp(15px,1.2vw,20px)] -translate-x-1/2 rtl:translate-x-1/2 rounded-full bg-acc opacity-0 shadow ring-4 ring-acc/30 transition group-hover/seek:opacity-100" style={{ insetInlineStart: `${pct}%` }} />
-            {hoverSec != null ? (() => {
-              const skHit = skips.find((s) => hoverSec >= s.start && hoverSec <= s.end);
-              let chHit = '';
-              for (let i = chapters.length - 1; i >= 0; i--) {
-                if (hoverSec >= (chapters[i]?.time || 0)) { chHit = chapters[i]?.title || ''; break; }
-              }
-              const segLabel = skHit
-                ? t(skHit.kind === 'recap' ? 'th_seg_recap' : skHit.kind === 'ed' ? 'th_seg_credits' : 'th_seg_intro')
-                : chHit;
-              return (
-                <div style={{ left: hoverX }} className="pointer-events-none absolute bottom-8 -translate-x-1/2 overflow-hidden rounded-xl bg-black/92 p-1.5 text-center ring-1 ring-white/20 shadow-2xl">
-                  {hoverThumb ? <img src={hoverThumb} alt="" className="mb-1.5 h-24 w-44 rounded-lg object-cover" /> : null}
-                  <div dir="ltr" className="font-mono text-[clamp(12px,0.9vw,14px)] font-semibold text-fg">{fmtTime(hoverSec)}</div>
-                  {segLabel ? <div dir="auto" className="mt-0.5 max-w-[176px] truncate text-[10.5px] font-medium text-acc">{segLabel}</div> : null}
-                </div>
-              );
-            })() : null}
-          </div>
 
-          <div className="flex flex-nowrap items-center gap-[clamp(3px,0.45vw,8px)] overflow-hidden">
-            <DockBtn
-              icon={props.pause ? <Play size={20} strokeWidth={2} className="fill-current" /> : <Pause size={20} strokeWidth={2} className="fill-current" />}
-              onClick={() => cmd('toggle')}
-              label={t(props.pause ? 'play' : 'pause')}
-              big
-            />
-            <DockBtn icon={<RotateCcw size={18} strokeWidth={2} />} onClick={() => { flashSeek('−10s'); cmd('seek', { to: -10 }); }} label={t('th_seek_back')} />
-            <DockBtn icon={<RotateCw size={18} strokeWidth={2} />} onClick={() => { flashSeek('+10s'); cmd('seek', { to: 10 }); }} label={t('th_seek_fwd')} />
-            <button onClick={() => setShowRemaining((r) => !r)} dir="ltr" className="ms-1.5 flex-none whitespace-nowrap font-mono text-[clamp(12px,0.95vw,16px)] font-medium text-fg2 hover:text-fg">
-              {showRemaining && dur > 0 ? `-${fmtTime(dur - pos)}` : fmtTime(pos)} / {fmtTime(dur)}{!compactW && endsAt ? ` · ${t('th_ends_at', { t: endsAt })}` : ''}
-            </button>
-            <span className="min-w-2 flex-1" />
-            <div className="flex flex-none items-center gap-1.5">
-              <DockBtn
-                icon={props.mute ? <VolumeX size={18} strokeWidth={2} /> : <Volume2 size={18} strokeWidth={2} />}
-                onClick={() => cmd('mute')}
-                label={t(props.mute ? 'th_unmute' : 'th_mute')}
-              />
-              {!compactW ? (
-                <input type="range" min={0} max={200} value={props.volume ?? 100} onChange={(e) => setVolume(+e.target.value)}
-                  className="w-[clamp(72px,6.2vw,112px)] accent-acc" />
+            <div data-testid="th-dock-row" className={`flex flex-nowrap items-center ${rowGap} ${idle && !drawer ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+              {hasCtrl('play') ? (
+                <DockBtn
+                  icon={props.pause ? <Play size={20} strokeWidth={2} className="fill-current" /> : <Pause size={20} strokeWidth={2} className="fill-current" />}
+                  onClick={() => cmd('toggle')}
+                  label={t(props.pause ? 'play' : 'pause')}
+                  scale={hudScale}
+                  big
+                />
+              ) : null}
+              {hasCtrl('seek') ? (
+                <>
+                  <DockBtn icon={<RotateCcw size={18} strokeWidth={2} />} onClick={() => { flashSeek(`−${backSec}s`); cmd('seek', { to: -backSec }); }} label={t('th_seek_back')} scale={hudScale} />
+                  <DockBtn icon={<RotateCw size={18} strokeWidth={2} />} onClick={() => { flashSeek(`+${fwdSec}s`); cmd('seek', { to: fwdSec }); }} label={t('th_seek_fwd')} scale={hudScale} />
+                </>
+              ) : null}
+              {hasCtrl('time') ? (
+                <button onClick={() => setShowRemaining((r) => !r)} dir="ltr" className="ms-1.5 flex-none whitespace-nowrap font-mono text-[clamp(12px,0.92vw,15px)] font-medium text-fg2 hover:text-fg">
+                  {timeText}{!compactW && endsAt ? ` · ${t('th_ends_at', { t: endsAt })}` : ''}
+                </button>
+              ) : null}
+              <span className="min-w-2 flex-1" />
+              {hasCtrl('volume') ? (
+                <TheaterVolumeControl
+                  mode={pl.volumeControl || 'slider'}
+                  value={volUi}
+                  maxVol={maxVol}
+                  muted={!!props.mute}
+                  compact={compactW}
+                  popOpen={volMenuOpen}
+                  onTogglePop={() => setVolMenuOpen((v) => !v)}
+                  onToggleMute={toggleMute}
+                  onChange={(v, isDrag) => {
+                    draggingVolRef.current = !!isDrag;
+                    setVolume(v, !isDrag);
+                  }}
+                  onDragEnd={() => { draggingVolRef.current = false; }}
+                  scale={hudScale}
+                  label={t(props.mute ? 'th_unmute' : 'th_mute')}
+                  volTip={t('th_volume', { v: Math.round(volUi) })}
+                />
+              ) : null}
+              {!compactW && hasCtrl('said') ? (
+                <DockBtn icon={<MessageSquareQuote size={18} strokeWidth={2} />} onClick={triggerWhatSaid} label={t('th_said')} scale={hudScale} />
+              ) : null}
+              {chapters.length && hasCtrl('chapters') ? <DockBtn icon={<ListVideo size={18} strokeWidth={2} />} active={drawer === 'chapters'} onClick={() => openDrawer('chapters')} label={t('th_chapters')} scale={hudScale} /> : null}
+              {card.type === 'series' && hasCtrl('episodes') ? <DockBtn icon={<Tv size={18} strokeWidth={2} />} active={drawer === 'episodes'} onClick={() => openDrawer('episodes')} label={t('th_episodes')} scale={hudScale} /> : null}
+              {hasCtrl('sources') ? <DockBtn icon={<Layers size={18} strokeWidth={2} />} active={drawer === 'sources'} onClick={() => openDrawer('sources')} label={t('th_sources')} scale={hudScale} /> : null}
+              {hasCtrl('subtitles') ? <DockBtn icon={<Subtitles size={18} strokeWidth={2} />} active={drawer === 'subs'} onClick={() => openDrawer('subs')} label={t('th_subs')} scale={hudScale} /> : null}
+              {hasCtrl('audio') ? <DockBtn icon={<AudioLines size={18} strokeWidth={2} />} active={drawer === 'audio'} onClick={() => openDrawer('audio')} label={t('th_audio')} scale={hudScale} /> : null}
+              {hasCtrl('speed') ? <DockBtn icon={<Gauge size={18} strokeWidth={2} />} active={drawer === 'speed'} onClick={() => openDrawer('speed')} label={t('th_speed_sleep')} scale={hudScale} /> : null}
+              {hasCtrl('video') ? <DockBtn icon={<SlidersHorizontal size={18} strokeWidth={2} />} active={drawer === 'video'} onClick={() => openDrawer('video')} label={t('th_video_color')} scale={hudScale} /> : null}
+              {hasCtrl('tools') ? <DockBtn icon={<Camera size={18} strokeWidth={2} />} active={drawer === 'tools'} onClick={() => openDrawer('tools')} label={t('th_tools')} scale={hudScale} /> : null}
+              {hasCtrl('more') ? <DockBtn icon={<MoreHorizontal size={18} strokeWidth={2} />} active={drawer === 'more'} onClick={() => openDrawer('more')} label={t('th_more_tools')} scale={hudScale} /> : null}
+              {pl.showControlLock !== false && hasCtrl('lock') ? <DockBtn icon={<Unlock size={18} strokeWidth={2} />} onClick={() => setControlsLocked(true)} label={t('th_control_lock')} scale={hudScale} /> : null}
+              {hasCtrl('pip') ? <DockBtn icon={<PictureInPicture2 size={18} strokeWidth={2} />} onClick={() => api.invoke('mini').catch(() => {})} label={t('th_pip')} scale={hudScale} /> : null}
+              {hasCtrl('fullscreen') ? (
+                <DockBtn
+                  icon={isFullscreen ? <Minimize size={18} strokeWidth={2} /> : <Maximize size={18} strokeWidth={2} />}
+                  onClick={() => cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {})}
+                  label={t(isFullscreen ? 'th_exit_fullscreen' : 'th_fullscreen')}
+                  scale={hudScale}
+                />
               ) : null}
             </div>
-            {!compactW ? (
-              <DockBtn
-                icon={<MessageSquareQuote size={18} strokeWidth={2} />}
-                onClick={async () => { const s = await cmd('sub-text').catch(() => ''); setSaidText(s || t('th_said_none')); setTimeout(() => setSaidText(''), 4200); }}
-                label={t('th_said')}
-              />
-            ) : null}
-            {chapters.length ? <DockBtn icon={<ListVideo size={18} strokeWidth={2} />} active={drawer === 'chapters'} onClick={() => openDrawer('chapters')} label={t('th_chapters')} /> : null}
-            {card.type === 'series' ? <DockBtn icon={<Tv size={18} strokeWidth={2} />} active={drawer === 'episodes'} onClick={() => openDrawer('episodes')} label={t('th_episodes')} /> : null}
-            <DockBtn icon={<Layers size={18} strokeWidth={2} />} active={drawer === 'sources'} onClick={() => openDrawer('sources')} label={t('th_sources')} />
-            <DockBtn icon={<Subtitles size={18} strokeWidth={2} />} active={drawer === 'subs'} onClick={() => openDrawer('subs')} label={t('th_subs')} />
-            <DockBtn icon={<AudioLines size={18} strokeWidth={2} />} active={drawer === 'audio'} onClick={() => openDrawer('audio')} label={t('th_audio')} />
-            <DockBtn icon={<Gauge size={18} strokeWidth={2} />} active={drawer === 'speed'} onClick={() => openDrawer('speed')} label={t('th_speed_sleep')} />
-            <DockBtn icon={<SlidersHorizontal size={18} strokeWidth={2} />} active={drawer === 'video'} onClick={() => openDrawer('video')} label={t('th_video_color')} />
-            <DockBtn icon={<Camera size={18} strokeWidth={2} />} active={drawer === 'tools'} onClick={() => openDrawer('tools')} label={t('th_tools')} />
-            <DockBtn icon={<PictureInPicture2 size={18} strokeWidth={2} />} onClick={() => api.invoke('mini').catch(() => {})} label={t('th_pip')} />
-            <DockBtn
-              icon={isFullscreen ? <Minimize size={18} strokeWidth={2} /> : <Maximize size={18} strokeWidth={2} />}
-              onClick={() => cmd('fullscreen').then((fs) => { if (typeof fs === 'boolean') setIsFullscreen(fs); }).catch(() => {})}
-              label={t(isFullscreen ? 'th_exit_fullscreen' : 'th_fullscreen')}
-            />
-          </div>
-        </footer>
-      ) : null}
+          </footer>
+        );
+      })() : null}
 
       {tip && tip.text && !miniOn ? <TheaterTip text={tip.text} r={tip.r} /> : null}
 
@@ -1605,14 +1817,25 @@ export function TheaterApp() {
         onBrb={handleBrb}
         onVoiceMode={handleVoiceMode}
         onVoicePtt={handleVoicePtt}
-        onClose={() => setDrawer(null)}
+        onClose={() => { setDrawer(null); setDrawerFromMore(false); }}
         onCmd={handlePopoverCmd}
         onNight={async () => { const r = await cmd('night'); setNight(!!r); }}
-        onPickSource={(r) => { setDrawer(null); setErrorInfo(null); setHasFirstFrame(false); setPhase('opening'); cmd('switch-source', { stream: r.stream, addon: r.addon.url }); }}
-        onPickEpisode={(id) => { setDrawer(null); setHasFirstFrame(false); setPhase('opening'); cmd('play-episode', { videoId: id }); }}
-        onPickEpStream={(videoId, r) => { setDrawer(null); setErrorInfo(null); setHasFirstFrame(false); setPhase('opening'); cmd('play-episode-stream', { videoId, stream: r.stream, addon: r.addon.url }); }}
+        onPickSource={(r) => { setDrawer(null); setDrawerFromMore(false); setErrorInfo(null); setHasFirstFrame(false); setPhase('opening'); cmd('switch-source', { stream: r.stream, addon: r.addon.url }); }}
+        onPickEpisode={(id) => { setDrawer(null); setDrawerFromMore(false); setHasFirstFrame(false); setPhase('opening'); cmd('play-episode', { videoId: id }); }}
+        onPickEpStream={(videoId, r) => { setDrawer(null); setDrawerFromMore(false); setErrorInfo(null); setHasFirstFrame(false); setPhase('opening'); cmd('play-episode-stream', { videoId, stream: r.stream, addon: r.addon.url }); }}
         onSyncAction={(ok) => !ok && showMiniToast(t('error_load'))}
-        onSwitchDrawer={(d) => openDrawer(d)}
+        onSwitchDrawer={(d) => openDrawer(d, drawer === 'more')}
+        drawerBack={drawerFromMore ? 'more' : null}
+        onBackDrawer={() => openDrawer('more', false)}
+        statsOpen={statsOpen}
+        onToggleStats={() => setStatsOpen((s) => !s)}
+        onToggleFocus={() => { setFocusMode(true); setDrawer(null); setIdle(true); showMiniToast(t('th_focus_hint')); }}
+        onWhatSaid={triggerWhatSaid}
+        controlsLocked={controlsLocked}
+        onToggleLock={() => setControlsLocked((l) => !l)}
+        showControlLock={pl.showControlLock !== false}
+        isSeries={card.type === 'series'}
+        hasChapters={chapters.length > 0}
       />
     </div>
   );
@@ -1639,15 +1862,157 @@ function TheaterTip({ text, r }: { text: string; r: DOMRect }) {
   );
 }
 
-function DockBtn({ icon, label, onClick, active, big }: { icon: ReactNode; label: string; onClick: () => void; active?: boolean; big?: boolean }) {
+function TheaterVolumeControl({
+  mode, value, maxVol, muted, compact, popOpen, onTogglePop, onToggleMute, onChange, onDragEnd, scale, label, volTip,
+}: {
+  mode: 'slider' | 'vertical' | 'stepper' | 'icon';
+  value: number;
+  maxVol: number;
+  muted: boolean;
+  compact: boolean;
+  popOpen: boolean;
+  onTogglePop: () => void;
+  onToggleMute: () => void;
+  onChange: (v: number, dragging?: boolean) => void;
+  onDragEnd: () => void;
+  scale: 'compact' | 'default' | 'spacious';
+  label: string;
+  volTip: string;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const shownVal = muted ? 0 : Math.max(0, Math.min(maxVol, Math.round(value)));
+  const iconEl = muted || shownVal <= 0 ? <VolumeX size={18} strokeWidth={2} /> : shownVal < 50 ? <Volume1 size={18} strokeWidth={2} /> : <Volume2 size={18} strokeWidth={2} />;
+  const capPct = (val: number) => Math.max(0, Math.min(100, (val / Math.max(100, maxVol)) * 100));
+  const normalEnd = Math.min(shownVal, 100);
+  const boostAmt = Math.max(0, shownVal - 100);
+  const unityMark = maxVol > 100 ? (100 / maxVol) * 100 : null;
+
+  const pickX = (clientX: number, dragging: boolean) => {
+    const el = trackRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (!r.width) return;
+    const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    onChange(Math.round(f * maxVol), dragging);
+  };
+
+  const onTrackWheel = (e: React.WheelEvent) => {
+    e.stopPropagation();
+    onChange(shownVal + (e.deltaY < 0 ? 5 : -5), false);
+  };
+
+  if (mode === 'icon' || compact) {
+    return (
+      <div className="flex flex-none items-center gap-1" onWheel={onTrackWheel}>
+        <DockBtn icon={iconEl} onClick={onToggleMute} label={`${label} · ${volTip}`} scale={scale} />
+      </div>
+    );
+  }
+
+  if (mode === 'stepper') {
+    return (
+      <div dir="ltr" className="flex flex-none items-center gap-1 rounded-full bg-white/8 px-1.5 py-0.5 ring-1 ring-white/10" onWheel={onTrackWheel}>
+        <button onClick={onToggleMute} data-tip={label} aria-label={label} className="grid size-7 place-items-center rounded-full text-fg2 hover:bg-white/12 hover:text-acc">{iconEl}</button>
+        <button onClick={() => onChange(shownVal - 5, false)} aria-label="Volume down" className="grid size-6 place-items-center rounded-full bg-white/8 text-fg2 hover:bg-white/20 hover:text-fg"><Minus size={12} /></button>
+        <span data-testid="th-volume-pct" className={`min-w-[36px] text-center font-mono text-[11px] font-bold ${shownVal > 100 ? 'text-amber-300' : 'text-fg2'}`}>{shownVal}%</span>
+        <button onClick={() => onChange(shownVal + 5, false)} aria-label="Volume up" className="grid size-6 place-items-center rounded-full bg-white/8 text-fg2 hover:bg-white/20 hover:text-fg"><Plus size={12} /></button>
+      </div>
+    );
+  }
+
+  if (mode === 'vertical') {
+    return (
+      <div className="relative flex flex-none items-center" onWheel={onTrackWheel}>
+        <DockBtn icon={iconEl} onClick={onTogglePop} onContextMenu={(e) => { e.preventDefault(); onToggleMute(); }} label={volTip} active={popOpen} scale={scale} />
+        {popOpen ? (
+          <div dir="ltr" className="absolute bottom-14 start-1/2 z-50 flex -translate-x-1/2 flex-col items-center gap-2 rounded-2xl bg-[#0d0c0b]/95 px-3 py-3 ring-1 ring-white/15 shadow-2xl backdrop-blur-xl">
+            <span data-testid="th-volume-pct" className={`font-mono text-[11px] font-bold ${shownVal > 100 ? 'text-amber-300' : 'text-fg'}`}>{shownVal}%</span>
+            <input
+              type="range"
+              aria-label={volTip}
+              min={0}
+              max={maxVol}
+              value={shownVal}
+              onChange={(e) => onChange(+e.target.value, false)}
+              className="h-24 w-2 cursor-pointer accent-acc [writing-mode:vertical-lr] rotate-180"
+            />
+            <button onClick={onToggleMute} className="rounded-full bg-white/10 p-1.5 text-fg2 hover:bg-white/20 hover:text-fg">{iconEl}</button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <button onClick={onClick} data-tip={label} aria-label={label}
-      className={`grid flex-none place-items-center rounded-full transition ${
+    <div dir="ltr" data-testid="th-volume-control" className="flex flex-none items-center gap-1.5" onWheel={onTrackWheel}>
+      <DockBtn icon={iconEl} onClick={onToggleMute} label={label} scale={scale} />
+      <div
+        ref={trackRef}
+        role="slider"
+        tabIndex={0}
+        aria-label={volTip}
+        aria-valuemin={0}
+        aria-valuemax={maxVol}
+        aria-valuenow={shownVal}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.currentTarget.setPointerCapture(e.pointerId);
+          pickX(e.clientX, true);
+        }}
+        onPointerMove={(e) => { if (e.buttons === 1 || e.currentTarget.hasPointerCapture(e.pointerId)) pickX(e.clientX, true); }}
+        onPointerUp={(e) => { pickX(e.clientX, false); onDragEnd(); }}
+        onPointerCancel={() => onDragEnd()}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); onChange(shownVal + 5, false); }
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); onChange(shownVal - 5, false); }
+        }}
+        className="group/vol relative flex h-6 w-[clamp(76px,6.4vw,116px)] cursor-pointer select-none items-center"
+      >
+        <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/20 transition-all group-hover/vol:h-2">
+          <div className="absolute inset-y-0 left-0 bg-acc" style={{ width: `${capPct(normalEnd)}%` }} />
+          {boostAmt > 0 ? (
+            <div className="absolute inset-y-0 bg-amber-400" style={{ left: `${capPct(100)}%`, width: `${capPct(shownVal) - capPct(100)}%` }} />
+          ) : null}
+          {unityMark != null ? (
+            <span className="pointer-events-none absolute inset-y-0 w-[1.5px] bg-black/75" style={{ left: `${unityMark}%` }} />
+          ) : null}
+        </div>
+        <div
+          className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow ring-2 ring-acc/70 transition-transform group-hover/vol:scale-110"
+          style={{ left: `${capPct(shownVal)}%` }}
+        />
+      </div>
+      <span data-testid="th-volume-pct" className={`min-w-[34px] font-mono text-[11px] font-semibold ${shownVal > 100 ? 'text-amber-300' : 'text-fg2'}`}>
+        {shownVal}%
+      </span>
+    </div>
+  );
+}
+
+function DockBtn({
+  icon, label, onClick, onContextMenu, active, big, scale = 'default',
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  active?: boolean;
+  big?: boolean;
+  scale?: 'compact' | 'default' | 'spacious';
+}) {
+  const sz = scale === 'compact'
+    ? (big ? 'size-[clamp(36px,2.5vw,44px)] ' : 'size-[clamp(30px,2.1vw,36px)] ')
+    : scale === 'spacious'
+      ? (big ? 'size-[clamp(48px,3.5vw,58px)] ' : 'size-[clamp(40px,2.9vw,50px)] ')
+      : (big ? 'size-[clamp(42px,3vw,52px)] ' : 'size-[clamp(35px,2.5vw,44px)] ');
+  return (
+    <button onClick={onClick} onContextMenu={onContextMenu} data-tip={label} aria-label={label}
+      className={`grid flex-none place-items-center rounded-full transition ${sz}${
         active
-          ? (big ? 'size-[clamp(42px,3vw,52px)] ' : 'size-[clamp(35px,2.5vw,44px)] ') + 'bg-acc text-acc-ink shadow-[0_0_16px_rgba(226,164,58,0.35)]'
+          ? 'bg-acc text-acc-ink shadow-[0_0_16px_rgba(226,164,58,0.35)]'
           : big
-            ? 'size-[clamp(42px,3vw,52px)] bg-white/15 text-[#f5efe6] ring-1 ring-white/15 hover:bg-acc hover:text-acc-ink'
-            : 'size-[clamp(35px,2.5vw,44px)] text-[#f1eadf]/90 hover:bg-white/15 hover:text-acc'
+            ? 'bg-white/15 text-[#f5efe6] ring-1 ring-white/15 hover:bg-acc hover:text-acc-ink'
+            : 'text-[#f1eadf]/90 hover:bg-white/15 hover:text-acc'
       }`}>
       {icon}
     </button>

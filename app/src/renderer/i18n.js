@@ -22,7 +22,7 @@ export const STR = {
     your_number: 'رقمك', copy: 'نسخ', copied: 'انتسخ', invite: 'رابط دعوة',
     connect_title: 'اتصل بخويك', connect_hint: 'رقم من 9 خانات، أو رمز مؤقت من 6', connect_btn: 'اتصل',
     knocking: 'نطرق الباب', waiting_host: 'ننتظر خويك يوافق', cancel: 'إلغاء',
-    fail_offline: 'الرقم غير متصل الحين', fail_declined: 'خويك رفض الطلب', fail_timeout: 'ما رد أحد', fail_rate: 'محاولات كثيرة، انتظر دقيقة', fail_no_server: 'ما قدرنا نوصل للسيرفر', fail_bad: 'الطلب ما انقبل',
+    fail_offline: 'الرقم غير متصل الحين', fail_declined: 'خويك رفض الطلب', fail_timeout: 'ما رد أحد', fail_rate: 'محاولات كثيرة، انتظر دقيقة', fail_no_server: 'ما قدرنا نوصل للسيرفر', fail_server_access: 'السيرفر هذا خاص ويحتاج مفتاح صحيح', fail_pin: 'أدخل رمز الغرفة (PIN)', fail_bad_target: 'رمز الغرفة أو الرقم غير صحيح', fail_bad: 'الطلب ما انقبل',
 
     hosting: 'استضافة', hosting_on: 'مجلسك مفتوح', hosting_off: 'مجلسك مقفل',
     hosting_sub_on: 'أصحابك يقدرون يطرقون، وأنت تقرر مين يدخل', hosting_sub_off: 'ما أحد يقدر يطرق عليك',
@@ -182,7 +182,7 @@ export const STR = {
     your_number: 'Your number', copy: 'Copy', copied: 'Copied', invite: 'Invite link',
     connect_title: 'Join a friend', connect_hint: 'A 9-digit number or a 6-digit room code', connect_btn: 'Connect',
     knocking: 'Knocking', waiting_host: 'Waiting for your friend to let you in', cancel: 'Cancel',
-    fail_offline: 'That number is offline', fail_declined: 'Your friend declined', fail_timeout: 'Nobody answered', fail_rate: 'Too many tries, wait a minute', fail_no_server: "Couldn't reach the server", fail_bad: 'Request rejected',
+    fail_offline: 'That number is offline', fail_declined: 'Your friend declined', fail_timeout: 'Nobody answered', fail_rate: 'Too many tries, wait a minute', fail_no_server: "Couldn't reach the server", fail_server_access: 'This server requires a valid access key', fail_pin: 'Enter room PIN', fail_bad_target: 'Invalid room code or friend ID', fail_bad: 'Request rejected',
     hosting: 'Hosting', hosting_on: 'Your room is open', hosting_off: 'Your room is closed',
     hosting_sub_on: 'Friends can knock, you decide who comes in', hosting_sub_off: 'Nobody can knock',
     temp_code: 'Room code', temp_code_new: 'New code', temp_code_hint: 'Joins as a spectator without asking, expires in an hour', temp_code_left: '{m} min left', revoke: 'Revoke',

@@ -374,8 +374,28 @@ export interface PartyCursor { id: string; name: string; accent: string; x: numb
 export interface SwipeItem { id: string; type: Type; name: string; poster: string | null; year: number | null; imdbRating: string | null; genres: string[]; matchPct: number | null }
 export interface SwipeState { roundId: string; endsAt: number; items: SwipeItem[]; likes: Record<string, { id: string; name: string; accent: string }[]>; matches: SwipeItem[] }
 export interface WheelState { roundId: string; items: SocialTitle[]; winnerIdx: number; winner: SocialTitle; angle: number; at: number }
+export function normalizeDigits(str: string): string {
+  return String(str || '')
+    .replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (c) => String(c.charCodeAt(0) - 0x06f0));
+}
+
+export function parseJoinTarget(raw: string): { kind: 'join' | 'code'; target: string } | null {
+  const s = normalizeDigits(raw).trim();
+  if (!s) return null;
+  const protoMatch = /^majlis:\/\/(join|code)\/([A-Za-z0-9_-]{4,24})(?:[/?#].*)?$/i.exec(s);
+  if (protoMatch) return { kind: protoMatch[1].toLowerCase() as 'join' | 'code', target: protoMatch[2] };
+  const webMatch = /^https?:\/\/[^/\s]+\/(j|c)\/([A-Za-z0-9_-]{4,24})(?:[/?#].*)?$/i.exec(s);
+  if (webMatch) return { kind: webMatch[1].toLowerCase() === 'c' ? 'code' : 'join', target: webMatch[2] };
+  const flat = s.replace(/[\s-]+/g, '');
+  if (/^\d{9}$/.test(flat)) return { kind: 'join', target: flat };
+  if (/^[A-Za-z0-9]{6}$/.test(flat)) return { kind: 'code', target: flat.toUpperCase() };
+  return null;
+}
+
 export interface SocialRoom {
-  role: 'host' | 'guest' | null; hostingEnabled: boolean; code: { code: string; exp: number } | null;
+  role: 'host' | 'guest' | null; myId?: string; hasServer?: boolean; hostingEnabled: boolean; code: { code: string; exp: number } | null;
+  guestState?: { state: string; target?: string | null } | null;
   members: PartyMember[]; vote: { id: string; type: string; name: string; poster: string | null; by?: string; votes: number; voters: string[] }[];
   chat: { id: string; from: string; accent: string; text: string; at: number }[];
   cursors: PartyCursor[]; swipe: SwipeState | null; wheel: WheelState | null;

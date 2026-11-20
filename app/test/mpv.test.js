@@ -42,10 +42,13 @@ test('mpv args: VSR forces d3d11va, default high-quality + bt.2446a, 150/50MiB c
   assert.strictEqual(embOpts.hwdec, 'd3d11va-copy');
   assert.strictEqual(embOpts.profile, 'high-quality');
   assert.strictEqual(embOpts['tone-mapping'], 'bt.2446a');
-  assert.strictEqual(embOpts['video-sync'], 'display-resample');
-  assert.strictEqual(embOpts.interpolation, 'yes');
-  assert.strictEqual(embOpts.tscale, 'oversample');
-  assert.strictEqual(embOpts['display-fps-override'], '60');
+  assert.strictEqual(embOpts['video-sync'], 'audio');
+  assert.strictEqual(embOpts.interpolation, undefined);
+  assert.strictEqual(embOpts.tscale, undefined);
+  assert.strictEqual(embOpts['display-fps-override'], undefined);
+  assert.strictEqual(embOpts['target-colorspace-hint'], 'no');
+  assert.strictEqual(embOpts['target-prim'], 'bt.709');
+  assert.strictEqual(embOpts['target-trc'], 'srgb');
   assert.strictEqual(embOpts['sub-pos'], '94');
   assert.strictEqual(embOpts['sub-ass-shaper'], 'complex');
 

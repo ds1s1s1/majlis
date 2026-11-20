@@ -285,6 +285,7 @@ export function Nv12Canvas({
           return;
         }
         const plane = data.byteLength === need ? data : data.subarray(0, need);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
         gl.activeTexture(gl.TEXTURE2);
         gl.bindTexture(gl.TEXTURE_2D, texBgra);
         if (resized) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, plane);
@@ -302,6 +303,7 @@ export function Nv12Canvas({
         const yPlane = data.subarray(0, yBytes);
         const uvPlane = data.subarray(yBytes, yBytes + uvBytes);
 
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, texY);
         if (resized) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, w, h, 0, gl.RED, gl.UNSIGNED_BYTE, yPlane);

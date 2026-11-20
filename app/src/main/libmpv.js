@@ -26,11 +26,12 @@ function fontsConfDir() {
 
 function buildLibMpvOptions({
   vsr = false, rtxHdr = false, spdif = false, decoderMode = 1, shaderCacheDir = null, subFilterSdh = false,
-  fontsDir = subFontsDir(), displayFps = 0, hwAccel = true, hdrMode = null, toneMapping = null,
+  fontsDir = subFontsDir(), hwAccel = true, toneMapping = null,
   bufferSize = null, anime4k = false, anime4kMode = 'A', subStyle = null, subLang2 = null,
-  customMpvConf = '', userDataDir = null,
+  customMpvConf = '', userDataDir = null, videoQualityPreset = 'balanced',
 } = {}) {
   const hwdec = (hwAccel === false || decoderMode === 2) ? 'no' : 'd3d11va-copy';
+  const scaler = videoQualityPreset === 'max' ? 'ewa_lanczossharp' : 'spline36';
   const opts = [
     ['idle', 'yes'],
     ['keep-open', 'yes'],
@@ -39,9 +40,13 @@ function buildLibMpvOptions({
     ['osd-level', '0'],
     ['vo', 'libmpv'],
     ['ao', 'wasapi'],
+    ['audio-buffer', '0.1'],
     ['video-timing-offset', '0'],
+    ['correct-pts', 'yes'],
     ['profile', 'high-quality'],
-    ['scale', 'spline36'],
+    ['fbo-format', 'rgba16hf'],
+    ['dither-depth', 'auto'],
+    ['scale', scaler],
     ['cscale', 'spline36'],
     ['dscale', 'mitchell'],
     ['correct-downscaling', 'yes'],
@@ -52,9 +57,7 @@ function buildLibMpvOptions({
     ['deband-threshold', '48'],
     ['deband-range', '16'],
     ['deband-grain', '32'],
-    ['video-sync', 'display-resample'],
-    ['interpolation', 'yes'],
-    ['tscale', 'oversample'],
+    ['video-sync', 'audio'],
     ['framedrop', 'vo'],
     ['vd-lavc-threads', '4'],
     ['hwdec', hwdec],
@@ -91,15 +94,18 @@ function buildLibMpvOptions({
     ['stream-lavf-o', 'reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5'],
     ['tone-mapping', 'bt.2446a'],
     ['hdr-compute-peak', 'yes'],
+    ['gamut-mapping-mode', 'perceptual'],
     ['target-peak', 'auto'],
-    ['target-colorspace-hint', 'yes'],
+    // vo=libmpv renders into an 8-bit SDR sRGB WebGL2 canvas, so always force SDR BT.709/sRGB tone mapping
+    ['target-colorspace-hint', 'no'],
+    ['target-prim', 'bt.709'],
+    ['target-trc', 'srgb'],
   ];
   const setOpt = (k, v) => {
     const idx = opts.findIndex(([key]) => key === k);
     if (idx >= 0) opts[idx][1] = String(v);
     else opts.push([k, String(v)]);
   };
-  if (hdrMode === 'sdr') setOpt('target-colorspace-hint', 'no');
   if (toneMapping && SAFE_TONE_MAPS.has(toneMapping)) setOpt('tone-mapping', toneMapping);
   const buf = bufferSize && BUFFER_PRESETS[bufferSize];
   if (buf) {
@@ -108,7 +114,6 @@ function buildLibMpvOptions({
   }
   const s2 = normalizeSubLang2(subLang2);
   if (s2) setOpt('slang', [...new Set(['ar', 'ara', 'arabic', s2, 'en', 'eng'])].join(','));
-  if (displayFps > 0 && Number.isFinite(displayFps)) opts.push(['display-fps-override', String(Math.max(24, Math.min(60, Math.round(displayFps))))]);
   const confDir = fontsConfDir();
   if (confDir) opts.push(['config-dir', confDir]);
   if (fontsDir) opts.push(['sub-fonts-dir', fontsDir]);
@@ -135,7 +140,7 @@ class LibMpv extends EventEmitter {
     MpvPlayer, dll = libmpvPath(), vsr = false, rtxHdr = false, spdif = false, decoderMode = 1,
     shaderCacheDir = null, subFilterSdh = false, fontsDir, width = 1280, height = 720, displayFps = 0,
     hwAccel = true, hdrMode = null, toneMapping = null, bufferSize = null, anime4k = false, anime4kMode = 'A',
-    subStyle = null, subLang2 = null, customMpvConf = '', userDataDir = null,
+    subStyle = null, subLang2 = null, customMpvConf = '', userDataDir = null, videoQualityPreset = 'balanced',
   } = {}) {
     super();
     this.MpvPlayer = MpvPlayer;
@@ -160,6 +165,7 @@ class LibMpv extends EventEmitter {
     this.subLang2 = subLang2;
     this.customMpvConf = customMpvConf;
     this.userDataDir = userDataDir;
+    this.videoQualityPreset = videoQualityPreset;
     this.player = null;
     this.props = {};
     this.lastPos = 0;
@@ -185,7 +191,7 @@ class LibMpv extends EventEmitter {
       hwAccel: this.hwAccel, hdrMode: this.hdrMode, toneMapping: this.toneMapping,
       bufferSize: this.bufferSize, anime4k: this.anime4k, anime4kMode: this.anime4kMode,
       subStyle: this.subStyle, subLang2: this.subLang2, customMpvConf: this.customMpvConf,
-      userDataDir: this.userDataDir,
+      userDataDir: this.userDataDir, videoQualityPreset: this.videoQualityPreset,
     });
     this.player = new this.MpvPlayer(
       this.dll,

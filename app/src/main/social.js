@@ -2388,14 +2388,18 @@ function setup({ store, net, getHost, getGuest, getTheater, getMediaHub, emit, p
   handle('room', () => {
     const h = getHost?.();
     const g = getGuest?.();
-    const role = h?.guests?.size ? 'host' : g?.link ? 'guest' : null;
+    const hasServer = !!(store.hasServer?.() && !net?.noServer && !net?.authFailed);
+    const role = (h?.guests?.size || h?.enabled) ? 'host' : g?.link ? 'guest' : null;
     const members = getRoomMembers();
     const vote = h?.vote?.length ? h._voteView() : [];
     const control = h?.getWatchControl ? h.getWatchControl() : (g ? { mode: g.watchControl?.mode || 'host', holderId: g.watchControl?.holderId || null, holderName: g.watchControl?.holderName || null } : { mode: 'host', holderId: null, holderName: null });
     return {
       role,
+      myId: myId(),
+      hasServer,
       hostingEnabled: !!h?.enabled,
       code: h?.code || null,
+      guestState: g ? { state: g.state || 'idle', target: g.target || null } : null,
       members,
       vote,
       chat: partyChat.slice(-60),
@@ -2406,7 +2410,7 @@ function setup({ store, net, getHost, getGuest, getTheater, getMediaHub, emit, p
       ratingRound: maskRatingSession(ratingSession, true),
       control,
       notes: partyNotesState.notes,
-      readyState: h?.readySnapshot ? h.readySnapshot() : null,
+      readyState: (h?.guests?.size || h?.enabled) ? (h?.readySnapshot ? h.readySnapshot() : null) : (g?.link ? g.readyState || null : null),
     };
   });
 

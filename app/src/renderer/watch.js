@@ -283,6 +283,10 @@ export function initWatch(d) {
     ($('#stage').hidden ? document.body : $('#stage')).append(el);
   }
 
+  function readySync(state) {
+    if (!state?.active) $$('.readyask').forEach((x) => x.remove());
+  }
+
   function countdown(ms) {
     $$('.countdown').forEach((x) => x.remove());
     const el = document.createElement('div');
@@ -315,5 +319,5 @@ export function initWatch(d) {
       </div><div class="df"><button class="btn primary" id="sumok">${t('ok')}</button></div></div>`, (L, close) => { $('#sumok', L).onclick = close; });
   }
 
-  return { viewWatchRoom, mountWatchRoom, tickWatchRoom, addChat, floatReaction, renderBar, tickBar, setupWatchStage, teardownWatchStage, watchKey, readyAsk, countdown, openLocalStage, closeLocalStage, summary, fmtTime };
+  return { viewWatchRoom, mountWatchRoom, tickWatchRoom, addChat, floatReaction, renderBar, tickBar, setupWatchStage, teardownWatchStage, watchKey, readyAsk, readySync, countdown, openLocalStage, closeLocalStage, summary, fmtTime };
 }

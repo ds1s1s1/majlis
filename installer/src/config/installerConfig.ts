@@ -9,7 +9,7 @@ export interface ComponentItem {
 export const INSTALLER_CONFIG = {
   appNameAr: 'مجلس',
   appNameEn: 'Majlis',
-  version: '0.1beta',
+  version: '0.1.1beta',
   links: [
     { key: 'source', url: 'https://github.com/ds1s1s1/majlis' },
     { key: 'bugs', url: 'https://github.com/ds1s1s1/majlis/issues' },
@@ -17,7 +17,7 @@ export const INSTALLER_CONFIG = {
   ] as const,
   changelog: {
     beta: {
-      version: '0.1beta',
+      version: '0.1.1beta',
       sections: [
         {
           titleAr: 'طور اللعب — العب',
@@ -56,7 +56,7 @@ export const INSTALLER_CONFIG = {
       ],
     },
     stable: {
-      version: '0.1.0-beta',
+      version: '0.1.1-beta',
       sections: [
         {
           titleAr: 'الاستقرار والأداء',

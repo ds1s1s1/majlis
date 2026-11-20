@@ -22,6 +22,7 @@ const store = require('./store-api');
 const { StremioAccount, loginInBrowser } = require('./stremio-sync');
 const debrid = require('./debrid');
 const { Downloads } = require('./downloads');
+const updater = require('../updater');
 const { Trackers } = require('./trackers');
 const ytdlp = require('./ytdlp');
 const { Notifications, CHECK_INTERVAL, dispatchNotificationWebhooks } = require('./notifications');
@@ -101,6 +102,91 @@ function annotatePersonWatched(credits = [], lib = null, letterboxd = {}) {
   });
 }
 
+// opening/ending times: IntroDB + TheIntroDB in parallel, plus AniSkip (Kitsu/IMDb anime via ani.zip)
+async function skipsForVideo({ videoId, durationSec = 0, metaImdbId = null, httpClient, introDbKey = '' }) {
+  const aniSkipFor = async (mal, ep) => {
+    const r = await httpClient.json(`https://api.aniskip.com/v2/skip-times/${mal}/${ep}?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed&episodeLength=${Math.round(durationSec || 0)}`, { ttl: 864e5 }).catch(() => null);
+    return (r?.results || []).map((x) => ({
+      kind: x.skipType.includes('ed') ? 'ed' : x.skipType === 'recap' ? 'recap' : 'op',
+      start: Number(x.interval?.startTime),
+      end: Number(x.interval?.endTime),
+    })).filter((x) => Number.isFinite(x.start) && Number.isFinite(x.end) && x.end > x.start && x.start >= 0);
+  };
+  const mk = /^kitsu:(\d+):(\d+)$/.exec(videoId || '');
+  if (mk) {
+    const map = await httpClient.json(`https://api.ani.zip/mappings?kitsu_id=${mk[1]}`, { ttl: 7 * 864e5 }).catch(() => null);
+    return map?.mappings?.mal_id ? aniSkipFor(map.mappings.mal_id, mk[2]) : [];
+  }
+  let imdb = null;
+  let s = null;
+  let e = null;
+  const mi = /^(tt\d+)(?::(\d+):(\d+))?$/.exec(videoId || '');
+  if (mi) {
+    imdb = mi[1];
+    s = mi[2] || null;
+    e = mi[3] || null;
+  } else {
+    const mt = /^tmdb:\d+:(\d+):(\d+)$/.exec(videoId || '');
+    if (mt && /^tt\d+$/.test(metaImdbId || '')) {
+      imdb = metaImdbId;
+      s = mt[1];
+      e = mt[2];
+    } else if (/^tt\d+$/.test(metaImdbId || '')) {
+      imdb = metaImdbId;
+    }
+  }
+  if (!imdb) return [];
+
+  const toSeg = (seg, kind) => {
+    if (!seg) return null;
+    const rawStart = seg.start_sec ?? (seg.start_ms != null ? seg.start_ms / 1000 : seg.start);
+    const rawEnd = seg.end_sec ?? (seg.end_ms != null ? seg.end_ms / 1000 : seg.end ?? durationSec ?? null);
+    const start = rawStart != null ? Number(rawStart) : NaN;
+    const end = rawEnd != null ? Number(rawEnd) : NaN;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || start < 0) return null;
+    return { kind, start, end };
+  };
+
+  const byKind = new Map();
+  const addAll = (list) => {
+    for (const seg of list) {
+      if (seg && !byKind.has(seg.kind)) byKind.set(seg.kind, seg);
+    }
+  };
+
+  const introHeaders = introDbKey ? { 'x-api-key': introDbKey } : {};
+  const idbUrl = `https://api.introdb.app/segments?imdb_id=${imdb}${s ? `&season=${s}&episode=${e}` : '&is_movie=true'}`;
+  const tidbUrl = `https://api.theintrodb.org/v4/media?imdb_id=${imdb}${s ? `&season=${s}&episode=${e}` : ''}${durationSec ? `&duration_ms=${Math.round(durationSec * 1000)}` : ''}`;
+
+  const [idbRes, tidbRes] = await Promise.allSettled([
+    httpClient.json(idbUrl, { ttl: 864e5, headers: introHeaders }),
+    httpClient.json(tidbUrl, { ttl: 864e5 }),
+  ]);
+
+  if (idbRes.status === 'fulfilled' && idbRes.value) {
+    const idb = idbRes.value;
+    addAll([toSeg(idb.intro, 'op'), toSeg(idb.recap, 'recap'), toSeg(idb.outro, 'ed')]);
+  }
+  if (tidbRes.status === 'fulfilled' && tidbRes.value) {
+    const tidb = tidbRes.value;
+    const pick = (v) => (Array.isArray(v) ? v[0] : v);
+    addAll([
+      toSeg(pick(tidb.intro), 'op'),
+      toSeg(pick(tidb.recap), 'recap'),
+      toSeg(pick(tidb.credits) || pick(tidb.preview), 'ed'),
+    ]);
+  }
+
+  if (!byKind.has('op') && s && e) {
+    const map = await httpClient.json(`https://api.ani.zip/mappings?imdb_id=${imdb}`, { ttl: 7 * 864e5 }).catch(() => null);
+    if (map?.mappings?.mal_id) {
+      addAll(await aniSkipFor(map.mappings.mal_id, e).catch(() => []));
+    }
+  }
+
+  return [...byKind.values()].sort((a, b) => a.start - b.start);
+}
+
 function scrubDiagnosticsReport(input, extraSecrets = []) {
   const home = os.homedir();
   const secrets = (Array.isArray(extraSecrets) ? extraSecrets : [])
@@ -109,7 +195,9 @@ function scrubDiagnosticsReport(input, extraSecrets = []) {
     let out = String(s);
     if (home) out = out.split(home).join('C:\\Users\\<user>');
     out = out.replace(/([A-Za-z]:\\Users\\)[^\\/\s"']+/gi, '$1<user>');
+    out = out.replace(/([A-Za-z]:\/Users\/)[^/\s"']+/gi, '$1<user>');
     out = out.replace(/(\/home\/|\/Users\/)[^/\s"']+/gi, '$1<user>');
+    out = out.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[REDACTED]@');
     out = out.replace(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]');
     out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
     for (const sec of secrets) out = out.split(sec).join('[REDACTED]');
@@ -470,40 +558,10 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     }
     return (await client.all(enabledAddons(), { resource: 'subtitles', type, id, extra: nextExtra })).flatMap((x) => (x.result?.subtitles || []).map((s) => ({ ...s, addon: x.manifest.name })));
   }
-  // opening/ending times: AniSkip (Kitsu/IMDb anime via ani.zip) + IntroDB / TheIntroDB (IMDb series & movies)
-  async function skips(videoId, durationSec) {
-    const aniSkipFor = async (mal, ep) => {
-      const r = await http.json(`https://api.aniskip.com/v2/skip-times/${mal}/${ep}?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed&episodeLength=${Math.round(durationSec || 0)}`, { ttl: 864e5 }).catch(() => null);
-      return (r?.results || []).map((x) => ({ kind: x.skipType.includes('ed') ? 'ed' : x.skipType === 'recap' ? 'recap' : 'op', start: x.interval.startTime, end: x.interval.endTime }));
-    };
-    const mk = /^kitsu:(\d+):(\d+)$/.exec(videoId || '');
-    if (mk) {
-      const map = await http.json(`https://api.ani.zip/mappings?kitsu_id=${mk[1]}`, { ttl: 7 * 864e5 }).catch(() => null);
-      return map?.mappings?.mal_id ? aniSkipFor(map.mappings.mal_id, mk[2]) : [];
-    }
-    const mi = /^(tt\d+)(?::(\d+):(\d+))?$/.exec(videoId || '');
-    if (!mi) return [];
-    const [, imdb, s, e] = mi;
-    const out = [];
-    const pushSeg = (seg, kind) => {
-      if (!seg) return;
-      const start = seg.start_sec ?? (seg.start_ms != null ? seg.start_ms / 1000 : null);
-      const end = seg.end_sec ?? (seg.end_ms != null ? seg.end_ms / 1000 : durationSec || null);
-      if (Number.isFinite(start) && Number.isFinite(end) && end > start && start >= 0) out.push({ kind, start, end });
-    };
-    const introHeaders = keys().introdb ? { 'x-api-key': keys().introdb } : {};
-    const idb = await http.json(`https://api.introdb.app/segments?imdb_id=${imdb}${s ? `&season=${s}&episode=${e}` : '&is_movie=true'}`, { ttl: 864e5, headers: introHeaders }).catch(() => null);
-    if (idb) { pushSeg(idb.intro, 'op'); pushSeg(idb.recap, 'recap'); pushSeg(idb.outro, 'ed'); }
-    if (!out.length) {
-      const tidb = await http.json(`https://api.theintrodb.org/v4/media?imdb_id=${imdb}${s ? `&season=${s}&episode=${e}` : ''}${durationSec ? `&duration_ms=${Math.round(durationSec * 1000)}` : ''}`, { ttl: 864e5 }).catch(() => null);
-      if (tidb) { pushSeg(tidb.intro?.[0], 'op'); pushSeg(tidb.recap?.[0], 'recap'); pushSeg(tidb.credits?.[0] || tidb.preview?.[0], 'ed'); }
-    }
-    if (!out.length && s && +s === 1) {
-      const map = await http.json(`https://api.ani.zip/mappings?imdb_id=${imdb}`, { ttl: 7 * 864e5 }).catch(() => null);
-      if (map?.mappings?.mal_id) return aniSkipFor(map.mappings.mal_id, e);
-    }
-    return out;
-  }
+  // ---- hub instance ----
+  const skips = (videoId, durationSec, metaImdbId = null) => skipsForVideo({
+    videoId, durationSec, metaImdbId, httpClient: http, introDbKey: keys().introdb || '',
+  });
   // the viewer's debrid service, when one has a key: { name, resolve(stream) }
   function debridService() {
     const k = keys(), name = st.get('debridService') || debrid.SERVICES.find((s) => k[s]);
@@ -1093,12 +1151,44 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     };
   });
 
-  h('updater-check', () => ({
-    version: app?.getVersion?.() || '0.6.1',
-    packaged: !!app?.isPackaged,
-    updateAvailable: false,
-    checkedAt: Date.now(),
-  }));
+  h('updater-check', async ({ betaChannel = false } = {}) => {
+    const currentVersion = app?.getVersion?.() || '0.1.1-beta';
+    try {
+      const res = await updater.checkForUpdates({ currentVersion, betaChannel: !!betaChannel });
+      return { ...res, packaged: !!app?.isPackaged };
+    } catch (err) {
+      return {
+        ok: false,
+        version: currentVersion,
+        currentVersion,
+        packaged: !!app?.isPackaged,
+        updateAvailable: false,
+        error: err?.message || 'update check failed',
+        checkedAt: Date.now(),
+      };
+    }
+  });
+
+  h('updater-download', async ({ url, sha256Url, assetName } = {}) => {
+    const destDir = path.join(dataDir, 'updates');
+    return updater.downloadUpdate({
+      url,
+      sha256Url,
+      destDir,
+      fileName: assetName || 'Majlis-Setup.exe',
+      onProgress: (p) => emit('updater:progress', p),
+    });
+  });
+
+  h('updater-install', async ({ filePath } = {}) => {
+    const updatesRoot = path.resolve(path.join(dataDir, 'updates'));
+    const target = path.resolve(String(filePath || ''));
+    const rel = path.relative(updatesRoot, target);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error('Invalid installer path');
+    }
+    return updater.installDownloadedUpdate(target, { app });
+  });
 
   h('library-repair', () => {
     const res = library().repair();
@@ -1229,7 +1319,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     ];
     return scrubDiagnosticsReport({
       checkedAt: Date.now(),
-      version: app?.getVersion?.() || '0.1.0-beta',
+      version: app?.getVersion?.() || '0.1.1-beta',
       platform: process.platform,
       arch: process.arch,
       profile: profile(),
@@ -1457,4 +1547,4 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
   };
 }
 
-module.exports = { setup, annotatePersonWatched, scrubDiagnosticsReport, normalizeTitle };
+module.exports = { setup, skipsForVideo, annotatePersonWatched, scrubDiagnosticsReport, normalizeTitle };

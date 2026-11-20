@@ -14,20 +14,6 @@ const ALL_LANGS = ['Arabic', 'English', 'Japanese', 'French', 'Spanish', 'German
 const DISPLAY_LANGS: { code: string; name: string; native: string; c1: string; c2: string; c3?: string }[] = [
   { code: 'ar', name: 'Arabic', native: 'العربية', c1: '#006C35', c2: '#FFFFFF' },
   { code: 'en', name: 'English', native: 'English', c1: '#012169', c2: '#C8102E', c3: '#FFFFFF' },
-  { code: 'de', name: 'Deutsch', native: 'Deutsch', c1: '#000000', c2: '#DD0000', c3: '#FFCE00' },
-  { code: 'es', name: 'Español', native: 'Español', c1: '#AA151B', c2: '#F1BF00', c3: '#AA151B' },
-  { code: 'fr', name: 'Français', native: 'Français', c1: '#002395', c2: '#FFFFFF', c3: '#ED2939' },
-  { code: 'tr', name: 'Türkçe', native: 'Türkçe', c1: '#E30A17', c2: '#FFFFFF' },
-  { code: 'id', name: 'Indonesian', native: 'Bahasa Indonesia', c1: '#FF0000', c2: '#FFFFFF' },
-  { code: 'it', name: 'Italiano', native: 'Italiano', c1: '#009246', c2: '#FFFFFF', c3: '#CE2B37' },
-  { code: 'pt-BR', name: 'Português (BR)', native: 'Português (Brasil)', c1: '#009C3B', c2: '#FFDF00', c3: '#002776' },
-  { code: 'pt', name: 'Português', native: 'Português', c1: '#006600', c2: '#FF0000' },
-  { code: 'ru', name: 'Русский', native: 'Русский', c1: '#FFFFFF', c2: '#0039A6', c3: '#D52B1E' },
-  { code: 'ja', name: 'Japanese', native: '日本語', c1: '#FFFFFF', c2: '#BC002D' },
-  { code: 'ko', name: 'Korean', native: '한국어', c1: '#FFFFFF', c2: '#CD2E3A', c3: '#0047A0' },
-  { code: 'pl', name: 'Polski', native: 'Polski', c1: '#FFFFFF', c2: '#DC143C' },
-  { code: 'vi', name: 'Vietnamese', native: 'Tiếng Việt', c1: '#DA251D', c2: '#FFFF00' },
-  { code: 'zh', name: 'Chinese', native: '简体中文', c1: '#DE2910', c2: '#FFDE00' },
 ];
 
 function FlagSvg({ c1, c2, c3 }: { c1: string; c2: string; c3?: string }) {
@@ -94,8 +80,8 @@ export function LanguagesPage({ pageId }: { pageId: SettingsPageId }) {
             onChange={(v) => update((s) => { s.languages.region = v; })}
           />
           <div className="py-3">
-            <div className="mb-2.5 text-[13.5px] font-medium">{ar ? 'لغة الواجهة (16 لغة)' : 'Display language (16 locales)'}</div>
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+            <div className="mb-2.5 text-[13.5px] font-medium">{ar ? 'لغة الواجهة' : 'Display language'}</div>
+            <div className="grid grid-cols-2 gap-2.5">
               {DISPLAY_LANGS.map((dl) => {
                 const active = l.displayLanguage === dl.code;
                 return (

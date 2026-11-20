@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { DisplayTarget, PartyNoteItem, Ranked, ReadyStateView, Stream } from '../api';
 import type { PlayQueueItem } from '../store/usePlayQueueStore';
 import type { Lang } from '../i18n';
@@ -76,6 +77,17 @@ interface TheaterPopoversProps {
   onPickEpStream: (videoId: string, r: Ranked) => void;
   onSyncAction: (ok?: boolean) => void;
   onSwitchDrawer?: (d: DrawerKind) => void;
+  drawerBack?: DrawerKind;
+  onBackDrawer?: () => void;
+  statsOpen?: boolean;
+  onToggleStats?: () => void;
+  onToggleFocus?: () => void;
+  onWhatSaid?: () => void;
+  controlsLocked?: boolean;
+  onToggleLock?: () => void;
+  showControlLock?: boolean;
+  isSeries?: boolean;
+  hasChapters?: boolean;
 }
 
 const fmtClock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -89,6 +101,7 @@ export function TheaterPopovers(p: TheaterPopoversProps) {
       : p.drawer === 'speed' ? 'w-[min(290px,90vw)] max-h-[min(248px,50vh)]'
       : p.drawer === 'video' ? 'w-[min(352px,92vw)] max-h-[min(380px,50vh)]'
       : p.drawer === 'tools' ? 'w-[min(356px,92vw)] max-h-[min(380px,50vh)]'
+      : p.drawer === 'more' ? 'w-[min(372px,92vw)] max-h-[min(416px,54vh)]'
       : p.drawer === 'chapters' ? 'w-[min(320px,90vw)] max-h-[min(360px,50vh)]'
       : p.drawer === 'party' ? 'w-[min(360px,92vw)] max-h-[min(380px,50vh)]'
       : 'w-[min(420px,94vw)] max-h-[min(390px,50vh)]';
@@ -99,6 +112,7 @@ export function TheaterPopovers(p: TheaterPopoversProps) {
     speed: p.t('th_speed_sleep'),
     video: p.t('th_video_color'),
     tools: p.t('th_tools'),
+    more: p.t('th_more_tools'),
     sources: p.t('th_sources'),
     episodes: p.t('th_episodes'),
     chapters: p.t('th_chapters'),
@@ -113,13 +127,21 @@ export function TheaterPopovers(p: TheaterPopoversProps) {
         className={`fixed bottom-[clamp(84px,8.8vh,120px)] end-[clamp(16px,2vw,32px)] z-40 flex flex-col overflow-hidden rounded-2xl bg-[#0d0c0b]/95 text-[clamp(12px,0.88vw,13.5px)] shadow-2xl ring-1 ring-white/15 backdrop-blur-2xl fade-in ${sizeClass}`}
       >
         <div className="flex flex-none items-center justify-between border-b border-white/10 px-3.5 py-2.5">
-          <h2 className="text-[clamp(13px,0.95vw,15px)] font-bold text-fg">{titleMap[p.drawer]}</h2>
+          <div className="flex min-w-0 items-center gap-2">
+            {p.drawerBack && p.onBackDrawer ? (
+              <button onClick={p.onBackDrawer} aria-label={p.t('back')} className="grid size-6 flex-none place-items-center rounded-full bg-white/10 text-fg2 hover:bg-white/20 hover:text-fg">
+                {p.lang === 'ar' ? <ChevronRight size={14} strokeWidth={2.2} /> : <ChevronLeft size={14} strokeWidth={2.2} />}
+              </button>
+            ) : null}
+            <h2 className="truncate text-[clamp(13px,0.95vw,15px)] font-bold text-fg">{titleMap[p.drawer]}</h2>
+          </div>
           <button onClick={p.onClose} className="grid size-7 place-items-center rounded-full bg-white/8 text-fg2 hover:bg-white/15 hover:text-fg">
             <Icon n="x" s={14} />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
+          {p.drawer === 'more' ? <MoreToolsPopoverBody p={p} /> : null}
           {p.drawer === 'subs' ? <SubtitlesPopoverBody p={p} /> : null}
           {p.drawer === 'audio' ? <AudioPopoverBody p={p} /> : null}
           {p.drawer === 'speed' ? <SpeedSleepPopoverBody p={p} /> : null}
@@ -550,8 +572,8 @@ function SpeedSleepPopoverBody({ p }: { p: TheaterPopoversProps }) {
     { id: 'eof', label: p.t('th_sleep_eof') },
   ];
   return (
-    <div className="grid grid-cols-2 divide-x divide-white/10 rtl:divide-x-reverse p-2.5 gap-2">
-      <div className="space-y-1.5 pe-1">
+    <div className="grid grid-cols-2 gap-3 p-2.5">
+      <div className="space-y-1.5 border-e border-white/10 pe-3">
         <div className="text-[11px] font-semibold text-fg2">{p.t('th_speed')}</div>
         <div className="grid grid-cols-2 gap-1">
           {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5].map((v) => (
@@ -829,6 +851,78 @@ function ToolsBookmarksPopoverBody({ p }: { p: TheaterPopoversProps }) {
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function MoreToolsPopoverBody({ p }: { p: TheaterPopoversProps }) {
+  const [tab, setTab] = useState<'playback' | 'picture' | 'tools'>('playback');
+  return (
+    <div className="flex flex-col">
+      <div className="sticky top-0 z-10 border-b border-white/10 bg-[#0d0c0b]/95 px-3 py-2">
+        <div className="grid grid-cols-3 gap-1 rounded-xl bg-white/6 p-0.5">
+          {([
+            ['playback', p.t('th_tab_playback')],
+            ['picture', p.t('th_tab_picture')],
+            ['tools', p.t('th_tab_tools')],
+          ] as const).map(([id, lbl]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`rounded-lg py-1 text-[11.5px] font-semibold transition ${tab === id ? 'bg-acc text-acc-ink' : 'text-fg2 hover:text-fg'}`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab === 'playback' ? (
+        <div className="space-y-2.5 p-3">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button onClick={() => p.onSwitchDrawer?.('sources')} className="rounded-xl bg-white/8 px-3 py-2 text-start text-[11.5px] font-semibold text-fg hover:bg-white/15">
+              {p.t('th_sources')}
+            </button>
+            {p.isSeries ? (
+              <button onClick={() => p.onSwitchDrawer?.('episodes')} className="rounded-xl bg-white/8 px-3 py-2 text-start text-[11.5px] font-semibold text-fg hover:bg-white/15">
+                {p.t('th_episodes')}
+              </button>
+            ) : null}
+            {p.hasChapters ? (
+              <button onClick={() => p.onSwitchDrawer?.('chapters')} className="rounded-xl bg-white/8 px-3 py-2 text-start text-[11.5px] font-semibold text-fg hover:bg-white/15">
+                {p.t('th_chapters')}
+              </button>
+            ) : null}
+            {p.onWhatSaid ? (
+              <button onClick={() => { p.onWhatSaid?.(); p.onClose(); }} className="rounded-xl bg-white/8 px-3 py-2 text-start text-[11.5px] font-semibold text-fg hover:bg-white/15">
+                {p.t('th_said')}
+              </button>
+            ) : null}
+          </div>
+          {p.showControlLock !== false && p.onToggleLock ? (
+            <div className="rounded-xl bg-white/5 px-2.5 py-2 ring-1 ring-white/10">
+              <ToggleRow label={p.t('th_control_lock')} on={!!p.controlsLocked} onClick={() => { p.onToggleLock?.(); p.onClose(); }} />
+            </div>
+          ) : null}
+          <div className="rounded-xl bg-white/5 ring-1 ring-white/10">
+            <SpeedSleepPopoverBody p={p} />
+          </div>
+        </div>
+      ) : null}
+
+      {tab === 'picture' ? <VideoColorPopoverBody p={p} /> : null}
+
+      {tab === 'tools' ? (
+        <div>
+          {(p.onToggleStats || p.onToggleFocus) ? (
+            <div className="space-y-1.5 border-b border-white/10 px-3 py-2.5">
+              {p.onToggleStats ? <ToggleRow label={p.t('th_stats_shortcut')} on={!!p.statsOpen} onClick={() => p.onToggleStats?.()} /> : null}
+              {p.onToggleFocus ? <ToggleRow label={p.t('th_focus_mode')} on={false} onClick={() => { p.onToggleFocus?.(); p.onClose(); }} /> : null}
+            </div>
+          ) : null}
+          <ToolsBookmarksPopoverBody p={p} />
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -47,6 +47,29 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
   const [attachLog, setAttachLog] = useState(true);
   const [restorePreview, setRestorePreview] = useState<{ raw: string; sections: number } | null>(null);
   const [checkingUpd, setCheckingUpd] = useState(false);
+  const [updInfo, setUpdInfo] = useState<{
+    ok?: boolean;
+    currentVersion?: string;
+    latestTag?: string | null;
+    latestVersion?: string | null;
+    updateAvailable?: boolean;
+    prerelease?: boolean;
+    releaseUrl?: string;
+    releaseNotes?: string;
+    publishedAt?: string | null;
+    downloadUrl?: string | null;
+    sha256Url?: string | null;
+    assetName?: string;
+    assetSize?: number;
+    error?: string;
+    releases?: Array<{ tag: string; version: string; name: string; prerelease: boolean; publishedAt: string | null; url: string; current: boolean }>;
+  } | null>(null);
+  const [dlState, setDlState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+  const [dlPct, setDlPct] = useState(0);
+  const [dlPath, setDlPath] = useState<string | null>(null);
+  const [dlError, setDlError] = useState<string | null>(null);
+  const [bugSubmitting, setBugSubmitting] = useState(false);
+  const [lastIssueMarkdown, setLastIssueMarkdown] = useState<string | null>(null);
 
   // Encrypted .majlis-profile export/import state
   const [bundlePass, setBundlePass] = useState('');
@@ -78,25 +101,112 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
     }
   };
 
+  const runUpdateCheck = async (silent = false) => {
+    setCheckingUpd(true);
+    try {
+      const r = await cin<NonNullable<typeof updInfo>>('updater-check', { betaChannel: !!data.updates.betaChannel }).catch(() => null);
+      if (r) setUpdInfo(r);
+      if (!silent) {
+        if (r && r.ok === false) toast(r.error || (ar ? 'تعذر التحقق من التحديثات' : 'Update check failed'));
+        else if (r?.updateAvailable) toast(ar ? `يتوفر تحديث جديد (${r.latestTag})` : `New update available (${r.latestTag})`);
+        else toast(ar ? `أنت على أحدث إصدار (v${r?.currentVersion || APP_VERSION})` : `You are up to date (v${r?.currentVersion || APP_VERSION})`);
+      }
+    } finally {
+      setCheckingUpd(false);
+    }
+  };
+
   useEffect(() => {
-    if (pageId === 'updates-backup') loadBackupState();
+    if (pageId === 'updates-backup') {
+      loadBackupState();
+      runUpdateCheck(true);
+    }
+  }, [pageId, data.updates.betaChannel]);
+
+  useEffect(() => {
+    if (pageId !== 'updates-backup') return undefined;
+    return window.majlis?.on?.((m: { type?: string; pct?: number }) => {
+      if (m?.type === 'updater:progress' && typeof m.pct === 'number') setDlPct(m.pct);
+    });
   }, [pageId]);
 
   if (pageId === 'report-bug') {
-    const generateReport = () => {
-      if (!summary.trim()) { toast(ar ? 'أدخل ملخص المشكلة أولاً' : 'Please enter a summary'); return; }
-      const report = { app: APP_NAME, version: APP_VERSION, build: APP_BUILD, severity, summary, steps, expected, actual, attachLog, generatedAt: new Date().toISOString() };
-      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `majlis-bug-report-${Date.now()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      toast(ar ? 'تم تصدير تقرير الخطأ' : 'Bug report bundle downloaded');
+    const scrubLocalText = (text: string) =>
+      String(text || '')
+        .replace(/([A-Za-z]:\\Users\\)[^\\/\s"']+/gi, '$1<user>')
+        .replace(/([A-Za-z]:\/Users\/)[^/\s"']+/gi, '$1<user>')
+        .replace(/(\/home\/|\/Users\/)[^/\s"']+/gi, '$1<user>')
+        .replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[REDACTED]@')
+        .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
+        .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]');
+
+    const buildIssueMarkdown = async () => {
+      let diagSection = '';
+      if (attachLog) {
+        const diag = await cin<{
+          version?: string;
+          platform?: string;
+          arch?: string;
+          checks?: Array<{ id: string; status: string; summary: string }>;
+        }>('diagnostics-run').catch(() => null);
+        if (diag?.checks?.length) {
+          const lines = diag.checks.map((c) => `- **${c.id}**: \`${c.status}\` — ${scrubLocalText(c.summary)}`);
+          diagSection = `\n### Diagnostics Summary\n- App: \`${diag.version || APP_VERSION}\` (${diag.platform || 'win32'}/${diag.arch || 'x64'})\n${lines.join('\n')}\n`;
+        }
+      }
+      return [
+        `**Severity:** \`${severity}\``,
+        `**Version:** \`v${APP_VERSION}\` (${APP_BUILD})`,
+        `**Platform:** \`${navigator.platform || 'Windows'}\``,
+        '',
+        '### Summary',
+        scrubLocalText(summary.trim()),
+        steps.trim() ? `\n### Steps to Reproduce\n${scrubLocalText(steps.trim())}` : '',
+        expected.trim() ? `\n### Expected Behavior\n${scrubLocalText(expected.trim())}` : '',
+        actual.trim() ? `\n### Actual Behavior\n${scrubLocalText(actual.trim())}` : '',
+        diagSection,
+      ].filter(Boolean).join('\n');
     };
+
+    const submitGitHubIssue = async () => {
+      if (!summary.trim()) { toast(ar ? 'أدخل ملخص المشكلة أولاً' : 'Please enter a summary'); return; }
+      setBugSubmitting(true);
+      try {
+        const bodyMd = await buildIssueMarkdown();
+        setLastIssueMarkdown(bodyMd);
+        const title = `[Bug] ${scrubLocalText(summary.trim()).slice(0, 90)}`;
+        const base = 'https://github.com/ds1s1s1/majlis/issues/new?labels=bug';
+        let issueUrl = `${base}&title=${encodeURIComponent(title)}&body=${encodeURIComponent(bodyMd)}`;
+        if (issueUrl.length > 7500) {
+          await invoke('copy', bodyMd).catch(() => {});
+          await navigator.clipboard?.writeText(bodyMd).catch(() => {});
+          const shortNote = `${bodyMd.slice(0, 1200)}\n\n---\n_(Full scrubbed diagnostics copied to clipboard — paste here if needed)_`;
+          issueUrl = `${base}&title=${encodeURIComponent(title)}&body=${encodeURIComponent(shortNote)}`;
+          toast(ar ? 'تم نسخ التقرير الكامل للحافظة وفتح صفحة الإبلاغ في GitHub' : 'Full report copied to clipboard and opened on GitHub');
+        } else {
+          toast(ar ? 'تم فتح نموذج المشكلة على GitHub بالبيانات المنقّاة' : 'Opened pre-filled issue on GitHub');
+        }
+        await invoke('open', issueUrl);
+      } finally {
+        setBugSubmitting(false);
+      }
+    };
+
+    const copyMarkdownOnly = async () => {
+      if (!summary.trim()) { toast(ar ? 'أدخل ملخص المشكلة أولاً' : 'Please enter a summary'); return; }
+      const bodyMd = await buildIssueMarkdown();
+      setLastIssueMarkdown(bodyMd);
+      await invoke('copy', bodyMd).catch(() => {});
+      await navigator.clipboard?.writeText(bodyMd).catch(() => {});
+      toast(ar ? 'تم نسخ تقرير المشكلة بصيغة Markdown (بدون أي مفاتيح أو مسارات شخصية)' : 'Sanitized Markdown report copied to clipboard');
+    };
+
     return (
-      <SettingSection title={ar ? 'الإبلاغ عن مشكلة وتصدير السجل' : 'Report a bug'}>
+      <SettingSection title={ar ? 'الإبلاغ عن مشكلة عبر GitHub Issues' : 'Report a Bug on GitHub Issues'}>
+        <InfoBanner
+          title={ar ? 'إرسال مباشر ومُنقّى من الأسرار' : 'Direct & Automatically Scrubbed'}
+          body={ar ? 'يتم إزالة أسماء المستخدمين، المسارات الشخصية، المفاتيح، والروابط السرية قبل فتح صفحة GitHub Issues. لا يتم حفظ أي ملف JSON محلي.' : 'Usernames, home paths, tokens, and credentials are stripped before opening GitHub Issues. No local JSON file is exported.'}
+        />
         <div className="space-y-3 py-2 text-xs">
           <input dir="auto" value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={ar ? 'ملخص المشكلة (مطلوب)...' : 'Summary (required)...'} className="w-full rounded-xl bg-black/35 px-3 py-2 text-sm ring-1 ring-white/10 outline-none" />
           <SegmentedRow label={ar ? 'الخطورة' : 'Severity'} value={severity} options={[{ value: 'normal', label: 'Normal' }, { value: 'high', label: 'High' }, { value: 'critical', label: 'Critical' }]} onChange={setSeverity} />
@@ -105,8 +215,18 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
             <textarea dir="auto" rows={3} value={expected} onChange={(e) => setExpected(e.target.value)} placeholder={ar ? 'ما المتوقع حدوثه...' : 'What you expected...'} className="rounded-xl bg-black/35 p-3 ring-1 ring-white/10 outline-none" />
             <textarea dir="auto" rows={3} value={actual} onChange={(e) => setActual(e.target.value)} placeholder={ar ? 'ما حدث فعلياً...' : 'What actually happened...'} className="rounded-xl bg-black/35 p-3 ring-1 ring-white/10 outline-none" />
           </div>
-          <label className="flex items-center gap-2"><input type="checkbox" checked={attachLog} onChange={(e) => setAttachLog(e.target.checked)} />{ar ? 'إرفاق معلومات النسخة وتشخيص المشغل' : 'Attach player & environment info'}</label>
-          <div className="flex justify-end"><button type="button" onClick={generateReport} className="rounded-full px-5 py-2 font-semibold" style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}>{ar ? 'إنشاء تقرير المشكلة' : 'Submit bug report'}</button></div>
+          <label className="flex items-center gap-2"><input type="checkbox" checked={attachLog} onChange={(e) => setAttachLog(e.target.checked)} />{ar ? 'إرفاق ملخص التشخيص المنقّى تلقائياً' : 'Attach automatically scrubbed diagnostics summary'}</label>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button type="button" onClick={copyMarkdownOnly} className="rounded-full bg-white/10 px-4 py-2 font-semibold text-white/90 hover:bg-white/15">
+              {ar ? 'نسخ بصيغة Markdown' : 'Copy Markdown'}
+            </button>
+            <button type="button" disabled={bugSubmitting} onClick={submitGitHubIssue} className="rounded-full px-5 py-2 font-semibold disabled:opacity-50" style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}>
+              {bugSubmitting ? (ar ? 'جاري التجهيز...' : 'Preparing...') : (ar ? 'إرسال إلى GitHub Issues' : 'Open GitHub Issue')}
+            </button>
+          </div>
+          {lastIssueMarkdown ? (
+            <pre dir="ltr" className="max-h-36 overflow-auto rounded-xl bg-black/35 p-3 font-mono text-[11px] text-white/70 ring-1 ring-white/10">{lastIssueMarkdown}</pre>
+          ) : null}
         </div>
       </SettingSection>
     );
@@ -249,29 +369,120 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
 
   return (
     <>
-      <SettingSection title={ar ? 'التحديثات والإصدارات' : 'Updates & Release Channel'}>
+      <SettingSection title={ar ? 'التحديثات والإصدارات (GitHub Releases)' : 'Updates & Release Channel'}>
         <ActionRow
-          label={`${APP_NAME} v${APP_VERSION}`}
-          description={`Build ${APP_BUILD}`}
+          label={`${APP_NAME} v${updInfo?.currentVersion || APP_VERSION}`}
+          description={updInfo?.latestTag
+            ? (updInfo.updateAvailable
+              ? (ar ? `يتوفر تحديث جديد: ${updInfo.latestTag}` : `Update available: ${updInfo.latestTag}`)
+              : (ar ? `محدّث لآخر إصدار (${updInfo.latestTag})` : `Up to date (${updInfo.latestTag})`))
+            : `Build ${APP_BUILD}`}
           buttonLabel={ar ? 'التحقق من التحديثات' : 'Check for updates'}
           busy={checkingUpd}
-          onClick={async () => {
-            setCheckingUpd(true);
-            const r = await cin<{ version?: string; updateAvailable?: boolean }>('updater-check').catch(() => null);
-            setCheckingUpd(false);
-            toast(r?.updateAvailable
-              ? (ar ? 'يتوفر تحديث جديد' : 'New update available')
-              : (ar ? `أنت على أحدث إصدار محلي (v${r?.version || APP_VERSION})` : `Current build v${r?.version || APP_VERSION} verified`));
-          }}
+          onClick={() => runUpdateCheck(false)}
+        />
+        {updInfo?.updateAvailable ? (
+          <div data-testid="updater-available-card" className="my-3 space-y-2.5 rounded-2xl border border-[var(--accent)]/40 bg-[var(--accent)]/10 p-4 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-bold text-sm text-[var(--text-primary)]">
+                <Sparkles size={15} className="text-[var(--accent)]" />
+                <span>{updInfo.latestTag}</span>
+                {updInfo.prerelease ? <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300">BETA</span> : null}
+              </div>
+              {updInfo.assetSize ? (
+                <span dir="ltr" className="font-mono text-[11px] text-[var(--text-secondary)]">{(updInfo.assetSize / (1024 * 1024)).toFixed(1)} MB</span>
+              ) : null}
+            </div>
+            {updInfo.releaseNotes ? (
+              <pre dir="auto" className="max-h-28 overflow-auto whitespace-pre-wrap rounded-xl bg-black/30 p-2.5 text-[11px] text-[var(--text-secondary)]">{updInfo.releaseNotes}</pre>
+            ) : null}
+            {dlState === 'downloading' ? (
+              <div className="space-y-1">
+                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-[var(--accent)] transition-all" style={{ width: `${dlPct}%` }} />
+                </div>
+                <div dir="ltr" className="font-mono text-[11px] text-[var(--text-secondary)]">{dlPct}%</div>
+              </div>
+            ) : null}
+            {dlError ? <div className="text-red-300">{dlError}</div> : null}
+            <div className="flex flex-wrap items-center gap-2">
+              {updInfo.downloadUrl ? (
+                <button
+                  type="button"
+                  disabled={dlState === 'downloading'}
+                  onClick={async () => {
+                    if (dlState === 'ready' && dlPath) {
+                      await cin('updater-install', { filePath: dlPath }).catch((e) => setDlError((e as Error).message));
+                      return;
+                    }
+                    setDlState('downloading');
+                    setDlPct(0);
+                    setDlError(null);
+                    const res = await cin<{ ok?: boolean; filePath?: string }>('updater-download', {
+                      url: updInfo.downloadUrl,
+                      sha256Url: updInfo.sha256Url,
+                      assetName: updInfo.assetName,
+                    }).catch((e) => {
+                      setDlState('error');
+                      setDlError((e as Error).message);
+                      return null;
+                    });
+                    if (res?.ok && res.filePath) {
+                      setDlPath(res.filePath);
+                      setDlState('ready');
+                      toast(ar ? 'تم تنزيل التحديث والتحقق من SHA-256 — جاهز للتثبيت' : 'Update verified and ready to install');
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 font-bold disabled:opacity-50"
+                  style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
+                >
+                  <Download size={13} />
+                  <span>
+                    {dlState === 'ready'
+                      ? (ar ? 'تثبيت التحديث الآن' : 'Install Update Now')
+                      : dlState === 'downloading'
+                        ? (ar ? `جاري التنزيل (${dlPct}%)...` : `Downloading (${dlPct}%)...`)
+                        : (ar ? 'تنزيل التحديث' : 'Download Update')}
+                  </span>
+                </button>
+              ) : null}
+              {updInfo.releaseUrl ? (
+                <button
+                  type="button"
+                  onClick={() => invoke('open', updInfo.releaseUrl!)}
+                  className="rounded-full bg-white/10 px-3.5 py-1.5 font-semibold hover:bg-white/20"
+                >
+                  {ar ? 'فتح صفحة الإصدار على GitHub' : 'Open GitHub Release'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        <ToggleRow
+          label={ar ? 'التحقق التلقائي من التحديثات عند التشغيل' : 'Check for updates automatically on startup'}
+          checked={data.updates.autoCheckOnStartup !== false}
+          onChange={(v) => update((s) => { s.updates.autoCheckOnStartup = v; })}
         />
         <ToggleRow label={ar ? 'إصدارات بيتا التجريبية (Pre-release)' : 'Pre-release builds (Beta)'} checked={data.updates.betaChannel} onChange={(v) => update((s) => { s.updates.betaChannel = v; })} />
-        <SegmentedRow label={ar ? 'تقييمك لهذا البناء' : 'How is this build treating you?'} value={data.updates.buildFeedback || 'better'} options={[{ value: 'worse', label: ar ? 'أسوأ' : 'Worse' }, { value: 'same', label: ar ? 'متشابه' : 'About the same' }, { value: 'better', label: ar ? 'أفضل' : 'Better' }]} onChange={(v) => { update((s) => { s.updates.buildFeedback = v; }); toast(ar ? 'شكراً لملاحظتك' : 'Feedback recorded'); }} />
         <div className="pt-3 space-y-2 text-xs">
-          <div className="font-bold uppercase tracking-wider text-[var(--text-muted)]">{ar ? 'سجل الإصدارات' : 'Roll back to an earlier build'}</div>
-          <div className="flex items-center justify-between rounded-xl border border-[var(--border-subtle)] bg-black/25 px-3 py-2">
-            <span><strong>v{APP_VERSION}</strong> · {APP_BUILD}</span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300"><Check size={11} />CURRENT</span>
-          </div>
+          <div className="font-bold uppercase tracking-wider text-[var(--text-muted)]">{ar ? 'سجل الإصدارات المنشورة' : 'Published Releases'}</div>
+          {(updInfo?.releases?.length ? updInfo.releases : [{ tag: `v${APP_VERSION}`, version: APP_VERSION, name: APP_BUILD, prerelease: true, publishedAt: null, url: 'https://github.com/ds1s1s1/majlis/releases', current: true }]).map((rel) => (
+            <div key={rel.tag} className="flex items-center justify-between gap-2 rounded-xl border border-[var(--border-subtle)] bg-black/25 px-3 py-2">
+              <div className="min-w-0 flex items-center gap-2">
+                <span dir="ltr" className="font-mono font-bold">{rel.tag}</span>
+                {rel.prerelease ? <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px]">Beta</span> : null}
+              </div>
+              <div className="flex items-center gap-2">
+                {rel.current ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300"><Check size={11} />CURRENT</span>
+                ) : (
+                  <button type="button" onClick={() => invoke('open', rel.url)} className="text-[11px] font-semibold text-[var(--accent)] hover:underline">
+                    GitHub
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       </SettingSection>
 

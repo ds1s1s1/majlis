@@ -9,6 +9,7 @@ import { fmtLocaleDate, type Key } from '../i18n';
 import { Icon } from '../ui/Icon';
 import { Img } from '../ui/Img';
 import { SocialAvatar, useVote } from '../ui/Social';
+import { JoinFriendModal } from '../ui/JoinFriendModal';
 import { usePlayQueueStore } from '../store/usePlayQueueStore';
 import { useSettingsStore } from '../settings/useSettingsStore';
 import { CANONICAL_GENRES, genreLabel } from '../config/genres';
@@ -44,6 +45,9 @@ const fmtAud = (n: number | null) => (!n ? '—' : n >= 1e6 ? `${(n / 1e6).toFix
 export function Party() {
   const t = useT(), nav = useNav(), { lang, toast } = useHost(), qc = useQueryClient();
   const [serverStatus, setServerStatus] = useState<{ noServer?: boolean; serverAuthFailed?: boolean }>({});
+  const [joinOpen, setJoinOpen] = useState(false);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [guestReadyLocal, setGuestReadyLocal] = useState(false);
   useEffect(() => {
     invoke<{ noServer?: boolean; serverAuthFailed?: boolean }>('state')
       .then((st) => { if (st) setServerStatus({ noServer: !!st.noServer, serverAuthFailed: !!st.serverAuthFailed }); })
@@ -290,24 +294,46 @@ export function Party() {
             <p className="mt-1 text-sm text-fg2">{t('party_hub_sub')}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {(room?.hostingEnabled || room?.code?.code || room?.role === 'host') ? (
-              <button
-                onClick={async () => {
-                  let target = (room?.code?.code && room.code.exp > Date.now() ? room.code.code : '') || room?.members.find((m) => m.isHost)?.id || '';
-                  if (!target) {
-                    const st = await invoke<{ id?: string }>('state').catch(() => null);
-                    target = st?.id || '';
-                  }
-                  if (!target) return;
-                  const link = await invoke<string>('invite', target).catch(() => `majlis://join/${target}`);
-                  await invoke('copy', link).catch(() => {});
-                  toast(t('party_invite_copied'));
-                }}
-                className="flex items-center gap-1.5 rounded-full bg-acc/15 px-3.5 py-1.5 text-xs font-semibold text-acc ring-1 ring-acc/35 hover:bg-acc hover:text-acc-ink"
-              >
-                <Icon n="share" s={14} /><span>{t('party_copy_invite')}</span>
-              </button>
+            <JoinFriendModal open={joinOpen} onClose={() => setJoinOpen(false)} />
+            {room?.code?.code && room.code.exp > Date.now() ? (
+              <span dir="ltr" data-testid="party-active-code" className="rounded-full bg-white/8 px-3 py-1 font-mono text-xs font-bold tracking-wider text-fg ring-1 ring-white/15">
+                {room.code.code}
+              </span>
             ) : null}
+            <button
+              type="button"
+              data-testid="party-copy-invite-btn"
+              disabled={inviteBusy}
+              onClick={async () => {
+                setInviteBusy(true);
+                try {
+                  const res = await invoke<{ ok?: boolean; code?: string | null; inviteUrl?: string; myId?: string } | null>('host:code', false).catch(() => null);
+                  let targetUrl = res?.inviteUrl || '';
+                  if (!targetUrl) {
+                    const fallbackId = res?.myId || room?.myId || room?.members.find((m) => m.isHost)?.id || (await invoke<{ id?: string }>('state').catch(() => null))?.id || '';
+                    if (fallbackId) targetUrl = await invoke<string>('invite', fallbackId).catch(() => `majlis://join/${fallbackId}`);
+                  }
+                  if (!targetUrl) return;
+                  await invoke('copy', targetUrl).catch(() => {});
+                  await navigator.clipboard?.writeText(targetUrl).catch(() => {});
+                  qc.invalidateQueries({ queryKey: ['social-room'] });
+                  toast(t(res?.code ? 'party_invite_copied' : 'party_invite_id_copied'));
+                } finally {
+                  setInviteBusy(false);
+                }
+              }}
+              className="flex items-center gap-1.5 rounded-full bg-acc/15 px-3.5 py-1.5 text-xs font-semibold text-acc ring-1 ring-acc/35 hover:bg-acc hover:text-acc-ink disabled:opacity-50"
+            >
+              <Icon n="share" s={14} /><span>{t('party_copy_invite')}</span>
+            </button>
+            <button
+              type="button"
+              data-testid="party-join-btn"
+              onClick={() => setJoinOpen(true)}
+              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-fg ring-1 ring-white/15 hover:bg-white/20"
+            >
+              <Icon n="users" s={14} /><span>{t('join_friend')}</span>
+            </button>
             {room?.members.length ? (
               <>
                 <span className="text-xs font-semibold uppercase tracking-wider text-fg3">{t('party_members')}</span>
@@ -324,6 +350,76 @@ export function Party() {
             ) : null}
           </div>
         </div>
+
+        {/* Live Ready Check Status Card */}
+        {(room?.readyState?.active || (room?.readyState?.peers && room.readyState.peers.length > 0) || room?.role) ? (() => {
+          const rs = room?.readyState;
+          const peers = rs?.peers || [];
+          const myReady = room?.role === 'guest'
+            ? (peers.find((p) => p.id === room?.myId)?.ready ?? guestReadyLocal)
+            : !!rs?.hostReady;
+          return (
+            <div data-testid="party-ready-card" className="glass rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 ring-1 ring-acc/25">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-fg">
+                  <span>{t('party_ready_card_title')}</span>
+                  {rs?.active ? <span className="rounded-full bg-acc/20 px-2 py-0.5 text-[10px] font-bold text-acc">{t('party_ready_waiting_all')}</span> : null}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {peers.map((p) => (
+                    <span
+                      key={p.id}
+                      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        p.ready ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/35' : 'bg-white/8 text-fg2'
+                      }`}
+                    >
+                      {p.isHost ? <Icon n="star" s={11} className="text-acc" /> : null}
+                      <span>{p.name}</span>
+                      <span>{p.ready ? '✓' : '…'}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {room?.role !== 'guest' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => { await invoke('ready:check').catch(() => {}); qc.invalidateQueries({ queryKey: ['social-room'] }); }}
+                      className="rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-semibold hover:bg-acc hover:text-acc-ink"
+                    >
+                      {t('party_ready_check')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => { await invoke('ready:go').catch(() => {}); qc.invalidateQueries({ queryKey: ['social-room'] }); }}
+                      className="rounded-full bg-acc/20 px-3.5 py-1.5 text-xs font-bold text-acc hover:bg-acc hover:text-acc-ink"
+                    >
+                      {t('party_countdown')}
+                    </button>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  data-testid="party-ready-toggle-btn"
+                  onClick={async () => {
+                    const next = !myReady;
+                    if (room?.role === 'guest') setGuestReadyLocal(next);
+                    await invoke('ready:ack', next).catch(() => {});
+                    qc.invalidateQueries({ queryKey: ['social-room'] });
+                  }}
+                  className={`rounded-full px-4 py-1.5 text-xs font-bold transition ${
+                    myReady
+                      ? 'bg-emerald-500 text-black ring-1 ring-emerald-300'
+                      : 'bg-acc text-acc-ink hover:brightness-110'
+                  }`}
+                >
+                  {myReady ? t('party_ready_toggle_on') : t('party_ready_yes')}
+                </button>
+              </div>
+            </div>
+          );
+        })() : null}
 
         {/* 1-Click Saved Room Presets & Host Quick Controls + Watch Together URL */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

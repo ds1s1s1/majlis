@@ -425,13 +425,11 @@ export function SystemPage({ pageId }: { pageId: SettingsPageId }) {
 
   if (pageId === 'custom-code') {
     return (
-      <SettingSection title={ar ? 'محررات الأكواد المخصصة' : 'Custom code overrides'}>
-        <ToggleRow label={ar ? 'إظهار محررات الكود (CSS / JS / HTML)' : 'Show the code editors'} checked={sys.customCodeRevealed} onChange={(v) => update((s) => { s.system.customCodeRevealed = v; })} />
+      <SettingSection title={ar ? 'أكواد التخصيص (Custom CSS)' : 'Custom CSS override'}>
+        <ToggleRow label={ar ? 'إظهار محرر CSS المخصص' : 'Show custom CSS editor'} checked={sys.customCodeRevealed} onChange={(v) => update((s) => { s.system.customCodeRevealed = v; })} />
         {sys.customCodeRevealed ? (
           <div className="pt-4 space-y-3">
-            <div><div className="mb-1 font-mono text-[11px] text-[var(--accent)]">Custom CSS</div><textarea dir="ltr" rows={4} value={sys.customCss} onChange={(e) => update((s) => { s.system.customCss = e.target.value; })} className="w-full rounded-xl bg-black/45 p-2.5 font-mono text-xs ring-1 ring-white/10 outline-none" /></div>
-            <div><div className="mb-1 font-mono text-[11px] text-[var(--accent)]">Custom JS</div><textarea dir="ltr" rows={4} value={sys.customJs} onChange={(e) => update((s) => { s.system.customJs = e.target.value; })} className="w-full rounded-xl bg-black/45 p-2.5 font-mono text-xs ring-1 ring-white/10 outline-none" /></div>
-            <div><div className="mb-1 font-mono text-[11px] text-[var(--accent)]">HTML Overlay</div><textarea dir="ltr" rows={3} value={sys.customHtmlOverlay} onChange={(e) => update((s) => { s.system.customHtmlOverlay = e.target.value; })} className="w-full rounded-xl bg-black/45 p-2.5 font-mono text-xs ring-1 ring-white/10 outline-none" /></div>
+            <div><div className="mb-1 font-mono text-[11px] text-[var(--accent)]">Custom CSS</div><textarea dir="ltr" rows={6} value={sys.customCss} onChange={(e) => update((s) => { s.system.customCss = e.target.value; })} className="w-full rounded-xl bg-black/45 p-2.5 font-mono text-xs ring-1 ring-white/10 outline-none" /></div>
           </div>
         ) : null}
       </SettingSection>

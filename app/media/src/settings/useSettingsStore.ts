@@ -381,6 +381,8 @@ export interface SettingsState {
       bufferBrightnessPct: number;
       seekDotShape: 'circle' | 'square' | 'custom';
       seekDotSizePx: number;
+      hudScale: 'compact' | 'default' | 'spacious';
+      autoHideDelaySec: 2 | 3 | 5 | 8;
       visibleControls: string[];
     };
     showStreamFormatChips: boolean;
@@ -478,6 +480,7 @@ export interface SettingsState {
     customHtmlOverlay: string;
   };
   updates: {
+    autoCheckOnStartup: boolean;
     betaChannel: boolean;
     buildFeedback: 'worse' | 'same' | 'better' | null;
   };
@@ -820,7 +823,9 @@ export function createDefaultSettings(): SettingsState {
         bufferBrightnessPct: 35,
         seekDotShape: 'circle',
         seekDotSizePx: 14,
-        visibleControls: ['play', 'seek', 'volume', 'time', 'subtitles', 'audio', 'streams', 'speed', 'night', 'aspect', 'pip', 'fullscreen'],
+        hudScale: 'default',
+        autoHideDelaySec: 3,
+        visibleControls: ['play', 'time', 'volume', 'subtitles', 'audio', 'more', 'pip', 'fullscreen'],
       },
       showStreamFormatChips: true,
       enabledBadges: { '4K': true, '1080p': true, 'REMUX': true, 'WEB-DL': true, 'DV': true, 'HDR10': true, 'Atmos': true, 'HEVC': true, 'AV1': true },
@@ -895,7 +900,8 @@ export function createDefaultSettings(): SettingsState {
       customHtmlOverlay: '',
     },
     updates: {
-      betaChannel: false,
+      autoCheckOnStartup: true,
+      betaChannel: true,
       buildFeedback: null,
     },
   };
@@ -1187,6 +1193,30 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'majlis:settings-v2',
+      merge: (persisted, current) => {
+        const p = (persisted as Partial<SettingsStore> | undefined) || {};
+        if (!p.data) return current;
+        const def = createDefaultSettings();
+        const mergedPl = { ...def.appearance.playerLayout, ...(p.data.appearance?.playerLayout || {}) };
+        if (
+          Array.isArray(mergedPl.visibleControls) &&
+          mergedPl.visibleControls.join(',') === 'play,seek,volume,time,subtitles,audio,streams,speed,night,aspect,pip,fullscreen'
+        ) {
+          mergedPl.visibleControls = [...def.appearance.playerLayout.visibleControls];
+        }
+        return {
+          ...current,
+          data: {
+            ...def,
+            ...p.data,
+            appearance: {
+              ...def.appearance,
+              ...(p.data.appearance || {}),
+              playerLayout: mergedPl,
+            },
+          },
+        };
+      },
       partialize: (state) => {
         const cleanData = clone(state.data);
         cleanData.sources.search.aiApiKey = '';

@@ -144,7 +144,7 @@ export function SettingsShell() {
             <button
               type="button"
               onClick={() => nav.go('home')}
-              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13.5px] font-medium text-[var(--text-secondary)] hover:bg-white/5 hover:text-[var(--text-primary)]"
+              className="app-no-drag inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13.5px] font-medium text-[var(--text-secondary)] hover:bg-white/5 hover:text-[var(--text-primary)]"
             >
               <ArrowLeft size={15} className="flip" />
               <span>{ar ? 'رجوع' : 'Back'}</span>
@@ -305,7 +305,7 @@ export function SettingsShell() {
                 resetPageSection(pageResetSection(activePage, currentMeta.category));
                 toast(ar ? 'تمت استعادة افتراضيات القسم' : 'Section defaults restored');
               }}
-              className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
+              className="app-no-drag inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
             >
               <RotateCcw size={12} />
               <span>{ar ? 'إعادة ضبط القسم' : 'Reset section'}</span>

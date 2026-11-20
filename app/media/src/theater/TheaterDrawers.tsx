@@ -9,7 +9,7 @@ import type { Key, Lang } from '../i18n';
 
 import { formatAddonSub, formatAudioTrack, formatSubTrack } from './trackFormat';
 
-export type DrawerKind = 'sources' | 'episodes' | 'chapters' | 'subs' | 'audio' | 'speed' | 'video' | 'tools' | 'party' | null;
+export type DrawerKind = 'sources' | 'episodes' | 'chapters' | 'subs' | 'audio' | 'speed' | 'video' | 'tools' | 'party' | 'more' | null;
 export type TranslateFn = (k: Key, vars?: Record<string, string | number>) => string;
 
 export interface TheaterPropsMap {

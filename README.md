@@ -560,7 +560,7 @@ Majlis builds upon the work of an extraordinary open-source ecosystem:
 
 <!-- badges -->
 
-[badge-version]: https://img.shields.io/badge/version-0.1beta-D9A441?style=for-the-badge&labelColor=1a1a1a
+[badge-version]: https://img.shields.io/badge/version-0.1.1beta-D9A441?style=for-the-badge&labelColor=1a1a1a
 [badge-license]: https://img.shields.io/badge/license-MIT-D9A441?style=for-the-badge&labelColor=1a1a1a
 [badge-electron]: https://img.shields.io/badge/Electron-38-47848F?style=for-the-badge&logo=electron&logoColor=white&labelColor=1a1a1a
 [badge-react]: https://img.shields.io/badge/React%2018-TypeScript-61DAFB?style=for-the-badge&logo=react&logoColor=white&labelColor=1a1a1a
