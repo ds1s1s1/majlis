@@ -35,6 +35,16 @@ export class Player {
     this.port = port; this.canvas = canvas; this.cursorEl = cursorEl; this.stage = stage;
     this.onStats = onStats; this.onFirstFrame = onFirstFrame; this.onPadState = onPadState || null; this.settings = settings;
     this.ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    // Recover seamlessly if Windows GPU reset / fullscreen switch drops the 2D backing store
+    this._onCtxLost = (e) => { e?.preventDefault?.(); this.waitKey = true; };
+    this._onCtxRestored = () => {
+      this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
+      this.waitKey = true;
+      this.epoch = -1;
+      try { this.port?.postMessage({ t: 'needkey' }); } catch {}
+    };
+    canvas.addEventListener('contextlost', this._onCtxLost);
+    canvas.addEventListener('contextrestored', this._onCtxRestored);
     this.dec = null; this.configs = new Map(); this.epoch = -1; this.waitKey = true;
     this.submit = new Map(); this.stats = { dec: [], enc: [], net: [], frames: 0, drops: 0 };
     this.shapes = new Map();
@@ -687,6 +697,10 @@ export class Player {
     this.setCinema(false);
     this.active = false;
     this.releaseAll();
+    if (this.canvas) {
+      if (this._onCtxLost) this.canvas.removeEventListener('contextlost', this._onCtxLost);
+      if (this._onCtxRestored) this.canvas.removeEventListener('contextrestored', this._onCtxRestored);
+    }
     clearInterval(this.statsTimer); clearInterval(this.padTimer);
     window.removeEventListener('keydown', this.h.keydown, true);
     window.removeEventListener('keyup', this.h.keyup, true);

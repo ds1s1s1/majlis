@@ -113,6 +113,170 @@ fn expand_default_dir() -> PathBuf {
     base.join("Majlis")
 }
 
+fn expand_appdata_dir() -> Option<PathBuf> {
+    std::env::var("APPDATA").ok().map(|b| PathBuf::from(b).join("Majlis"))
+}
+
+fn norm_win_path(p: &Path) -> String {
+    let raw = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    raw.to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_lowercase()
+}
+
+fn is_safe_majlis_install_dir(dir: &Path) -> bool {
+    if !dir.exists() || !dir.is_dir() {
+        return false;
+    }
+    let norm = norm_win_path(dir);
+    if norm.len() <= 3 {
+        return false;
+    }
+    // Never touch user data (%APPDATA%\Majlis) or top-level system/profile roots
+    if let Some(appdata) = expand_appdata_dir() {
+        let ad = norm_win_path(&appdata);
+        if norm == ad || norm.starts_with(&(ad.clone() + "\\")) || ad.starts_with(&(norm.clone() + "\\")) {
+            return false;
+        }
+    }
+    for env_k in ["USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "WINDIR"] {
+        if let Ok(v) = std::env::var(env_k) {
+            let ev = norm_win_path(Path::new(&v));
+            if norm == ev {
+                return false;
+            }
+        }
+    }
+    // Must contain a Majlis program marker (not a user-data-only folder containing majlis.json)
+    let has_marker = dir.join("Majlis.exe").is_file()
+        || dir.join("Uninstall-Majlis.cmd").is_file()
+        || dir.join("resources").join("app.asar").is_file();
+    has_marker && !dir.join("majlis.json").is_file()
+}
+
+fn detect_existing_install_dir() -> Option<PathBuf> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Majlis") {
+        if let Ok(loc) = key.get_value::<String, _>("InstallLocation") {
+            let p = PathBuf::from(loc.trim());
+            if !loc.trim().is_empty() && p.exists() && is_safe_majlis_install_dir(&p) {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(uninst) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall") {
+        for name in uninst.enum_keys().flatten() {
+            if let Ok(sub) = uninst.open_subkey(&name) {
+                let dn: String = sub.get_value("DisplayName").unwrap_or_default();
+                if dn.to_lowercase().contains("majlis") {
+                    if let Ok(loc) = sub.get_value::<String, _>("InstallLocation") {
+                        let p = PathBuf::from(loc.trim());
+                        if !loc.trim().is_empty() && p.exists() && is_safe_majlis_install_dir(&p) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let def = expand_default_dir();
+    if is_safe_majlis_install_dir(&def) {
+        return Some(def);
+    }
+    None
+}
+
+fn remove_dir_with_retry(dir: &Path) -> io::Result<()> {
+    let mut last_err = None;
+    for attempt in 0..4 {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::other("remove_dir_all failed")))
+}
+
+fn cleanup_previous_install(dest: &Path, prev_dir: Option<&Path>) -> Result<(), String> {
+    if dest.exists() {
+        if is_safe_majlis_install_dir(dest) {
+            remove_dir_with_retry(dest)
+                .map_err(|e| format!("Failed removing previous installation at {}: {e}", dest.display()))?;
+        } else {
+            // Remove only known Majlis program files/dirs if dest is a shared or partial folder
+            for sub in ["resources", "locales"] {
+                let p = dest.join(sub);
+                if p.is_dir() {
+                    let _ = remove_dir_with_retry(&p);
+                }
+            }
+            for file in [
+                "Majlis.exe", "Uninstall-Majlis.cmd", "installer_prefs.json", "LICENSE",
+                "LICENSES.chromium.html", "chrome_100_percent.pak", "chrome_200_percent.pak",
+                "resources.pak", "icudtl.dat", "snapshot_blob.bin", "v8_context_snapshot.bin",
+            ] {
+                let p = dest.join(file);
+                if p.is_file() {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+            if let Ok(rd) = fs::read_dir(dest) {
+                for ent in rd.flatten() {
+                    let p = ent.path();
+                    if p.is_file() {
+                        if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
+                            if ext.eq_ignore_ascii_case("dll") {
+                                let _ = fs::remove_file(&p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(prev) = prev_dir {
+        if prev.exists() && norm_win_path(prev) != norm_win_path(dest) && is_safe_majlis_install_dir(prev) {
+            let _ = remove_dir_with_retry(prev);
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_duplicate_uninstall_entries() {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(uninst) = hkcu.open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        KEY_READ | KEY_WRITE,
+    ) else {
+        return;
+    };
+    let mut to_remove = Vec::new();
+    for name in uninst.enum_keys().flatten() {
+        if name.eq_ignore_ascii_case("Majlis") {
+            continue;
+        }
+        if let Ok(sub) = uninst.open_subkey(&name) {
+            let dn: String = sub.get_value("DisplayName").unwrap_or_default();
+            let pub_str: String = sub.get_value("Publisher").unwrap_or_default();
+            let dnl = dn.to_lowercase();
+            if dnl == "majlis" || dnl == "مجلس (majlis)" || (dnl.contains("majlis") && pub_str.to_lowercase().contains("majlis")) {
+                to_remove.push(name);
+            }
+        }
+    }
+    for stale in to_remove {
+        let _ = uninst.delete_subkey_all(&stale);
+    }
+}
+
 fn free_disk_mb(path: &Path) -> u64 {
     let probe = if path.exists() {
         path.to_path_buf()
@@ -163,11 +327,27 @@ fn detect_sfx_bounds(exe_path: &Path) -> Option<(u64, u64)> {
     Some((offset, len))
 }
 
-fn stop_running_majlis_processes() {
+fn stop_running_majlis_processes(dirs: &[&Path]) {
+    // Ask Majlis.exe to close gracefully first so it flushes state & tears down sidecars cleanly
+    if let Ok(out) = Command::new("taskkill")
+        .args(["/IM", "Majlis.exe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        if out.status.success() {
+            std::thread::sleep(std::time::Duration::from_millis(450));
+        }
+    }
+
     let mut killed_any = false;
-    for image in ["Majlis.exe", "majlis-engine.exe", "majlis-media.exe", "mpv.exe"] {
+    for args in [
+        ["/F", "/T", "/IM", "Majlis.exe"].as_slice(),
+        ["/F", "/IM", "majlis-engine.exe"].as_slice(),
+        ["/F", "/IM", "majlis-media.exe"].as_slice(),
+        ["/F", "/IM", "mpv.exe"].as_slice(),
+    ] {
         if let Ok(out) = Command::new("taskkill")
-            .args(["/F", "/IM", image])
+            .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
@@ -176,8 +356,25 @@ fn stop_running_majlis_processes() {
             }
         }
     }
+
+    // Stop any orphaned bundled sidecars (node.exe / ffmpeg.exe / ffprobe.exe) running from Majlis install dirs only
+    for dir in dirs {
+        let d_str = dir.to_string_lossy().replace('\'', "''");
+        if d_str.len() < 4 {
+            continue;
+        }
+        let ps = format!(
+            "$p = '{}'; Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith($p, [StringComparison]::OrdinalIgnoreCase) -and $_.Name -in @('node.exe','ffmpeg.exe','ffprobe.exe','yt-dlp.exe') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
+            d_str
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+
     if killed_any {
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }
 
@@ -281,8 +478,9 @@ fn create_shortcut(lnk_path: &Path, target_exe: &Path, working_dir: &Path) {
 
 #[tauri::command]
 fn detect_environment() -> EnvInfo {
-    let dir = expand_default_dir();
-    let is_repair_mode = dir.join("Majlis.exe").exists();
+    let existing = detect_existing_install_dir();
+    let dir = existing.clone().unwrap_or_else(expand_default_dir);
+    let is_repair_mode = existing.is_some();
     let free_mb = free_disk_mb(&dir);
     EnvInfo {
         default_dir: dir.to_string_lossy().to_string(),
@@ -299,8 +497,13 @@ fn check_disk_space(path: String) -> u64 {
 
 #[tauri::command]
 fn detect_existing_install(path: Option<String>) -> bool {
-    let p = path.map(PathBuf::from).unwrap_or_else(expand_default_dir);
-    p.join("Majlis.exe").exists()
+    if let Some(p) = path {
+        let pb = PathBuf::from(p);
+        if pb.join("Majlis.exe").exists() {
+            return true;
+        }
+    }
+    detect_existing_install_dir().is_some()
 }
 
 #[tauri::command]
@@ -365,14 +568,20 @@ fn start_install(app: AppHandle, state: State<'_, InstallerState>, options: Inst
         } else {
             PathBuf::from(options.dest_dir.trim())
         };
-
-        stop_running_majlis_processes();
-
-        if options.clean_install && dest.exists() {
-            if let Err(e) = fs::remove_dir_all(&dest) {
-                emit_err(format!("Failed clearing previous installation: {e}"));
-                return;
+        let prev_dir = detect_existing_install_dir();
+        let mut proc_dirs: Vec<&Path> = vec![dest.as_path()];
+        if let Some(ref prev) = prev_dir {
+            if norm_win_path(prev) != norm_win_path(&dest) {
+                proc_dirs.push(prev.as_path());
             }
+        }
+
+        stop_running_majlis_processes(&proc_dirs);
+
+        // Automatically remove stale old program files (and previous install dir if moved) while preserving %APPDATA%\Majlis
+        if let Err(e) = cleanup_previous_install(&dest, prev_dir.as_deref()) {
+            emit_err(e);
+            return;
         }
         if let Err(e) = fs::create_dir_all(&dest) {
             emit_err(format!("Failed creating destination folder: {e}"));
@@ -434,32 +643,33 @@ fn start_install(app: AppHandle, state: State<'_, InstallerState>, options: Inst
         let _ = fs::write(
             &uninst_cmd,
             format!(
-                "@echo off\r\ntaskkill /F /IM Majlis.exe >nul 2>&1\r\nreg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Majlis\" /f >nul 2>&1\r\nreg delete \"HKCU\\Software\\Classes\\majlis\" /f >nul 2>&1\r\nrmdir /S /Q \"{}\"\r\n",
+                "@echo off\r\ntaskkill /F /T /IM Majlis.exe >nul 2>&1\r\ntaskkill /F /IM majlis-engine.exe >nul 2>&1\r\ntaskkill /F /IM mpv.exe >nul 2>&1\r\nreg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Majlis\" /f >nul 2>&1\r\nreg delete \"HKCU\\Software\\Classes\\majlis\" /f >nul 2>&1\r\nrmdir /S /Q \"{}\"\r\n",
                 dest.to_string_lossy()
             ),
         );
 
         let target_exe = dest.join("Majlis.exe");
-        if options.desktop_shortcut {
-            if let Ok(up) = std::env::var("USERPROFILE") {
-                create_shortcut(&PathBuf::from(up).join("Desktop").join("Majlis.lnk"), &target_exe, &dest);
+        if let Ok(up) = std::env::var("USERPROFILE") {
+            let desktop_lnk = PathBuf::from(up).join("Desktop").join("Majlis.lnk");
+            let _ = fs::remove_file(&desktop_lnk);
+            if options.desktop_shortcut {
+                create_shortcut(&desktop_lnk, &target_exe, &dest);
             }
         }
-        if options.start_menu_shortcut {
-            if let Ok(ad) = std::env::var("APPDATA") {
-                create_shortcut(
-                    &PathBuf::from(ad).join("Microsoft\\Windows\\Start Menu\\Programs\\Majlis.lnk"),
-                    &target_exe,
-                    &dest,
-                );
+        if let Ok(ad) = std::env::var("APPDATA") {
+            let start_lnk = PathBuf::from(ad).join("Microsoft\\Windows\\Start Menu\\Programs\\Majlis.lnk");
+            let _ = fs::remove_file(&start_lnk);
+            if options.start_menu_shortcut {
+                create_shortcut(&start_lnk, &target_exe, &dest);
             }
         }
 
-        // Registry HKCU Uninstall & optional Run / Protocol
+        // Registry HKCU Uninstall (deduplicated single entry with current Cargo package version) & optional Run / Protocol
+        cleanup_duplicate_uninstall_entries();
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if let Ok((key, _)) = hkcu.create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Majlis") {
             let _ = key.set_value("DisplayName", &"مجلس (Majlis)");
-            let _ = key.set_value("DisplayVersion", &"0.6.1");
+            let _ = key.set_value("DisplayVersion", &env!("CARGO_PKG_VERSION"));
             let _ = key.set_value("Publisher", &"Majlis Contributors");
             let _ = key.set_value("InstallLocation", &dest.to_string_lossy().to_string());
             let _ = key.set_value("DisplayIcon", &target_exe.to_string_lossy().to_string());
@@ -669,5 +879,47 @@ mod tests {
         assert!(contents.contains("first crash line"));
         assert!(contents.contains("second line"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upgrade_cleanup_removes_stale_files_and_moved_old_dir_while_preserving_user_data() {
+        let root = temp_test_dir("upgrade");
+        let old_dir = root.join("old-majlis");
+        let new_dir = root.join("new-majlis");
+        let user_data = root.join("appdata-majlis");
+
+        fs::create_dir_all(old_dir.join("resources").join("engine")).unwrap();
+        fs::write(old_dir.join("Majlis.exe"), b"old-exe").unwrap();
+        fs::write(old_dir.join("resources").join("app.asar"), b"old-asar").unwrap();
+        fs::write(old_dir.join("resources").join("engine").join("majlis-media.exe"), b"stale-media").unwrap();
+
+        fs::create_dir_all(new_dir.join("resources")).unwrap();
+        fs::write(new_dir.join("Majlis.exe"), b"prev-dest-exe").unwrap();
+        fs::write(new_dir.join("stale.dll"), b"stale-dll").unwrap();
+
+        fs::create_dir_all(&user_data).unwrap();
+        fs::write(user_data.join("majlis.json"), b"{\"nick\":\"KeepMe\"}").unwrap();
+
+        assert!(is_safe_majlis_install_dir(&old_dir));
+        assert!(is_safe_majlis_install_dir(&new_dir));
+        assert!(!is_safe_majlis_install_dir(&user_data), "must never flag user-data dir as install dir");
+
+        cleanup_previous_install(&new_dir, Some(&old_dir)).unwrap();
+        assert!(!old_dir.exists(), "moved previous install directory should be removed");
+        assert!(!new_dir.exists(), "stale destination install directory should be cleared cleanly");
+        assert!(user_data.join("majlis.json").is_file(), "user data must remain intact");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn safe_guard_rejects_unrelated_directories() {
+        let root = temp_test_dir("unrelated");
+        let random_dir = root.join("MyDocuments");
+        fs::create_dir_all(&random_dir).unwrap();
+        fs::write(random_dir.join("notes.txt"), b"important").unwrap();
+
+        assert!(!is_safe_majlis_install_dir(&random_dir));
+        let _ = fs::remove_dir_all(&root);
     }
 }

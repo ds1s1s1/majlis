@@ -15,6 +15,8 @@ const { Movie } = require('./movie');
 const { SyncHost } = require('./sync');
 
 const ROLES = ['watch', 'pad', 'kbm', 'full'];
+const ROOM_MODES = ['cinema', 'watch', 'play'];
+const normalizeRoomMode = (m) => (ROOM_MODES.includes(m) ? m : 'play');
 
 // [0x02][flags][epoch][hostTs u32][pts u32][seq u16] + opus
 let audioSeq = 0;
@@ -52,9 +54,10 @@ class Host extends EventEmitter {
     net.on('knock', (k) => this._onKnock(k));
     net.on('code', (c) => { this.code = c.code ? { code: c.code, exp: c.exp } : null; this.emit('update'); });
     // the engine came back after a crash: pads, audio, pointer and streams again
-    helper.on('restart', () => { this._helperOn = false; this.gameAudioOn = undefined; if (this.guests.size) { this._ensureHelper(); } });
-    helper.on('opus', (pkt) => { if (!this.movie.info && !this._privacy) this._sendAudio(audioPacket(pkt.subarray(4), 0, 0, 0)); });
+    helper.on('restart', () => { this._helperOn = false; this.gameAudioOn = undefined; if (this.guests.size && this.mode !== 'cinema') { this._ensureHelper(); } });
+    helper.on('opus', (pkt) => { if (this.mode !== 'cinema' && !this.movie.info && !this._privacy) this._sendAudio(audioPacket(pkt.subarray(4), 0, 0, 0)); });
     helper.on('cursor', (c) => {
+      if (this.mode === 'cinema') return;
       const b = Buffer.allocUnsafe(14); b[0] = 0x0a; b.writeFloatLE(c.x, 1); b.writeFloatLE(c.y, 5); b[9] = c.visible ? 1 : 0; b.writeInt32LE(c.shape, 10);
       this.lastCursor = b;
       if (!this._privacy) this._broadcastRaw(b);
@@ -76,8 +79,8 @@ class Host extends EventEmitter {
       for (const g of this.guests.values()) if (this._padSlotOf(g) === r.slot) { const b = Buffer.from([0x0b, r.large, r.small]); g.link.send(b); g.link.send(b); }
     });
 
-    // ---- watch party
-    this.mode = store.get('mode') === 'watch' ? 'watch' : 'play';
+    // ---- room mode: 'cinema' (synced independent streams, zero screen capture) | 'watch' (screen/file) | 'play' (co-op gaming)
+    this.mode = normalizeRoomMode(store.get('mode'));
     this.movie = new Movie(ffmpeg);
     this.sync = new SyncHost();
     this.vote = []; // tonight's nominations: [{ id, type, name, poster, by, voters: [ids] }]
@@ -209,20 +212,22 @@ class Host extends EventEmitter {
     const prev = this.store.friend(k.from);
     const name = prev?.name && prev.name !== k.from ? prev.name : k.nick || k.from;
     const friend = this.store.upsertFriend({ id: k.from, pk: k.pk, name, lastSeen: now(), ...(trust ? { trust: 'always', role } : {}) });
+    const isCinema = this.mode === 'cinema';
+    const effRole = isCinema ? 'watch' : (ROLES.includes(role) ? role : 'watch');
     const g = {
-      sid, link, id: k.from, nick: friend.name, role: ROLES.includes(role) ? role : 'watch', slot: null, padType: 'x360',
-      tier: null, tx: makeTx(link), joined: now(), auto, caps: k.caps || {}, fb: null, stats: {}, inSeq: -1,
+      sid, link, id: k.from, nick: friend.name, role: effRole, slot: null, padType: 'x360',
+      tier: isCinema ? 'cinema' : null, tx: makeTx(link), joined: now(), auto, caps: k.caps || {}, fb: null, stats: {}, inSeq: -1,
       expiresAt: duration === 'session' ? null : now() + ({ '10m': 600e3, '1h': 3600e3 }[duration] || 0) || null,
       muted: false, hand: false, configSent: {},
     };
     this.guests.set(sid, g);
     // a frame we dropped to stay live: the engine stops referencing it, so nothing smears
     g.tx.onSkip = (id) => g.tierEnc?.()?.invalidate?.([id]);
-    if (CAN.pad(g.role)) g.slot = wantSlot && ![...this.guests.values()].some((x) => x !== g && x.slot === wantSlot) ? wantSlot : this._freeSlot();
+    if (!isCinema && CAN.pad(g.role)) g.slot = wantSlot && ![...this.guests.values()].some((x) => x !== g && x.slot === wantSlot) ? wantSlot : this._freeSlot();
     this._wire(g);
     this.emit('joined', { sid, name: g.nick, auto });
     this.net.setPresence({ busy: true });
-    this._ensureHelper();
+    if (!isCinema) this._ensureHelper();
     this._retier();
     this.emit('update');
     return true;
@@ -238,10 +243,12 @@ class Host extends EventEmitter {
   _wire(g) {
     const { link } = g;
     const wc = this.getWatchControl();
-    link.ctrl({ t: 'welcome', host: this.store.get('nick') || this.net.id.id, hostId: this.net.id.id, role: g.role, slot: g.slot, safety: link.safety, hotseat: this.hotseat.on, mode: this.mode, canControl: this._canControl(g), watchControl: wc, perms: this._perms(g) });
+    link.ctrl({ t: 'welcome', host: this.store.get('nick') || this.net.id.id, hostId: this.net.id.id, role: g.role, slot: g.slot, safety: link.safety, hotseat: this.hotseat.on, mode: this.mode, roomMode: this.mode, canControl: this._canControl(g), watchControl: wc, perms: this._perms(g) });
     if (this.mode === 'watch' && this.movie.info) link.ctrl({ t: 'movie', ...this._movieView() });
     for (const c of this.chatLog.slice(-30)) link.ctrl({ t: 'chat', ...c, old: true });
-    for (const s of this.cursorShapes.values()) link.ctrl({ t: 'cursor_shape', ...s });
+    if (this.mode !== 'cinema') {
+      for (const s of this.cursorShapes.values()) link.ctrl({ t: 'cursor_shape', ...s });
+    }
     // a watch-together film is on: the newcomer opens it on their own line and falls in step
     if (this.sync.state) link.ctrl({ t: 'sync_state', ...this.sync.state });
     if (this.vote.length) link.ctrl({ t: 'vote_state', items: this._voteView() });
@@ -261,7 +268,7 @@ class Host extends EventEmitter {
         g.maxKbps = +m.caps?.maxKbps || 0;
         g.screen = m.screen; g.padType = m.padType === 'ds4' ? 'ds4' : 'x360';
         g.connType = m.connType;
-        if (g.slot) this._attachPad(g);
+        if (this.mode !== 'cinema' && g.slot) this._attachPad(g);
         this._retier(true);
         break;
       case 'key': g.tierEnc()?.requestKeyframe(); break;
@@ -411,13 +418,27 @@ class Host extends EventEmitter {
 
   // ------------------------------------------------------------------ mode & movie
   setMode(mode) {
-    this.mode = mode === 'watch' ? 'watch' : 'play';
+    this.mode = normalizeRoomMode(mode);
     this.store.set('mode', this.mode);
-    if (this.mode === 'play') {
-      this._saveResume(); this.movie.stop(); this._gameAudio(true);
+    if (this.mode === 'cinema') {
+      this._saveResume();
+      this.movie.stop();
+      this._stopEncoders();
+      if (this._helperOn) {
+        this._gameAudio(false);
+        this.helper.cmd({ cmd: 'cursor', on: false });
+        this.helper.cmd({ cmd: 'release_all' });
+        this.helper.cmd({ cmd: 'pads_clear' });
+      }
+      for (const g of this.guests.values()) { g.slot = null; g.tier = 'cinema'; g.tierEnc = () => null; }
+    } else if (this.mode === 'play') {
+      this._saveResume(); this.movie.stop(); if (this.guests.size) this._gameAudio(true);
       for (const g of this.guests.values()) g.rc?.setMin?.(1500);
     }
-    for (const g of this.guests.values()) { g.configSent = {}; g.link.ctrl({ t: 'mode', mode: this.mode, canControl: this._canControl(g), watchControl: this.getWatchControl() }); }
+    for (const g of this.guests.values()) {
+      g.configSent = {};
+      g.link.ctrl({ t: 'mode', mode: this.mode, roomMode: this.mode, canControl: this._canControl(g), watchControl: this.getWatchControl() });
+    }
     if (this.guests.size) this._retier();
     this.emit('update');
   }
@@ -680,7 +701,10 @@ class Host extends EventEmitter {
       g.tx.fecRatio = g.rc.fecRatio;
       return;
     }
-    if (ch === 0x03) return this._input(g, b);
+    if (ch === 0x03) {
+      if (this.mode === 'cinema') return;
+      return this._input(g, b);
+    }
     if (ch === 0x09) { // voice from a guest: play here and pass to everyone else
       if (g.muted) return;
       const idx = this._speakerIdx(g);
@@ -890,6 +914,14 @@ class Host extends EventEmitter {
   }
 
   async _retierNow(forceKey) {
+    // Cinema Majlis strictly never captures or streams the host desktop/screen.
+    if (this.mode === 'cinema') {
+      this._stopEncoders();
+      if (this._helperOn) this._gameAudio(false);
+      for (const g of this.guests.values()) { g.tier = 'cinema'; g.tierEnc = () => null; }
+      this.emit('update');
+      return;
+    }
     if (this.mode === 'watch' && this.movie.info) {
       this._stopEncoders();
       for (const g of this.guests.values()) {
@@ -1272,7 +1304,7 @@ class Host extends EventEmitter {
 
   stats() {
     return {
-      enabled: this.enabled, code: this.code, hotseat: this.hotseat, mode: this.mode, privacy: !!this._privacy, watchControl: this.getWatchControl(), readyState: this.readySnapshot(), movie: this.movie.info ? this._movieView() : null,
+      enabled: this.enabled, code: this.code, hotseat: this.hotseat, mode: this.mode, roomMode: this.mode, privacy: !!this._privacy, watchControl: this.getWatchControl(), readyState: this.readySnapshot(), movie: this.movie.info ? this._movieView() : null,
       tiers: Object.fromEntries(Object.entries(this.tiers).map(([k, t]) => [k, t && { codec: t.codec, kbps: t.kbps, encoder: t.enc.config?.encoder || t.opts.enc.name, fpsNow: t.fpsNow || t.opts.fps, fps: t.opts.fps, scale: t.opts.scale || null, lan: t.opts.lan }])),
       upKbps: [...this.guests.values()].reduce((a, g) => a + (g.fb?.kbps || 0), 0),
       guests: [...this.guests.values()].map((g) => ({
@@ -1293,4 +1325,4 @@ class Host extends EventEmitter {
   }
 }
 
-module.exports = { Host, ROLES, CAN };
+module.exports = { Host, ROLES, ROOM_MODES, normalizeRoomMode, CAN };

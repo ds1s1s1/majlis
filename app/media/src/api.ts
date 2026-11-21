@@ -62,8 +62,13 @@ export const useMeta = (type: Type | null, id: string | null) =>
 export const useTrending = (type: 'movie' | 'series') => useQuery({ queryKey: ['trending', type], queryFn: () => cin<Item[]>('trending', { type }), staleTime: H });
 export const useContinue = () => useQuery({ queryKey: ['continue'], queryFn: () => cin<LibItem[]>('continue'), staleTime: 0 });
 export const useLibrary = () => useQuery({ queryKey: ['library'], queryFn: () => cin<LibItem[]>('library'), staleTime: 0 });
-export const useStreams = (type: Type, id: string | null, bingeGroup?: string) =>
-  useQuery({ queryKey: ['streams', type, id], queryFn: () => cin<{ streams: Ranked[]; errors: { addon: string; error: string }[] }>('streams', { type, id, bingeGroup }), enabled: !!id, staleTime: 2 * 60000 });
+export const useStreams = (type: Type, id: string | null, bingeGroup?: string, collectMs = 0) =>
+  useQuery({
+    queryKey: collectMs > 0 ? ['streams', type, id, 'collect', collectMs] : ['streams', type, id],
+    queryFn: () => cin<{ streams: Ranked[]; errors: { addon: string; error: string }[] }>('streams', { type, id, bingeGroup, ...(collectMs > 0 ? { collectMs } : {}) }),
+    enabled: !!id,
+    staleTime: 2 * 60000,
+  });
 export const useSearch = (q: string) =>
   useQuery({ queryKey: ['search', q], queryFn: () => cin<{ addon: string; type: Type; name: string; metas: Preview[] }[]>('search', { q }), enabled: q.trim().length > 1, staleTime: 10 * 60000 });
 
@@ -309,7 +314,7 @@ export interface ReadyPeerView { id: string; sid?: string; name: string; ready: 
 export interface ReadyStateView { active: boolean; hostReady?: boolean; peers: ReadyPeerView[]; prompt?: boolean }
 export interface RoomPresetItem {
   id: string; builtin?: boolean; name: string; nameAr?: string; icon: string;
-  mode: 'play' | 'watch'; watchControl: 'host' | 'guest' | 'all';
+  mode: 'cinema' | 'play' | 'watch'; watchControl: 'host' | 'guest' | 'all';
   acceptCodes: boolean; allowChat: boolean; allowReactions: boolean;
   autoNext: boolean; autoDuck: boolean; qualityPreset: 'speed' | 'balanced' | 'quality';
   maxRes: 'source' | '720' | '1080' | '1440'; fps: number; defaultRole: 'watch' | 'pad' | 'kbm' | 'full';
@@ -394,7 +399,7 @@ export function parseJoinTarget(raw: string): { kind: 'join' | 'code'; target: s
 }
 
 export interface SocialRoom {
-  role: 'host' | 'guest' | null; myId?: string; hasServer?: boolean; hostingEnabled: boolean; code: { code: string; exp: number } | null;
+  role: 'host' | 'guest' | null; roomMode?: 'cinema' | 'watch' | 'play'; myId?: string; hasServer?: boolean; hostingEnabled: boolean; code: { code: string; exp: number } | null;
   guestState?: { state: string; target?: string | null } | null;
   members: PartyMember[]; vote: { id: string; type: string; name: string; poster: string | null; by?: string; votes: number; voters: string[] }[];
   chat: { id: string; from: string; accent: string; text: string; at: number }[];

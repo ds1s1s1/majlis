@@ -16,6 +16,39 @@ const enc = encodeURIComponent; // leaves A-Z a-z 0-9 - _ . ! ~ * ' ( ): stremio
 
 class AddonError extends Error { constructor(kind, msg) { super(msg || kind); this.kind = kind; } }
 
+// Permanent hard block for adult / NSFW / pornographic / 18+ addons across store & manual install.
+const ADULT_EXPLICIT_RE = /(?:^|[^a-z0-9])(nsfw|porn|porno|pornography|pornhub|xvideos|xnxx|xhamster|redtube|youporn|spankbang|eporner|brazzers|chaturbate|stripchat|onlyfans|cam4|bongacams|xxx|hentai|hanime|nhentai|doujin|ecchi|erotica|erotic|jav|milf|fetish|bdsm|rule34|r34|camgirl|livecam|playboy|penthouse|hustler|dirtyflix|lustcinema|sex\s*cams?|uncensored\s*18|18\+|21\+)(?:$|[^a-z0-9])/i;
+const ADULT_SLUG_RE = /(?:^|[^a-z0-9])(adult|adults|nsfw|porn|porno|xxx|hentai|hanime|erotica|erotic|jav|18\+|21\+|sex|nude|nudity|xvideos|pornhub|xnxx|xhamster|redtube|youporn|spankbang|eporner|brazzers|chaturbate|onlyfans)(?:$|[^a-z0-9])/i;
+const ADULT_DESC_RE = /(?<!young\s)\b(?:adults?\s*(?:only|content|videos?|movies?|streams?|channels?|entertainment|addons?|catalogs?|18\+?))\b/i;
+
+function isAdultCategory(cat) {
+  const slug = String(typeof cat === 'string' ? cat : (cat?.slug || cat?.id || '')).trim();
+  const name = String(typeof cat === 'string' ? cat : (cat?.name || '')).trim();
+  return ADULT_SLUG_RE.test(slug) || ADULT_SLUG_RE.test(name);
+}
+
+function isAdultAddon(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const m = entry.manifest && typeof entry.manifest === 'object' ? entry.manifest : entry;
+  if (entry.nsfw === true || entry.adult === true) return true;
+  if (m.nsfw === true || m.adult === true || m.behaviorHints?.adult === true) return true;
+  const cats = Array.isArray(entry.categories) ? entry.categories : [];
+  if (cats.some(isAdultCategory)) return true;
+  const tags = Array.isArray(entry.tags) ? entry.tags : (Array.isArray(m.tags) ? m.tags : []);
+  if (tags.some((t) => ADULT_SLUG_RE.test(String(t || '')))) return true;
+  const types = Array.isArray(m.types) ? m.types : [];
+  if (types.some((t) => ADULT_SLUG_RE.test(String(t || '')))) return true;
+  const idFields = [entry.slug, entry.manifestUrl, entry.page, entry.url, m.id, m.transportUrl].filter(Boolean).join(' ');
+  if (ADULT_SLUG_RE.test(idFields)) return true;
+  const textFields = [
+    entry.name, m.name, entry.description, m.description,
+    ...(Array.isArray(m.catalogs) ? m.catalogs.flatMap((c) => [c?.id, c?.name, c?.type]) : []),
+  ].filter(Boolean).join(' ');
+  if (ADULT_EXPLICIT_RE.test(textFields) || ADULT_DESC_RE.test(textFields)) return true;
+  if (/\badult\b/i.test(String(m.name || entry.name || '')) && !/\byoung\s+adult\b/i.test(String(m.name || entry.name || ''))) return true;
+  return false;
+}
+
 function transportKind(url) {
   const u = String(url).split('?')[0].replace(/\/+$/, '');
   if (u.endsWith('/manifest.json')) return 'http';
@@ -291,10 +324,11 @@ class AddonClient {
     }
   }
 
-  // a manifest the user is about to install: refused when it can't work unconfigured
+  // a manifest the user is about to install: refused when it can't work unconfigured or is adult/NSFW
   async check(url) {
     this.resetHealth(url);
     const m = await this.manifest(url, { force: true });
+    if (isAdultAddon({ manifestUrl: url, manifest: m })) throw new AddonError('adult-blocked', 'Adult / NSFW addons are not permitted in Majlis');
     if (m.behaviorHints.configurationRequired) throw new AddonError('needs-config', 'this addon must be configured on its own page first');
     return m;
   }
@@ -337,14 +371,29 @@ class AddonClient {
   }
 
   // resolves with the first batch as soon as at least one addon returns content (plus a short grace
-  // window), while slower addons keep streaming via `onEach`
-  async progressive(urls, path, { onEach, graceMs = 60, maxWaitMs = 0 } = {}) {
+  // window), OR when `collectMs > 0` waits a full collection window (only short-circuiting early if
+  // 100% of enabled stream addons have returned), while slower addons keep streaming via `onEach`
+  async progressive(urls, path, { onEach, graceMs = 60, collectMs = 0, maxWaitMs = 0 } = {}) {
     const ms = await Promise.all(urls.map((u) => (this.isDead(u) ? Promise.resolve(null) : this.manifest(u).then((m) => m, () => null))));
     const settled = [];
-    let pending = 0, timer = null, capTimer = null, done = false;
+    let pending = 0, timer = null, collectTimer = null, capTimer = null, done = false, hasResult = false, windowElapsed = !(collectMs > 0);
     return new Promise((resolve) => {
-      const finish = () => { if (done) return; done = true; clearTimeout(timer); clearTimeout(capTimer); resolve([...settled]); };
-      if (maxWaitMs > 0) capTimer = setTimeout(finish, maxWaitMs);
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        clearTimeout(collectTimer);
+        clearTimeout(capTimer);
+        resolve([...settled]);
+      };
+      if (maxWaitMs > 0) { capTimer = setTimeout(finish, maxWaitMs); capTimer.unref?.(); }
+      if (collectMs > 0) {
+        collectTimer = setTimeout(() => {
+          windowElapsed = true;
+          if (hasResult || pending === 0) finish();
+        }, collectMs);
+        collectTimer.unref?.();
+      }
       const jobs = urls.map((u, i) => {
         if (!ms[i] || !isResourceSupported(ms[i], path)) return null;
         pending++;
@@ -354,9 +403,17 @@ class AddonClient {
         ).then((x) => {
           settled.push(x);
           pending--;
+          if (x.result) hasResult = true;
           onEach?.(x, done);
           if (pending === 0) finish();
-          else if (!done && x.result && !timer) timer = setTimeout(finish, graceMs);
+          else if (!done && x.result) {
+            if (collectMs > 0) {
+              if (windowElapsed) finish();
+            } else if (!timer) {
+              timer = setTimeout(finish, graceMs);
+              timer.unref?.();
+            }
+          }
         });
       }).filter(Boolean);
       if (!jobs.length) finish();
@@ -377,4 +434,4 @@ function legacyResult(resource, body) {
   return {};
 }
 
-module.exports = { AddonClient, AddonError, normManifest, fromLegacyManifest, isResourceSupported, isExtraSupported, extendExtra, resourceUrl, legacyUrl, parseResponse, normalizeUrl, transportKind, sortedJson, SKIP_PROP };
+module.exports = { AddonClient, AddonError, normManifest, fromLegacyManifest, isResourceSupported, isExtraSupported, extendExtra, resourceUrl, legacyUrl, parseResponse, normalizeUrl, transportKind, sortedJson, SKIP_PROP, isAdultAddon, isAdultCategory };

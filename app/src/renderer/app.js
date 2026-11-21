@@ -205,9 +205,9 @@ function viewHome() {
       <section class="modepick">
         <h2>${t('mode_label')}</h2>
         <div class="modes">
-          <button class="mode ${S.host?.mode !== 'watch' ? 'on' : ''}" data-m="play">${icon('pad', 26)}<span class="mt">${t('mode_play')}</span><span class="ms">${t('mode_play_sub')}</span></button>
+          <button class="mode ${(!S.host?.mode || S.host?.mode === 'play') ? 'on' : ''}" data-m="play">${icon('pad', 26)}<span class="mt">${t('mode_play')}</span><span class="ms">${t('mode_play_sub')}</span></button>
           <button class="mode ${S.host?.mode === 'watch' ? 'on' : ''}" data-m="watch">${icon('film', 26)}<span class="mt">${t('mode_watch')}</span><span class="ms">${t('mode_watch_sub')}</span></button>
-          <button class="mode" id="gocinema">${icon('star', 26)}<span class="mt">${t('mode_cinema')}</span><span class="ms">${t('mode_cinema_sub')}</span></button>
+          <button class="mode ${S.host?.mode === 'cinema' ? 'on' : ''}" id="gocinema">${icon('star', 26)}<span class="mt">${t('mode_cinema')}</span><span class="ms">${t('mode_cinema_sub')}</span></button>
         </div>
       </section>
 
@@ -259,7 +259,12 @@ function mountHome() {
   $('#cpy').onclick = () => { api.invoke('copy', id); toast(t('copied')); };
   $('#inv').onclick = async () => { const l = await api.invoke('invite', id); api.invoke('copy', l); toast(t('copied')); };
   $$('.mode[data-m]').forEach((b) => (b.onclick = async () => { S.host = await api.invoke('mode', b.dataset.m); render(); }));
-  $('#gocinema') && ($('#gocinema').onclick = () => go('cinema'));
+  $('#gocinema') && ($('#gocinema').onclick = async () => {
+    if (!S.host?.guests?.length || S.host?.mode === 'cinema') {
+      S.host = await api.invoke('mode', 'cinema').catch(() => S.host);
+    }
+    go('cinema');
+  });
   $('#hostsw').onclick = async () => { S.host = await api.invoke('host:enable', !S.host?.enabled); render(); renderRail(); };
   $('#newcode') && ($('#newcode').onclick = () => api.invoke('host:code', false));
   $('#revoke') && ($('#revoke').onclick = () => api.invoke('host:code', true));
@@ -1447,24 +1452,59 @@ function handleEvent(m) {
       go('home'); S.connect.target = m.target; render(); doConnect(m.target); break;
     case 'guest':
       if (m.state === 'reconnecting') { if (S.player) { $('#stageWait').hidden = false; $('#stageWait').innerHTML = `<span class="pulse"></span><span>${t('reconnecting')}</span>`; } break; }
-      if (m.state === 'linked') { S.guestLinked = true; openStage(m); }
-      else if (m.state === 'failed') { S.guestLinked = false; S.connect = { state: 'failed', reason: m.reason, target: m.target }; renderKnockLine(); }
-      else if (m.state === 'ended') { S.guestLinked = false; hub(false); if (S.player && !S.local) { closeStage('ended'); if (m.summary && m.summary.ms > 60000) watchUI().summary([m.summary]); } }
+      if (m.state === 'linked') {
+        S.guestLinked = true;
+        S.pendingStage = m;
+        clearTimeout(S.pendingStageTimer);
+        // Wait for host's 'welcome' packet so Cinema Majlis guests stay in Cinema UI without pulling into a screen stream
+        S.pendingStageTimer = setTimeout(() => {
+          if (S.guestLinked && S.pendingStage && !S.player && S.ctrl?.mode !== 'cinema' && S.view !== 'cinema') {
+            const info = S.pendingStage;
+            S.pendingStage = null;
+            openStage(info);
+          }
+        }, 2000);
+      }
+      else if (m.state === 'failed') { S.guestLinked = false; S.pendingStage = null; clearTimeout(S.pendingStageTimer); S.connect = { state: 'failed', reason: m.reason, target: m.target }; renderKnockLine(); }
+      else if (m.state === 'ended') { S.guestLinked = false; S.pendingStage = null; clearTimeout(S.pendingStageTimer); hub(false); if (S.player && !S.local) { closeStage('ended'); if (m.summary && m.summary.ms > 60000) watchUI().summary([m.summary]); } else MEDIA?.update(mediaHost()); }
       break;
-    case 'kicked': S.guestLinked = false; hub(false); if (S.player) closeStage('kicked'); break;
+    case 'kicked': S.guestLinked = false; S.pendingStage = null; clearTimeout(S.pendingStageTimer); hub(false); if (S.player) closeStage('kicked'); else MEDIA?.update(mediaHost()); break;
     case 'guest-stats': S.gstats = m; updateMicroPill(); break;
     case 'guest-ctrl': {
       const c = S.ctrl;
       if (m.t === 'welcome') {
-        c.role = m.role; c.slot = m.slot; c.host = { ...c.host, nick: m.host, id: m.hostId }; c.canControl = m.canControl; c.perms = m.perms || { chat: true, react: true };
-        if (m.mode === 'watch' && c.mode !== 'watch') { c.mode = 'watch'; if (S.player) watchUI().setupWatchStage(); }
-        renderSpecLounge();
+        clearTimeout(S.pendingStageTimer);
+        const rm = m.roomMode || m.mode || 'play';
+        const stageInfo = S.pendingStage;
+        S.pendingStage = null;
+        if (rm === 'cinema') {
+          if (S.player && !S.local) closeStage();
+          S.ctrl = { ...c, role: m.role, slot: null, host: { ...c.host, nick: m.host, id: m.hostId }, canControl: m.canControl, perms: m.perms || { chat: true, react: true }, mode: 'cinema', roomMode: 'cinema' };
+          S.connect = { state: 'idle', target: '' };
+          if (S.view !== 'cinema') go('cinema');
+          hub(true);
+          MEDIA?.update(mediaHost());
+        } else {
+          if (!S.player) openStage(stageInfo || { host: { id: m.hostId, nick: m.host } });
+          S.ctrl.role = m.role; S.ctrl.slot = m.slot; S.ctrl.host = { ...S.ctrl.host, nick: m.host, id: m.hostId }; S.ctrl.canControl = m.canControl; S.ctrl.perms = m.perms || { chat: true, react: true }; S.ctrl.mode = rm; S.ctrl.roomMode = rm;
+          if (rm === 'watch' && S.player) watchUI().setupWatchStage();
+          renderSpecLounge();
+        }
       }
       if (m.t === 'mode') {
-        c.mode = m.mode; c.canControl = m.canControl;
-        if (S.player) { if (m.mode === 'watch') watchUI().setupWatchStage(); else watchUI().teardownWatchStage(); }
-        renderSpecLounge();
-        updateMicroPill();
+        const rm = m.roomMode || m.mode || 'play';
+        c.mode = rm; c.roomMode = rm; c.canControl = m.canControl;
+        if (rm === 'cinema') {
+          if (S.player && !S.local) closeStage();
+          if (S.view !== 'cinema') go('cinema');
+          hub(true);
+          MEDIA?.update(mediaHost());
+        } else {
+          if (S.guestLinked && !S.player) openStage(S.pendingStage || { host: c.host });
+          if (S.player) { if (rm === 'watch') watchUI().setupWatchStage(); else watchUI().teardownWatchStage(); }
+          renderSpecLounge();
+          updateMicroPill();
+        }
       }
       if (m.t === 'privacy') applyPrivacyOverlay(!!m.on);
       if (m.t === 'movie') { S.gmovie = { ...m, rx: performance.now() }; watchUI().renderBar(); }

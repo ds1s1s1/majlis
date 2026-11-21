@@ -1,7 +1,7 @@
 {
   "name": "majlis",
   "productName": "Majlis",
-  "version": "0.1.2-beta",
+  "version": "0.1.3-beta",
   "description": "Cinema-first media center with embedded libmpv, Stremio addons, Watch Party, and ultra-low-latency Co-op gaming.",
   "main": "src/main/main.js",
   "author": "ds1s1s1",

@@ -38,6 +38,25 @@ export function Html5Stage({ url, startPos = 0, isHls = false, cmdSeq, onFirstFr
     let mpeg: mpegts.Player | null = null;
     let destroyed = false;
     let lastEmitAt = 0;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    let stallRetried = false;
+
+    const clearStall = () => {
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+    };
+    const armStall = () => {
+      clearStall();
+      stallTimer = setTimeout(() => {
+        if (destroyed || video.paused) return;
+        if (hls && !stallRetried) {
+          stallRetried = true;
+          try { hls.startLoad(); } catch {}
+          armStall();
+          return;
+        }
+        sendHtml5Event({ error: 'Stream stalled for too long' });
+      }, 15000);
+    };
 
     const emitSnapshot = (force = false) => {
       const now = Date.now();
@@ -77,10 +96,10 @@ export function Html5Stage({ url, startPos = 0, isHls = false, cmdSeq, onFirstFr
       video.play().catch(() => {});
     };
 
-    const onTimeUpdate = () => emitSnapshot(false);
-    const onPlaying = () => { markFirstFrame(); sendHtml5Event({ props: { pause: false, 'paused-for-cache': false } }); };
-    const onPause = () => sendHtml5Event({ name: 'pause', value: true });
-    const onWaiting = () => sendHtml5Event({ name: 'paused-for-cache', value: true });
+    const onTimeUpdate = () => { clearStall(); stallRetried = false; emitSnapshot(false); };
+    const onPlaying = () => { clearStall(); stallRetried = false; markFirstFrame(); sendHtml5Event({ props: { pause: false, 'paused-for-cache': false } }); };
+    const onPause = () => { clearStall(); sendHtml5Event({ name: 'pause', value: true }); };
+    const onWaiting = () => { armStall(); sendHtml5Event({ name: 'paused-for-cache', value: true }); };
     const onRate = () => sendHtml5Event({ name: 'speed', value: video.playbackRate || 1 });
     const onEnded = () => sendHtml5Event({ eof: true });
     const onError = () => {
@@ -113,8 +132,14 @@ export function Html5Stage({ url, startPos = 0, isHls = false, cmdSeq, onFirstFr
         if (!destroyed) applyStartPos();
       });
       let mediaRecovered = false;
+      let netRetries = 0;
       hls.on(Hls.Events.ERROR, (_ev, data) => {
         if (destroyed || !data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries < 2) {
+          netRetries++;
+          hls?.startLoad();
+          return;
+        }
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !mediaRecovered) {
           mediaRecovered = true;
           hls?.recoverMediaError();
@@ -136,6 +161,7 @@ export function Html5Stage({ url, startPos = 0, isHls = false, cmdSeq, onFirstFr
 
     return () => {
       destroyed = true;
+      clearStall();
       video.removeEventListener('loadedmetadata', applyStartPos);
       video.removeEventListener('loadeddata', markFirstFrame);
       video.removeEventListener('playing', onPlaying);

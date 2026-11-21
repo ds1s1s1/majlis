@@ -75,7 +75,7 @@ export function StreamList({ type, meta, videoId, label, auto, party, pos, onSta
 }) {
   const t = useT(), { toast } = useHost(), qc = useQueryClient();
   const srcSettings = useSettingsStore((s) => s.data.sources);
-  const q = useStreams(type, videoId);
+  const q = useStreams(type, videoId, undefined, auto ? 3000 : 0);
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<Sort>('best');
   const [presetId, setPresetId] = useState<string>(srcSettings.activeFilterId || 'default');
@@ -142,7 +142,13 @@ export function StreamList({ type, meta, videoId, label, auto, party, pos, onSta
   }, [autoKey, list.length, party]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (q.isLoading) return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
+      {auto ? (
+        <div className="flex items-center gap-2.5 rounded-xl border border-acc/30 bg-acc/10 px-3.5 py-2.5 text-xs font-semibold text-acc">
+          <span className="size-2 animate-pulse rounded-full bg-acc" />
+          <span>{t('th_comparing')}</span>
+        </div>
+      ) : null}
       {Array.from({ length: 5 }, (_, i) => <div key={i} className="skel h-[68px] rounded-xl" />)}
     </div>
   );

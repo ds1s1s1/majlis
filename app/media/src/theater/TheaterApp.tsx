@@ -63,7 +63,7 @@ export function TheaterApp() {
   const [props, setProps] = useState<TheaterPropsMap>({});
   const [card, setCard] = useState<CardMeta>({});
   const [hasFirstFrame, setHasFirstFrame] = useState(false);
-  const [phase, setPhase] = useState<'searching' | 'opening' | 'trying-source' | 'buffering' | ''>('searching');
+  const [phase, setPhase] = useState<'searching' | 'comparing' | 'opening' | 'trying-source' | 'buffering' | ''>('searching');
   const [statusMsg, setStatusMsg] = useState('');
   const [activeCand, setActiveCand] = useState<Ranked | null>(null);
   const [errorInfo, setErrorInfo] = useState<{ message: string; ranked: Ranked[] } | null>(null);
@@ -492,6 +492,8 @@ export function TheaterApp() {
         if (m.aspect) setAspect(m.aspect);
         if (m.toneMapping) setTone(m.toneMapping);
         refreshPartyButton();
+      } else if (m.type === 'win-state') {
+        if (typeof m.isFullscreen === 'boolean') setIsFullscreen(m.isFullscreen);
       } else if (m.type === 'incognito') {
         setIncognito(!!m.on);
       } else if (m.type === 'player-state') {
@@ -1192,7 +1194,7 @@ export function TheaterApp() {
             <div className="h-full w-1/2 animate-pulse rounded-full bg-acc" />
           </div>
           <p className="mb-6 text-[clamp(12px,0.95vw,15px)] text-fg2">
-            {phase === 'searching' ? t('th_searching') : phase === 'trying-source' ? t('th_trying_source', { s: statusMsg }) : phase === 'opening' ? t('th_opening', { s: statusMsg }) : t('th_buffering')}
+            {phase === 'comparing' ? t('th_comparing') : phase === 'searching' ? t('th_searching') : phase === 'trying-source' ? t('th_trying_source', { s: statusMsg }) : phase === 'opening' ? t('th_opening', { s: statusMsg }) : t('th_buffering')}
           </p>
           <div className="flex gap-3">
             <button onClick={() => openDrawer('sources')} className="rounded-full bg-white/10 px-[clamp(16px,1.3vw,22px)] py-[clamp(8px,0.8vh,11px)] text-[clamp(12px,0.95vw,15px)] font-semibold hover:bg-white/20">{t('th_sources')}</button>
@@ -1993,7 +1995,7 @@ function TheaterVolumeControl({
   }
 
   return (
-    <div dir="ltr" data-testid="th-volume-control" className="flex flex-none items-center gap-1.5" onWheel={onTrackWheel}>
+    <div dir="ltr" data-testid="th-volume-control" className="flex flex-none items-center gap-2.5" onWheel={onTrackWheel}>
       <DockBtn icon={iconEl} onClick={onToggleMute} label={label} scale={scale} />
       <div
         ref={trackRef}
@@ -2015,7 +2017,7 @@ function TheaterVolumeControl({
           if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); onChange(shownVal + 5, false); }
           if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); onChange(shownVal - 5, false); }
         }}
-        className="group/vol relative flex h-6 w-[clamp(76px,6.4vw,116px)] cursor-pointer select-none items-center"
+        className="group/vol relative mx-1 flex h-6 w-[clamp(76px,6.4vw,116px)] cursor-pointer select-none items-center"
       >
         <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/20 transition-all group-hover/vol:h-2">
           <div className="absolute inset-y-0 left-0 bg-acc" style={{ width: `${capPct(normalEnd)}%` }} />
@@ -2031,7 +2033,7 @@ function TheaterVolumeControl({
           style={{ left: `${capPct(shownVal)}%` }}
         />
       </div>
-      <span data-testid="th-volume-pct" className={`min-w-[34px] font-mono text-[11px] font-semibold ${shownVal > 100 ? 'text-amber-300' : 'text-fg2'}`}>
+      <span data-testid="th-volume-pct" className={`min-w-[44px] shrink-0 whitespace-nowrap text-end font-mono text-[11px] font-semibold tabular-nums ${shownVal > 100 ? 'text-amber-300' : 'text-fg2'}`}>
         {shownVal}%
       </span>
     </div>

@@ -2390,11 +2390,17 @@ function setup({ store, net, getHost, getGuest, getTheater, getMediaHub, emit, p
     const g = getGuest?.();
     const hasServer = !!(store.hasServer?.() && !net?.noServer && !net?.authFailed);
     const role = (h?.guests?.size || h?.enabled) ? 'host' : g?.link ? 'guest' : null;
+    const roomMode = (h?.guests?.size || h?.enabled)
+      ? (h.mode || 'cinema')
+      : g?.link
+        ? (g.roomMode || 'cinema')
+        : 'cinema';
     const members = getRoomMembers();
     const vote = h?.vote?.length ? h._voteView() : [];
     const control = h?.getWatchControl ? h.getWatchControl() : (g ? { mode: g.watchControl?.mode || 'host', holderId: g.watchControl?.holderId || null, holderName: g.watchControl?.holderName || null } : { mode: 'host', holderId: null, holderName: null });
     return {
       role,
+      roomMode,
       myId: myId(),
       hasServer,
       hostingEnabled: !!h?.enabled,

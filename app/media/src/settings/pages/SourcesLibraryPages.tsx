@@ -609,7 +609,6 @@ export function SourcesLibraryPage({ pageId }: { pageId: SettingsPageId }) {
   return (
     <SettingSection title={ar ? 'المكتبة والملفات المحلية' : 'Library & metadata export'}>
       <ToggleRow label={ar ? 'إخفاء الأنمي من المكتبة الرئيسية' : 'Hide anime'} checked={lb.hideAnime} onChange={(v) => update((s) => { s.sources.library.hideAnime = v; })} />
-      <ToggleRow label={ar ? 'إخفاء محتوى البالغين (+18)' : 'Hide adult content'} checked={lb.hideAdult} onChange={(v) => update((s) => { s.sources.library.hideAdult = v; })} />
       <ToggleRow label={ar ? 'تحديث المجلدات المحلية تلقائياً' : 'Keep folders up to date'} checked={lb.keepLocalUpToDate} onChange={(v) => update((s) => { s.sources.library.keepLocalUpToDate = v; })} />
       <SliderRow label={ar ? 'الحد الأدنى لحجم ملف الفيديو (MB)' : 'Minimum file size'} value={lb.minFileSizeMb} min={10} max={500} unit=" MB" defaultValue={50} onChange={(v) => update((s) => { s.sources.library.minFileSizeMb = v; })} />
       <ToggleRow label={ar ? 'تصدير الأغلفة مع المجلد المحلي' : 'Export artwork'} checked={lb.exportArtwork} onChange={(v) => update((s) => { s.sources.library.exportArtwork = v; })} />

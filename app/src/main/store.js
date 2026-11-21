@@ -703,6 +703,16 @@ class Store {
     if (!Array.isArray(this.d.roomPresets) || !this.d.roomPresets.length) {
       this.d.roomPresets = DEFAULT_ROOM_PRESETS.map((p) => ({ ...p }));
       this.save();
+    } else {
+      // Migrate legacy built-in cinema presets from 'watch' (screen-share) to strict 'cinema' mode
+      let migrated = false;
+      for (const p of this.d.roomPresets) {
+        if (p?.builtin && (p.id === 'preset-cinema-night' || p.id === 'preset-open-majlis') && p.mode === 'watch') {
+          p.mode = 'cinema';
+          migrated = true;
+        }
+      }
+      if (migrated) this.save();
     }
     return this.d.roomPresets.map((p) => ({ ...p }));
   }
@@ -738,7 +748,7 @@ const DEFAULT_ROOM_PRESETS = [
     name: 'Movie Night',
     nameAr: 'سهرة سينما',
     icon: 'film',
-    mode: 'watch',
+    mode: 'cinema',
     watchControl: 'host',
     acceptCodes: true,
     allowChat: true,
@@ -754,10 +764,10 @@ const DEFAULT_ROOM_PRESETS = [
   {
     id: 'preset-open-majlis',
     builtin: true,
-    name: 'Open Watch Room',
-    nameAr: 'مجلس مفتوح للجميع',
+    name: 'Open Cinema Majlis',
+    nameAr: 'مجلس سينما مفتوح',
     icon: 'users',
-    mode: 'watch',
+    mode: 'cinema',
     watchControl: 'all',
     acceptCodes: true,
     allowChat: true,
@@ -806,7 +816,7 @@ function sanitizeRoomPreset(input) {
     name,
     nameAr: typeof input.nameAr === 'string' && input.nameAr.trim() ? input.nameAr.trim().slice(0, 48) : undefined,
     icon: ['film', 'users', 'gamepad', 'sparkles'].includes(input.icon) ? input.icon : 'sparkles',
-    mode: input.mode === 'watch' ? 'watch' : 'play',
+    mode: ['cinema', 'watch', 'play'].includes(input.mode) ? input.mode : 'play',
     watchControl: wc,
     acceptCodes: input.acceptCodes !== false,
     allowChat: input.allowChat !== false,

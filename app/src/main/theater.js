@@ -99,11 +99,11 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     adoptProcess: (pid) => { try { core?.adoptProcess?.(pid); } catch {} },
   });
   const dimmer = new CinemaDimmer();
-  let overlay = null, overlayReady = false, mpv = null, now = null, film = 0, shown = false, lastFit = '';
+  let overlay = null, overlayReady = false, mpv = null, now = null, film = 0, shown = false, lastFit = '', lastOverlayBounds = '', lastWinFs = null;
   let playGen = 0, wakeLockId = null, hudVisible = false, userSubPos = 94;
   let sleepEof = false, suppressAutoNext = false, partySession = null, pipActive = false;
-  let curPhase = '', curStatusMsg = '', tempSubFiles = [], resizeTimer = null;
-  let html5Active = false, html5TranscodeId = null, blackScreenTimer = null, html5FallbackTried = false;
+  let curPhase = '', curStatusMsg = '', tempSubFiles = [], resizeTimer = null, settleTimers = [];
+  let html5Active = false, html5TranscodeId = null, blackScreenTimer = null, startupWatchTimer = null, html5FallbackTried = false, swFallbackTried = false;
   let virtualProps = {};
   const initTone = store.get('playerToneMapping');
   let curAspect = store.get('playerAspect') || 'fit', curTone = SAFE_TONE_MAPS.has(initTone) ? initTone : 'bt.2446a';
@@ -151,6 +151,20 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
   const getProps = () => (html5Active ? virtualProps : (mpv?.props || virtualProps));
   const clearBlackScreenWatch = () => {
     if (blackScreenTimer) { clearTimeout(blackScreenTimer); blackScreenTimer = null; }
+  };
+  const clearStartupWatch = () => {
+    if (startupWatchTimer) { clearTimeout(startupWatchTimer); startupWatchTimer = null; }
+  };
+  const clearSettleTimers = () => {
+    for (const t of settleTimers.splice(0)) clearTimeout(t);
+  };
+  const scheduleSettleFit = () => {
+    clearSettleTimers();
+    for (const ms of [60, 220]) {
+      const t = setTimeout(() => { if (shown) fit(true); }, ms);
+      t.unref?.();
+      settleTimers.push(t);
+    }
   };
   const isHttpFallbackCandidate = (u) => !!u && /^https?:\/\//i.test(u) && !/^av:/i.test(u);
   const stopHtml5Fallback = () => {
@@ -250,14 +264,25 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     const b = w.getContentBounds();
     if (!min && (b.width < 64 || b.height < 64)) return;
     const vis = shown && !min;
+    const isFs = w.isFullScreen();
+    const isMax = w.isMaximized();
+    if (!min && vis) {
+      // Keep Chromium Aura's DIP viewport 100% synced with main window across fullscreen/DPI changes
+      const bKey = `${b.x},${b.y},${b.width},${b.height},${isFs ? 1 : 0}`;
+      if (force || bKey !== lastOverlayBounds) {
+        lastOverlayBounds = bKey;
+        try { overlay.setBounds(b); } catch {}
+      }
+      if (force || isFs !== lastWinFs) {
+        lastWinFs = isFs;
+        toOverlay({ type: 'win-state', isFullscreen: isFs, isMaximized: isMax, width: b.width, height: b.height });
+      }
+    }
     if (mpv?.isNative) {
       mpv.setVideoVisible(!html5Active);
       mpv.setVisible(vis);
       if (vis) mpv.syncBounds();
       return;
-    }
-    if (!min && vis) {
-      try { overlay.setBounds(b); } catch {}
     }
     if (!film) return;
     let rx, ry, rw, rh;
@@ -291,7 +316,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       overlay = new BrowserWindow({
         parent: w && !w.isDestroyed() ? w : undefined,
         x: b.x, y: b.y, width: Math.max(320, b.width), height: Math.max(200, b.height),
-        frame: false, show: false, skipTaskbar: true, resizable: false, movable: false,
+        minWidth: 160, minHeight: 90,
+        frame: false, show: false, skipTaskbar: true, resizable: true, movable: false,
         minimizable: false, maximizable: false, fullscreenable: false,
         hasShadow: false, transparent: true, backgroundColor: '#00000000',
         webPreferences: {
@@ -326,7 +352,11 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         } catch {}
       };
       for (const ev of ['move', 'resize', 'enter-full-screen', 'leave-full-screen', 'maximize', 'unmaximize', 'restore', 'minimize']) {
-        w.on(ev, () => fit(ev !== 'move' && ev !== 'resize'));
+        w.on(ev, () => {
+          const big = ev !== 'move' && ev !== 'resize';
+          fit(big);
+          if (big && ev !== 'minimize') scheduleSettleFit();
+        });
       }
       w.on('moved', onDisplayOrState);
       screen.on('display-metrics-changed', onDisplayOrState);
@@ -389,20 +419,34 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     if (!shown && name !== 'pause') return;
     if (name === 'time-pos' && Number(value) > 0 && now) {
       now.hasFirstFrame = true;
+      clearStartupWatch();
       if (!getProps()['paused-for-cache']) now.stallSince = 0;
     }
-    if (!html5Active && !html5FallbackTried && now?.url && isHttpFallbackCandidate(now.url) && store.get('playerHlsFallback') !== false) {
+    if (!html5Active && now?.url) {
       if (name === 'video-params' && value?.w > 0) {
         clearBlackScreenWatch();
+        clearStartupWatch();
       } else if (name === 'time-pos' && Number(value) > 2.5 && !(getProps()['video-params']?.w) && !blackScreenTimer) {
         const watchGen = playGen;
         const watchKey = now.key;
-        blackScreenTimer = setTimeout(() => {
+        blackScreenTimer = setTimeout(async () => {
           blackScreenTimer = null;
-          if (shown && watchGen === playGen && now?.key === watchKey && !html5Active && !(getProps()['video-params']?.w) && Number(getProps()['time-pos'] || 0) > 2.5) {
-            activateHtml5Fallback('black-screen').catch(() => {});
+          if (!shown || watchGen !== playGen || now?.key !== watchKey || html5Active || (getProps()['video-params']?.w) || Number(getProps()['time-pos'] || 0) <= 2.5) return;
+          if (!html5FallbackTried && isHttpFallbackCandidate(now.url) && store.get('playerHlsFallback') !== false) {
+            const ok = await activateHtml5Fallback('black-screen').catch(() => false);
+            if (ok) return;
+          }
+          // Last-resort software decode recovery when GPU hwdec outputs audio with no video frames
+          if (!swFallbackTried && mpv && !mpv.stopped) {
+            swFallbackTried = true;
+            const at = Math.max(0, Number(getProps()['time-pos'] || 0) || 0);
+            curHwAccel = false;
+            await mpv.set('hwdec', 'no').catch(() => {});
+            if (now?.url) await mpv.load(now.url, { start: at.toFixed(2) }).catch(() => {});
+            toOverlay({ type: 'toast', kind: 'info', text: 'SW Decode' });
           }
         }, 3500);
+        blackScreenTimer.unref?.();
       }
     }
     if (name === 'paused-for-cache' && now) {
@@ -782,6 +826,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     suppressAutoNext = false;
     curNight = false;
     dimmer.clear();
+    clearStartupWatch();
+    clearSettleTimers();
     finalizePartySession();
     stopHtml5Fallback();
     virtualProps = {};
@@ -794,6 +840,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     curPhase = '';
     curStatusMsg = '';
     lastFit = '';
+    lastOverlayBounds = '';
+    lastWinFs = null;
     if (now?.scrobbled) scrob('stop');
     if (party?.role === 'host') getHost()?.syncClose();
     party = null;
@@ -1177,7 +1225,9 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
     }
     stopHtml5Fallback();
+    clearStartupWatch();
     html5FallbackTried = false;
+    swFallbackTried = false;
     virtualProps = {};
     now = { key: id, card, stream, origStream, url: r.url, infoHash: r.infoHash, type, addon: addon || null, ranked: ranked || null, nextVideoId: null, episodes: null, triedStreams: now?.triedStreams || triedSet, hasFirstFrame: false, stallSince: 0, zeroPeersSince: 0, failoverOffered: false, failoverDismissed: false, inQuickplay: !!keepCurtain };
     if (type === 'series') {
@@ -1292,6 +1342,20 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       detectedDisplayProfile, ranked: ranked || [], incognito: incog(),
     });
     await mpv.load(r.url, opts);
+    if (!keepCurtain && !now?.inQuickplay) {
+      const watchGen = g;
+      const watchKey = id;
+      startupWatchTimer = setTimeout(async () => {
+        startupWatchTimer = null;
+        if (!shown || watchGen !== playGen || !now || now.key !== watchKey || now.hasFirstFrame || html5Active) return;
+        if (!html5FallbackTried && isHttpFallbackCandidate(now.url) && store.get('playerHlsFallback') !== false) {
+          const ok = await activateHtml5Fallback('startup-timeout').catch(() => false);
+          if (ok) return;
+        }
+        toOverlay({ type: 'player-error', message: 'Stream timed out before delivering video frames', ranked: now.ranked || [] });
+      }, 20000);
+      startupWatchTimer.unref?.();
+    }
     if (r.audioUrl) {
       await mpv.command('audio-add', r.audioUrl, 'select').catch(() => {});
     }
@@ -1351,9 +1415,10 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
       if (expectedGen !== playGen || !now) return;
       if (!pick) {
-        const res = await hub.streams({ type: 'series', id: nxVideoId, bingeGroup: bg, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin: 45, progressive: true, graceMs: 350 }).catch(() => null);
+        const res = await hub.streams({ type: 'series', id: nxVideoId, bingeGroup: bg, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin: 45, progressive: true, collectMs: 3000 }).catch(() => null);
         ranked = res?.streams || null;
-        const best = ranked?.find((x) => x.tier > 0);
+        const cands = (ranked || []).filter((x) => x.tier > 0 && x.score > -1e5);
+        const best = cands.find((x) => x.trusted !== false) || cands[0] || null;
         pick = best?.stream || null;
         addon = best?.addon?.url || addon;
       }
@@ -1540,9 +1605,13 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
     const bucketHint = hub.streamsBucket?.findRecent?.(resolvedMetaId)?.stream?.behaviorHints?.bingeGroup || bingeGroup;
     const runtimeMin = parseInt(item?.runtime, 10) || (type === 'series' ? 45 : 110);
-    const { streams } = await hub.streams({ type, id: videoId, bingeGroup: bucketHint, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin, progressive: true, graceMs: 350 });
+    // Always wait a 3-second collection window (or until 100% of enabled stream addons finish) before picking
+    toOverlay({ type: 'theater', card, id: videoId, loading: true, phase: 'comparing' });
+    const { streams } = await hub.streams({ type, id: videoId, bingeGroup: bucketHint, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin, progressive: true, collectMs: 3000 });
     if (g !== playGen || !shown) return { ok: false, cancelled: true };
-    const cands = (streams || []).filter((x) => x.tier > 0 && x.score > -1e5);
+    const eligible = (streams || []).filter((x) => x.tier > 0 && x.score > -1e5);
+    const trusted = eligible.filter((x) => x.trusted !== false);
+    const cands = trusted.length ? trusted : eligible;
     if (!cands.length) {
       toOverlay({ type: 'player-error', message: 'no playable streams found', ranked: streams || [] });
       return { ok: false, error: 'no playable streams found' };
@@ -1657,9 +1726,11 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
       }
       if (g !== playGen || !shown) return null;
       if (!pick) {
-        const res = await hub.streams({ type: 'series', id: nx.id, bingeGroup: bg, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin: 45 });
+        toOverlay({ type: 'theater', card: now.card, id: nx.id, loading: true, phase: 'comparing' });
+        const res = await hub.streams({ type: 'series', id: nx.id, bingeGroup: bg, partyMinMbps: slowestPartyMbps(), hdrDisplay: isHdrDisplay(), runtimeMin: 45, progressive: true, collectMs: 3000 });
         ranked = res.streams;
-        const best = ranked.find((x) => x.tier > 0);
+        const cands = (ranked || []).filter((x) => x.tier > 0 && x.score > -1e5);
+        const best = cands.find((x) => x.trusted !== false) || cands[0] || null;
         pick = best?.stream || null; addon = best?.addon.url || null;
       }
       if (g !== playGen || !shown || !pick) return null;
@@ -1735,7 +1806,15 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
 
   ipcMain.handle('player:cmd', async (e, c) => {
     if (c.cmd === 'close') { close(); return true; }
-    if (c.cmd === 'fullscreen') { const w = getWin(); if (!w || w.isDestroyed()) return false; w.setFullScreen(!w.isFullScreen()); return w.isFullScreen(); }
+    if (c.cmd === 'fullscreen') {
+      const w = getWin();
+      if (!w || w.isDestroyed()) return false;
+      const nextFs = !w.isFullScreen();
+      w.setFullScreen(nextFs);
+      fit(true);
+      scheduleSettleFit();
+      return w.isFullScreen();
+    }
     if (c.cmd === 'displays') {
       const w = getWin();
       const all = screen.getAllDisplays();
@@ -2604,7 +2683,6 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         if (!shown || !now || !mpv?.props || party?.role === 'guest') return;
         const p = mpv.props;
         if (!now.hasFirstFrame || p.pause || now.failoverOffered || now.failoverDismissed) return;
-        if (!Array.isArray(now.ranked) || now.ranked.length < 2) return;
         const curTs = Date.now();
         let reason = null;
         if (p['paused-for-cache']) {
@@ -2627,8 +2705,16 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
         }
         if (!reason || !shown || !now) return;
         const tried = now.triedStreams || new Set();
-        const candidate = now.ranked.find((x) => x?.stream && x.trusted !== false && !x.stream.externalUrl && !tried.has(streamSigOf(x.stream)));
-        if (!candidate) return;
+        const candidate = Array.isArray(now.ranked) && now.ranked.length >= 2
+          ? now.ranked.find((x) => x?.stream && x.trusted !== false && !x.stream.externalUrl && !tried.has(streamSigOf(x.stream)))
+          : null;
+        if (!candidate) {
+          if (reason === 'stall' && curTs - now.stallSince >= 18000 && !now.singleRecoverTried) {
+            now.singleRecoverTried = true;
+            mpv._recover?.('buffer-stall');
+          }
+          return;
+        }
         now.failoverOffered = true;
         toOverlay({
           type: 'failover-prompt',
@@ -2715,6 +2801,8 @@ function setup({ getWin, store, emit, preload, theaterPreload, rendererDir, help
     },
     stop: (immediate = false) => {
       clearTimeout(resizeTimer);
+      clearSettleTimers();
+      clearStartupWatch();
       clearBlackScreenWatch();
       dimmer.clear();
       close();

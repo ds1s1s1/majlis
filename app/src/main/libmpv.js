@@ -38,16 +38,13 @@ function buildLibMpvOptions({
   bufferSize = null, anime4k = false, anime4kMode = 'A', subStyle = null, subLang2 = null,
   customMpvConf = '', userDataDir = null, videoQualityPreset = 'balanced',
 } = {}) {
-  const hwdec = (hwAccel === false || decoderMode === 2) ? 'no' : 'd3d11va-copy';
   const scaler = videoQualityPreset === 'max' ? 'ewa_lanczossharp' : 'spline36';
   const opts = [
     ['idle', 'yes'],
-    ['keep-open', 'yes'],
+    ['keep-open', 'no'],
     ['config', 'no'],
     ['osc', 'no'],
     ['osd-level', '0'],
-    ['idle', 'yes'],
-    ['keep-open', 'no'],
     ['force-window', 'immediate'],
     ['input-default-bindings', 'no'],
     ['input-vo-keyboard', 'no'],
@@ -326,7 +323,13 @@ class LibMpv extends EventEmitter {
 
   async command(...args) {
     if (!this.player || this.stopped) throw new Error('mpv not running');
-    this.player.command(args.map((a) => (a === undefined ? '' : String(a))));
+    const strArgs = args.map((a) => (a === undefined ? '' : String(a)));
+    // Non-blocking for demuxer/network commands so slow streams never freeze Electron's main thread.
+    if (this.player.commandAsync && /^(loadfile|stop|seek|sub-add|audio-add)$/.test(strArgs[0] || '')) {
+      this.player.commandAsync(strArgs);
+      return true;
+    }
+    this.player.command(strArgs);
     return true;
   }
 
@@ -409,12 +412,30 @@ class LibMpv extends EventEmitter {
   _watch() {
     clearInterval(this.wd);
     this.posAt = Date.now();
+    this.cacheStallSince = 0;
     this.wd = setInterval(() => {
       const pr = this.props;
-      if (!this.want || pr['core-idle'] || pr['time-pos'] == null) return;
-      const playing = pr.pause === false && !pr['paused-for-cache'] && !pr['eof-reached'];
-      if (playing && Date.now() - this.posAt > 5000) this._recover('stalled');
+      if (!this.want || pr['core-idle'] || pr['time-pos'] == null) {
+        this.cacheStallSince = 0;
+        return;
+      }
+      if (pr.pause || pr['eof-reached']) {
+        this.cacheStallSince = 0;
+        return;
+      }
+      const nowMs = Date.now();
+      if (pr['paused-for-cache']) {
+        if (!this.cacheStallSince) this.cacheStallSince = nowMs;
+        else if (nowMs - this.cacheStallSince > 20000) {
+          this.cacheStallSince = nowMs;
+          this._recover('buffer-stall');
+        }
+        return;
+      }
+      this.cacheStallSince = 0;
+      if (nowMs - this.posAt > 6000) this._recover('stalled');
     }, 1000);
+    this.wd.unref?.();
   }
 
   async _recover(why) {

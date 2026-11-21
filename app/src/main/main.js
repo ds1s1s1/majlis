@@ -26,6 +26,13 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('app.majlis.desktop');
 }
 
+process.on('unhandledRejection', (err) => {
+  if (process.env.MAJLIS_DEBUG) console.error('[main] unhandledRejection:', err);
+});
+process.on('uncaughtException', (err) => {
+  if (process.env.MAJLIS_DEBUG) console.error('[main] uncaughtException:', err);
+});
+
 if (!app.isPackaged && process.env.MAJLIS_PROFILE) {
   app.setPath('userData', path.join(app.getPath('appData'), `Majlis-${String(process.env.MAJLIS_PROFILE).replace(/[^\w-]/g, '')}`));
 }
@@ -388,7 +395,7 @@ function snapshot() {
     id: idn.id, settings: store.all(), friends: store.friends(), games: store.games(),
     registered: net.registered, publicAddr: net.publicAddr, relays: net.relays, noServer: !store.hasServer(), serverAuthFailed: !!net.authFailed,
     encoders: encoders.map((e) => e.name), ffmpeg: !!ffmpegExe, helper: helper.info ? { vigem: helper.info.vigem, wgc: helper.info.wgc, displays: helper.info.displays } : null,
-    host: host.stats(), guest: guest.link ? { state: 'linked', host: guest.link.peer, safety: guest.link.safety } : { state: guest.state },
+    host: host.stats(), guest: guest.link ? { state: 'linked', host: guest.link.peer, safety: guest.link.safety, roomMode: guest.roomMode || null } : { state: guest.state, roomMode: null },
     lastCheck, peaks: store.peaks(), usage: usageSummary(), routerLock: cachedRouterLock, replay: replay.running,
     version: app.getVersion(), platform: `${os.type()} ${os.release()}`,
   };
@@ -539,14 +546,19 @@ function handlers() {
   ipcMain.handle('leave', () => guest.leave());
   ipcMain.handle('guest:ctrl', (e, m) => guest.ctrl(m));
 
-  ipcMain.handle('host:enable', (e, on) => {
+  ipcMain.handle('host:enable', (e, arg) => {
+    const on = typeof arg === 'object' && arg !== null ? !!arg.on : !!arg;
+    const reqMode = typeof arg === 'object' && arg !== null ? arg.mode : null;
     if (on && !requireServerForSession()) return host.stats();
+    if (reqMode && ['cinema', 'watch', 'play'].includes(reqMode)) host.setMode(reqMode);
     host.setEnabled(on);
-    if (on) { if (!helper.p) helper.start(); ensureFfmpeg(); }
+    if (on && host.mode !== 'cinema') { if (!helper.p) helper.start(); ensureFfmpeg(); }
     return host.stats();
   });
   ipcMain.handle('ffmpeg:get', () => ensureFfmpeg());
-  ipcMain.handle('host:code', async (e, revoke) => {
+  ipcMain.handle('host:code', async (e, arg) => {
+    const revoke = typeof arg === 'object' && arg !== null ? !!arg.revoke : !!arg;
+    const roomMode = typeof arg === 'object' && arg !== null && ['cinema', 'watch', 'play'].includes(arg.roomMode) ? arg.roomMode : null;
     const myId = store.identity().id;
     const hasServer = !!(store.hasServer?.() && !net?.noServer && !net?.authFailed);
     if (revoke) {
@@ -558,10 +570,15 @@ function handlers() {
     if (!hasServer) {
       return { ok: true, code: null, exp: null, inviteUrl: inviteLink(myId), myId, fallback: 'id', hasServer: false };
     }
+    if (roomMode && (!host.enabled || !host.guests.size || roomMode === 'cinema')) {
+      host.setMode(roomMode);
+    }
     if (!host.enabled) {
       host.setEnabled(true);
-      if (!helper.p) helper.start();
-      ensureFfmpeg();
+      if (host.mode !== 'cinema') {
+        if (!helper.p) helper.start();
+        ensureFfmpeg();
+      }
     }
     if (host.code?.code && host.code.exp > Date.now() + 15000) {
       return { ok: true, code: host.code.code, exp: host.code.exp, inviteUrl: inviteLink(host.code.code), myId, fallback: null, hasServer: true };
@@ -732,6 +749,10 @@ function handlers() {
     host.setWatchControl(preset.watchControl, null);
     host.pushPerms();
     host.setEnabled(true);
+    if (host.mode !== 'cinema') {
+      if (!helper.p) helper.start();
+      ensureFfmpeg();
+    }
     if (host.guests.size) host._retier(true);
     emit('party-updated', { kind: 'preset', presetId: preset.id });
     return { ok: true, preset, stats: host.stats() };

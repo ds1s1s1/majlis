@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Award, Bell, Bookmark, Check, Download, Film, FolderOpen, Gamepad2, Globe, Headphones,
@@ -33,6 +33,109 @@ interface BackupEntry {
   partyHistoryCount: number;
 }
 
+interface UpdaterProgress {
+  pct: number;
+  received: number;
+  total: number;
+  speedBps: number;
+  etaSec: number | null;
+  connections: number;
+}
+
+function fmtMb(bytes: number): string {
+  return (Math.max(0, bytes) / (1024 * 1024)).toFixed(1);
+}
+
+function fmtSpeed(bps: number): string {
+  if (!bps || bps <= 0) return '—';
+  const mb = bps / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB/s` : `${Math.round(bps / 1024)} KB/s`;
+}
+
+function fmtEta(sec: number | null, ar: boolean): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '';
+  if (sec < 60) return ar ? `متبقي ~${sec} ث` : `~${sec}s left`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return ar ? `متبقي ~${m} د ${s} ث` : `~${m}m ${s}s left`;
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let k = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const tok = m[0];
+    if (tok.startsWith('**') && tok.endsWith('**')) {
+      out.push(<strong key={k++} className="font-semibold text-[var(--text-primary)]">{tok.slice(2, -2)}</strong>);
+    } else if (tok.startsWith('`') && tok.endsWith('`')) {
+      out.push(<code key={k++} dir="ltr" className="rounded bg-white/10 px-1 py-0.5 font-mono text-[10.5px] text-[var(--accent)]">{tok.slice(1, -1)}</code>);
+    } else {
+      const lm = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(tok);
+      if (lm) {
+        const href = lm[2];
+        out.push(
+          <button key={k++} type="button" onClick={() => invoke('open', href)} className="text-[var(--accent)] underline hover:brightness-110">
+            {lm[1]}
+          </button>,
+        );
+      } else {
+        out.push(tok);
+      }
+    }
+    last = m.index + tok.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function ReleaseNotesMarkdown({ notes }: { notes: string }) {
+  const lines = String(notes || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks: ReactNode[] = [];
+  let listItems: ReactNode[] = [];
+  const flushList = (key: string) => {
+    if (!listItems.length) return;
+    blocks.push(<ul key={key} className="ms-4 list-disc space-y-1 text-[var(--text-secondary)]">{listItems}</ul>);
+    listItems = [];
+  };
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line) { flushList(`ul-${idx}`); return; }
+    if (/^---+$/.test(line)) {
+      flushList(`ul-${idx}`);
+      blocks.push(<hr key={`hr-${idx}`} className="my-2 border-white/10" />);
+      return;
+    }
+    const hm = /^(#{1,3})\s+(.+)$/.exec(line);
+    if (hm) {
+      flushList(`ul-${idx}`);
+      const cls = hm[1].length === 1
+        ? 'text-[13px] font-bold text-[var(--text-primary)]'
+        : hm[1].length === 2
+          ? 'text-[12px] font-bold text-[var(--accent)] mt-1.5'
+          : 'text-[11.5px] font-semibold text-[var(--text-primary)] mt-1';
+      blocks.push(<div key={`h-${idx}`} className={cls}>{renderInlineMarkdown(hm[2])}</div>);
+      return;
+    }
+    const bm = /^(?:[-*•]|\d+\.)\s+(.+)$/.exec(line);
+    if (bm) {
+      listItems.push(<li key={`li-${idx}`} className="leading-relaxed">{renderInlineMarkdown(bm[1])}</li>);
+      return;
+    }
+    flushList(`ul-${idx}`);
+    blocks.push(<p key={`p-${idx}`} className="leading-relaxed text-[var(--text-secondary)]">{renderInlineMarkdown(line)}</p>);
+  });
+  flushList('ul-end');
+  return (
+    <div dir="auto" className="max-h-52 space-y-1.5 overflow-auto rounded-xl bg-black/30 p-3 text-[11.5px]">
+      {blocks.map((b, i) => <Fragment key={i}>{b}</Fragment>)}
+    </div>
+  );
+}
+
 export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
   const { lang, toast } = useHost();
   const ar = lang === 'ar';
@@ -65,7 +168,7 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
     releases?: Array<{ tag: string; version: string; name: string; prerelease: boolean; publishedAt: string | null; url: string; current: boolean }>;
   } | null>(null);
   const [dlState, setDlState] = useState<'idle' | 'downloading' | 'ready' | 'error'>('idle');
-  const [dlPct, setDlPct] = useState(0);
+  const [dlProg, setDlProg] = useState<UpdaterProgress>({ pct: 0, received: 0, total: 0, speedBps: 0, etaSec: null, connections: 1 });
   const [dlPath, setDlPath] = useState<string | null>(null);
   const [dlError, setDlError] = useState<string | null>(null);
   const [bugSubmitting, setBugSubmitting] = useState(false);
@@ -125,8 +228,17 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
 
   useEffect(() => {
     if (pageId !== 'updates-backup') return undefined;
-    return window.majlis?.on?.((m: { type?: string; pct?: number }) => {
-      if (m?.type === 'updater:progress' && typeof m.pct === 'number') setDlPct(m.pct);
+    return window.majlis?.on?.((m: { type?: string; pct?: number; received?: number; total?: number; speedBps?: number; etaSec?: number | null; connections?: number }) => {
+      if (m?.type === 'updater:progress' && typeof m.pct === 'number') {
+        setDlProg({
+          pct: m.pct,
+          received: Number(m.received) || 0,
+          total: Number(m.total) || 0,
+          speedBps: Number(m.speedBps) || 0,
+          etaSec: typeof m.etaSec === 'number' ? m.etaSec : null,
+          connections: Number(m.connections) || 1,
+        });
+      }
     });
   }, [pageId]);
 
@@ -394,14 +506,22 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
               ) : null}
             </div>
             {updInfo.releaseNotes ? (
-              <pre dir="auto" className="max-h-28 overflow-auto whitespace-pre-wrap rounded-xl bg-black/30 p-2.5 text-[11px] text-[var(--text-secondary)]">{updInfo.releaseNotes}</pre>
+              <ReleaseNotesMarkdown notes={updInfo.releaseNotes} />
             ) : null}
             {dlState === 'downloading' ? (
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                  <div className="h-full bg-[var(--accent)] transition-all" style={{ width: `${dlPct}%` }} />
+                  <div className="h-full bg-[var(--accent)] transition-all duration-150" style={{ width: `${dlProg.pct}%` }} />
                 </div>
-                <div dir="ltr" className="font-mono text-[11px] text-[var(--text-secondary)]">{dlPct}%</div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
+                  <span dir="ltr" className="font-mono font-semibold text-[var(--text-primary)]">
+                    {dlProg.pct}% · {fmtMb(dlProg.received)} / {fmtMb(dlProg.total || updInfo.assetSize || 0)} MB
+                  </span>
+                  <span dir="ltr" className="font-mono">
+                    {fmtSpeed(dlProg.speedBps)}
+                    {dlProg.etaSec != null ? ` · ${fmtEta(dlProg.etaSec, ar)}` : ''}
+                  </span>
+                </div>
               </div>
             ) : null}
             {dlError ? <div className="text-red-300">{dlError}</div> : null}
@@ -412,11 +532,11 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
                   disabled={dlState === 'downloading'}
                   onClick={async () => {
                     if (dlState === 'ready' && dlPath) {
-                      await cin('updater-install', { filePath: dlPath }).catch((e) => setDlError((e as Error).message));
+                      await cin('updater-install', { filePath: dlPath }).catch((e) => setDlError((e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')));
                       return;
                     }
                     setDlState('downloading');
-                    setDlPct(0);
+                    setDlProg({ pct: 0, received: 0, total: updInfo.assetSize || 0, speedBps: 0, etaSec: null, connections: 1 });
                     setDlError(null);
                     const res = await cin<{ ok?: boolean; filePath?: string }>('updater-download', {
                       url: updInfo.downloadUrl,
@@ -424,7 +544,7 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
                       assetName: updInfo.assetName,
                     }).catch((e) => {
                       setDlState('error');
-                      setDlError((e as Error).message);
+                      setDlError((e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
                       return null;
                     });
                     if (res?.ok && res.filePath) {
@@ -441,7 +561,7 @@ export function HelpUpdatesPage({ pageId }: { pageId: SettingsPageId }) {
                     {dlState === 'ready'
                       ? (ar ? 'تثبيت التحديث الآن' : 'Install Update Now')
                       : dlState === 'downloading'
-                        ? (ar ? `جاري التنزيل (${dlPct}%)...` : `Downloading (${dlPct}%)...`)
+                        ? (ar ? `جاري التنزيل (${dlProg.pct}%)...` : `Downloading (${dlProg.pct}%)...`)
                         : (ar ? 'تنزيل التحديث' : 'Download Update')}
                   </span>
                 </button>

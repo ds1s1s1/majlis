@@ -19,6 +19,7 @@ class Guest extends EventEmitter {
     this.canControl = false;
     this.watchControl = { mode: 'host', holderId: null, holderName: null };
     this.readyState = null;
+    this.roomMode = null;
   }
 
   async connect(target, caps = {}, { pin, reconnect } = {}) {
@@ -26,6 +27,7 @@ class Guest extends EventEmitter {
     if (!reconnect) this.retries = 0;
     this.leaving = false;
     this.readyState = null;
+    this.roomMode = null;
     this.state = 'knocking'; this.target = target; this.caps = caps; this.pin = pin || this.pin;
     this.emit('state', { state: reconnect ? 'reconnecting' : 'knocking', target });
     try {
@@ -77,7 +79,7 @@ class Guest extends EventEmitter {
       // median ping, ignoring the first seconds while the connection settles
       const rs = this.rtts.slice().sort((a, b) => a - b);
       const summary = { name: link.peer.nick || link.peer.id, ms: now() - this.started, mb: Math.round(link.stats.rx / 1e5) / 10, rtt: rs.length ? Math.round(rs[rs.length >> 1]) : null };
-      this.link = null; this.state = 'idle'; clearInterval(this.fbTimer); clearInterval(this.pingTimer);
+      this.link = null; this.state = 'idle'; this.roomMode = null; clearInterval(this.fbTimer); clearInterval(this.pingTimer);
       this.lastSummary = summary;
       if (r === 'timeout' && !this.leaving) { this._retry(); return; }
       this.emit('state', { state: 'ended', reason: r, summary });
@@ -98,6 +100,7 @@ class Guest extends EventEmitter {
   _ctrl(m) {
     switch (m.t) {
       case 'config': {
+        if (this.roomMode === 'cinema') break;
         this.configs.set(m.epoch, m);
         if (this.rx) { this.rx.film = m.tier === 'movie'; this.rx.nack = m.tier !== 'play'; }
         this._post({ t: 'config', ...m });
@@ -141,9 +144,10 @@ class Guest extends EventEmitter {
         this.emit('ctrl', m);
         break;
       case 'welcome':
+        this.roomMode = m.roomMode || m.mode || 'play';
         this.canControl = !!m.canControl;
         if (m.watchControl) this.watchControl = m.watchControl;
-        this.emit('ctrl', m);
+        this.emit('ctrl', { ...m, mode: this.roomMode, roomMode: this.roomMode });
         break;
       case 'watch_control':
         this.canControl = !!m.canControl;
@@ -151,7 +155,13 @@ class Guest extends EventEmitter {
         this.emit('ctrl', m);
         break;
       case 'sync_end': this.syncEpoch = null; this.emit('sync', null); break;
-      case 'mode': if (m.mode !== 'watch') this.fclock = null; this.canControl = !!m.canControl; if (m.watchControl) this.watchControl = m.watchControl; this.emit('ctrl', m); break;
+      case 'mode':
+        this.roomMode = m.roomMode || m.mode || 'play';
+        if (this.roomMode !== 'watch') this.fclock = null;
+        this.canControl = !!m.canControl;
+        if (m.watchControl) this.watchControl = m.watchControl;
+        this.emit('ctrl', { ...m, mode: this.roomMode, roomMode: this.roomMode });
+        break;
       case 'privacy': this.privacy = !!m.on; this.emit('ctrl', m); break;
       case 'cursor_shape': this._post({ t: 'shape', ...m }); break;
       case 'kick': this.emit('kicked', { panic: !!m.panic }); break;
@@ -199,6 +209,9 @@ class Guest extends EventEmitter {
 
   _raw(b) {
     const ch = b[0];
+    if (ch === 0x09) return this._post({ t: 'vo', idx: b[1], data: b.subarray(2) });
+    // Cinema Majlis rooms never stream desktop video, desktop audio, cursor, or rumble
+    if (this.roomMode === 'cinema') return;
     if (ch === 0x01) return this.rx.push(b);
     if (ch === 0x02) {
       if (b.length < 14) return;
@@ -213,7 +226,6 @@ class Guest extends EventEmitter {
     }
     if (ch === 0x0a) return this._post({ t: 'c', x: b.readFloatLE(1), y: b.readFloatLE(5), v: b[9], s: b.readInt32LE(10) });
     if (ch === 0x0b) return this._post({ t: 'r', large: b[1], small: b[2] });
-    if (ch === 0x09) return this._post({ t: 'vo', idx: b[1], data: b.subarray(2) });
   }
 
   _feedback() {
@@ -256,7 +268,7 @@ class Guest extends EventEmitter {
     try { this.link.ctrl({ t: 'bye' }); } catch {}
     const l = this.link;
     setTimeout(() => l.close('left'), 120);
-    this.link = null; this.state = 'idle';
+    this.link = null; this.state = 'idle'; this.roomMode = null;
     clearInterval(this.fbTimer); clearInterval(this.pingTimer);
     this.configs.clear();
   }

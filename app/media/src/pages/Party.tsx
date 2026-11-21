@@ -195,7 +195,7 @@ export function Party() {
     const s = st?.settings || {};
     await invoke('party:preset-save', {
       name: nm,
-      mode: s.mode || 'watch',
+      mode: 'cinema',
       watchControl: s.watchControl || 'host',
       acceptCodes: s.acceptCodes !== false,
       allowChat: s.allowChat !== false,
@@ -307,7 +307,7 @@ export function Party() {
               onClick={async () => {
                 setInviteBusy(true);
                 try {
-                  const res = await invoke<{ ok?: boolean; code?: string | null; inviteUrl?: string; myId?: string } | null>('host:code', false).catch(() => null);
+                  const res = await invoke<{ ok?: boolean; code?: string | null; inviteUrl?: string; myId?: string } | null>('host:code', { revoke: false, roomMode: 'cinema' }).catch(() => null);
                   let targetUrl = res?.inviteUrl || '';
                   if (!targetUrl) {
                     const fallbackId = res?.myId || room?.myId || room?.members.find((m) => m.isHost)?.id || (await invoke<{ id?: string }>('state').catch(() => null))?.id || '';

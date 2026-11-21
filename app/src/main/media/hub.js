@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const ptt = require('parse-torrent-title');
 const { ipcMain, dialog, app } = require('electron');
 const http = require('./http');
-const { AddonClient, normalizeUrl } = require('./addon-client');
+const { AddonClient, normalizeUrl, isAdultAddon } = require('./addon-client');
 const { Meta, CINEMETA } = require('./meta');
 const { Library } = require('./library');
 const { Calendar } = require('./calendar');
@@ -302,6 +302,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     try {
       const body = await http.json(clean, { ttl: 0, timeout: 6500 });
       if (body && typeof body.id === 'string' && typeof body.name === 'string') {
+        if (isAdultAddon({ manifestUrl: clean, manifest: body })) return { ok: false, error: 'adult_blocked' };
         return { ok: true, kind: 'manifest', name: body.name, version: body.version || null, manifest: body };
       }
       if (Array.isArray(body) || Array.isArray(body?.addons)) {
@@ -347,7 +348,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     l.splice(Math.max(0, Math.min(l.length, to)), 0, url);
     pset('addons', l); return l;
   });
-  h('store', (q) => store.list(q));
+  h('store', (q) => store.list({ page: q.page, limit: q.limit, search: q.search, category: q.category, sort: q.sort }));
   h('store-categories', () => store.categories());
 
   // ---- browsing
@@ -493,7 +494,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
   }
 
   // every addon's streams for a video, ranked best first (supports multi-ID fan-out, inline video.streams, binge continuity & progressive emission)
-  async function streams({ type, id, bingeGroup, partyMinMbps, hdrDisplay, runtimeMin, progressive = false, graceMs = 80 }) {
+  async function streams({ type, id, bingeGroup, partyMinMbps, hdrDisplay, runtimeMin, progressive = false, graceMs = 80, collectMs = 0 }) {
     const seM = /:(\d+):(\d+)$/.exec(String(id || ''));
     const baseMetaId = String(id || '').replace(/:(\d+):(\d+)$/, '');
     const cachedMeta = /^tt\d+/i.test(baseMetaId) ? await meta.details(type, baseMetaId).catch(() => null) : null;
@@ -541,6 +542,7 @@ function setup({ store: st, dataDir, openExternal, openPath = () => {}, videosDi
     const collected = [];
     const firstList = await Promise.all(fanIds.map((fid) => client.progressive(activeAddons, { resource: 'stream', type, id: fid }, {
       graceMs,
+      collectMs,
       maxWaitMs: waitMs,
       onEach: (x, afterFirst) => {
         collected.push(x);

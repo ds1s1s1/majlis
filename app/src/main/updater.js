@@ -10,6 +10,10 @@ const ALLOWED_DOWNLOAD_HOSTS = new Set([
   'objects.githubusercontent.com',
   'release-assets.githubusercontent.com',
 ]);
+const DEFAULT_STALL_TIMEOUT_MS = 30000;
+const DEFAULT_PARALLEL_CONNECTIONS = 6;
+const DEFAULT_MIN_PARALLEL_BYTES = 4 * 1024 * 1024;
+const MAX_CHUNK_RETRIES = 3;
 
 function parseSemver(raw) {
   const clean = String(raw || '').trim().replace(/^v/i, '').split('+')[0];
@@ -76,31 +80,197 @@ function parseSha256Sums(text, filename = 'Majlis-Setup.exe') {
   return null;
 }
 
-async function fetchWithAllowlistedRedirects(initialUrl, fetchImpl, headers = {}, maxHops = 5) {
+// Resettable inactivity watchdog: protects connect/headers AND resets on every body chunk
+function createStallGuard(stallTimeoutMs) {
+  const ac = new AbortController();
+  let timer = null;
+  let timedOut = false;
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort(new Error(`Download stalled (no data for ${Math.max(1, Math.round(stallTimeoutMs / 1000))}s)`));
+    }, stallTimeoutMs);
+    timer.unref?.();
+  };
+  const clear = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  arm();
+  return {
+    signal: ac.signal,
+    touch: arm,
+    clear,
+    isTimedOut: () => timedOut,
+    abort: (err) => { clear(); ac.abort(err); },
+  };
+}
+
+async function fetchWithAllowlistedRedirects(initialUrl, fetchImpl, headers = {}, maxHops = 5, opts = {}) {
+  const method = opts.method || 'GET';
+  const stallTimeoutMs = opts.stallTimeoutMs || DEFAULT_STALL_TIMEOUT_MS;
+  const guard = opts.guard || createStallGuard(stallTimeoutMs);
+  const ownsGuard = !opts.guard;
   let cur = String(initialUrl || '').trim();
-  for (let hop = 0; hop <= maxHops; hop++) {
-    if (!isAllowedDownloadUrl(cur)) {
-      throw new Error(`Disallowed update download URL: ${cur}`);
+  try {
+    for (let hop = 0; hop <= maxHops; hop++) {
+      if (!isAllowedDownloadUrl(cur)) {
+        throw new Error(`Disallowed update download URL: ${cur}`);
+      }
+      guard.touch();
+      const res = await fetchImpl(cur, {
+        method,
+        redirect: 'manual',
+        headers: { 'User-Agent': 'Majlis-Updater', ...headers },
+        signal: guard.signal,
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers?.get?.('location');
+        if (!loc) throw new Error(`Redirect without location from ${cur}`);
+        try { await res.body?.cancel?.(); } catch {}
+        cur = new URL(loc, cur).toString();
+        continue;
+      }
+      return { res, finalUrl: cur, guard };
     }
-    const res = await fetchImpl(cur, {
-      method: 'GET',
-      redirect: 'manual',
-      headers: { 'User-Agent': 'Majlis-Updater', ...headers },
-      signal: AbortSignal.timeout(120000),
-    });
-    if (res.status >= 300 && res.status < 400) {
-      const loc = res.headers?.get?.('location');
-      if (!loc) throw new Error(`Redirect without location from ${cur}`);
-      cur = new URL(loc, cur).toString();
-      continue;
-    }
-    return { res, finalUrl: cur };
+    throw new Error('Too many redirects while downloading update');
+  } catch (err) {
+    if (ownsGuard) guard.clear();
+    throw err;
   }
-  throw new Error('Too many redirects while downloading update');
+}
+
+async function readResponseWithStallGuard(res, guard, onChunk) {
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        guard.touch();
+        const { done, value } = await reader.read();
+        if (done) break;
+        guard.touch();
+        if (value && value.byteLength) onChunk(Buffer.from(value));
+      }
+    } finally {
+      try { reader.releaseLock(); } catch {}
+    }
+    return;
+  }
+  guard.touch();
+  const buf = Buffer.from(await res.arrayBuffer());
+  guard.touch();
+  if (buf.length) onChunk(buf);
+}
+
+function parseContentRangeTotal(headerVal) {
+  const m = /bytes\s+\d+-\d+\/(\d+)/i.exec(String(headerVal || ''));
+  return m ? Number(m[1]) : 0;
+}
+
+async function probeDownloadTarget(initialUrl, fetchImpl, stallTimeoutMs) {
+  // Prefer HEAD to resolve GitHub -> objects.githubusercontent.com without starting a full body stream
+  const headGuard = createStallGuard(stallTimeoutMs);
+  try {
+    const { res, finalUrl } = await fetchWithAllowlistedRedirects(initialUrl, fetchImpl, {}, 5, {
+      method: 'HEAD',
+      guard: headGuard,
+      stallTimeoutMs,
+    });
+    if (res && res.ok) {
+      const total = Number(res.headers?.get?.('content-length')) || 0;
+      const acceptRanges = /bytes/i.test(String(res.headers?.get?.('accept-ranges') || ''));
+      try { await res.body?.cancel?.(); } catch {}
+      if (total > 0 && acceptRanges) {
+        return { finalUrl, total, acceptRanges: true };
+      }
+      if (total > 0) {
+        // Double-check range capability with a 1-byte GET (some CDNs omit Accept-Ranges on HEAD)
+        const rGuard = createStallGuard(stallTimeoutMs);
+        try {
+          const { res: rRes, finalUrl: rFinal } = await fetchWithAllowlistedRedirects(finalUrl, fetchImpl, { Range: 'bytes=0-0' }, 5, {
+            method: 'GET',
+            guard: rGuard,
+            stallTimeoutMs,
+          });
+          const okRange = rRes?.status === 206;
+          const rTotal = parseContentRangeTotal(rRes?.headers?.get?.('content-range')) || total;
+          try { await rRes?.body?.cancel?.(); } catch {}
+          return { finalUrl: rFinal, total: rTotal, acceptRanges: okRange };
+        } finally {
+          rGuard.clear();
+        }
+      }
+      return { finalUrl, total, acceptRanges };
+    }
+  } catch (err) {
+    // Propagate security/redirect allowlist failures immediately
+    if (/Disallowed update download URL|Too many redirects/i.test(String(err?.message || ''))) throw err;
+  } finally {
+    headGuard.clear();
+  }
+  return { finalUrl: initialUrl, total: 0, acceptRanges: false };
+}
+
+function hashFileSha256Sync(filePath) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  const buf = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let pos = 0;
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, pos);
+      if (n <= 0) break;
+      hash.update(n === buf.length ? buf : buf.subarray(0, n));
+      pos += n;
+    }
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+  return hash.digest('hex').toLowerCase();
+}
+
+function makeProgressTracker({ total, connections, initialBytes = 0, onProgress }) {
+  let received = initialBytes;
+  let lastEmit = 0;
+  const samples = [{ t: Date.now(), bytes: initialBytes }];
+  const emitNow = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastEmit < 150) return;
+    lastEmit = now;
+    samples.push({ t: now, bytes: received });
+    const cutoff = now - 2500;
+    while (samples.length > 2 && samples[0].t < cutoff) samples.shift();
+    const oldest = samples[0];
+    const dtSec = Math.max(0.15, (now - oldest.t) / 1000);
+    const speedBps = Math.max(0, Math.round((received - oldest.bytes) / dtSec));
+    const remaining = total > 0 ? Math.max(0, total - received) : 0;
+    const etaSec = total > 0 && speedBps > 0 ? Math.ceil(remaining / speedBps) : null;
+    const pct = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0;
+    onProgress({ received, total, pct, speedBps, etaSec, connections });
+  };
+  return {
+    add(n) {
+      received += n;
+      emitNow(total > 0 && received >= total);
+    },
+    setTotal(t) {
+      if (t > 0) total = t;
+    },
+    getReceived: () => received,
+    getTotal: () => total,
+    flush: () => emitNow(true),
+  };
+}
+
+function sleep(ms) {
+  return new Promise((r) => {
+    const t = setTimeout(r, ms);
+    t.unref?.();
+  });
 }
 
 async function checkForUpdates({
-  currentVersion = '0.1.2-beta',
+  currentVersion = '0.1.3-beta',
   betaChannel = true,
   fetchImpl = fetch,
   releasesUrl = GITHUB_RELEASES_URL,
@@ -163,6 +333,198 @@ async function checkForUpdates({
   };
 }
 
+async function downloadParallel({
+  finalUrl,
+  total,
+  partPath,
+  metaPath,
+  expectedHash,
+  connections,
+  stallTimeoutMs,
+  fetchImpl,
+  onProgress,
+}) {
+  const numConns = Math.max(2, Math.min(6, connections));
+  const chunkSize = Math.ceil(total / numConns);
+  let chunks = [];
+  for (let i = 0; i < numConns; i++) {
+    const start = i * chunkSize;
+    if (start >= total) break;
+    const end = Math.min(total - 1, start + chunkSize - 1);
+    chunks.push({ index: i, start, end, written: 0 });
+  }
+
+  let resuming = false;
+  try {
+    if (fs.existsSync(partPath) && fs.existsSync(metaPath) && fs.statSync(partPath).size === total) {
+      const saved = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      if (
+        saved &&
+        saved.total === total &&
+        saved.expectedHash === (expectedHash || null) &&
+        Array.isArray(saved.chunks) &&
+        saved.chunks.length === chunks.length
+      ) {
+        const valid = saved.chunks.every((c, idx) =>
+          c.start === chunks[idx].start &&
+          c.end === chunks[idx].end &&
+          Number.isInteger(c.written) &&
+          c.written >= 0 &&
+          c.written <= (c.end - c.start + 1));
+        if (valid) {
+          chunks = saved.chunks;
+          resuming = true;
+        }
+      }
+    }
+  } catch {}
+
+  const saveMeta = () => {
+    try {
+      fs.writeFileSync(metaPath, JSON.stringify({ total, expectedHash: expectedHash || null, chunks }));
+    } catch {}
+  };
+
+  const initialBytes = chunks.reduce((s, c) => s + c.written, 0);
+  const tracker = makeProgressTracker({ total, connections: chunks.length, initialBytes, onProgress });
+  if (initialBytes > 0) tracker.flush();
+
+  const fd = fs.openSync(partPath, resuming ? 'r+' : 'w+');
+  try {
+    if (!resuming) {
+      fs.ftruncateSync(fd, total);
+      saveMeta();
+    }
+
+    const downloadChunk = async (chunk) => {
+      const expectedLen = chunk.end - chunk.start + 1;
+      let lastErr = null;
+      for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+        if (chunk.written >= expectedLen) return;
+        const rangeStart = chunk.start + chunk.written;
+        const guard = createStallGuard(stallTimeoutMs);
+        try {
+          const { res } = await fetchWithAllowlistedRedirects(
+            finalUrl,
+            fetchImpl,
+            { Range: `bytes=${rangeStart}-${chunk.end}` },
+            5,
+            { method: 'GET', guard, stallTimeoutMs },
+          );
+          if (res.status !== 206) {
+            try { await res.body?.cancel?.(); } catch {}
+            throw new Error(`Expected 206 Partial Content for chunk ${chunk.index}, got ${res.status}`);
+          }
+          await readResponseWithStallGuard(res, guard, (buf) => {
+            const left = expectedLen - chunk.written;
+            if (left <= 0) return;
+            const slice = buf.length > left ? buf.subarray(0, left) : buf;
+            fs.writeSync(fd, slice, 0, slice.length, chunk.start + chunk.written);
+            chunk.written += slice.length;
+            tracker.add(slice.length);
+          });
+          saveMeta();
+          if (chunk.written >= expectedLen) return;
+          throw new Error(`Chunk ${chunk.index} ended early (${chunk.written}/${expectedLen})`);
+        } catch (err) {
+          lastErr = err;
+          saveMeta();
+          if (/Disallowed update download URL/i.test(String(err?.message || ''))) throw err;
+          if (attempt < MAX_CHUNK_RETRIES) {
+            await sleep(Math.min(4000, 400 * (2 ** attempt)));
+          }
+        } finally {
+          guard.clear();
+        }
+      }
+      throw lastErr || new Error(`Chunk ${chunk.index} failed`);
+    };
+
+    await Promise.all(chunks.map((c) => downloadChunk(c)));
+    tracker.flush();
+    return tracker.getReceived();
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
+}
+
+async function downloadSingleStream({
+  url,
+  partPath,
+  stallTimeoutMs,
+  fetchImpl,
+  onProgress,
+}) {
+  let existingSize = 0;
+  try {
+    if (fs.existsSync(partPath)) existingSize = fs.statSync(partPath).size;
+  } catch {}
+
+  let lastErr = null;
+  for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+    const reqHeaders = existingSize > 0 ? { Range: `bytes=${existingSize}-` } : {};
+    const guard = createStallGuard(stallTimeoutMs);
+    try {
+      const { res } = await fetchWithAllowlistedRedirects(url, fetchImpl, reqHeaders, 5, {
+        method: 'GET',
+        guard,
+        stallTimeoutMs,
+      });
+      if (!res.ok && res.status !== 206) {
+        if (res.status === 416 && existingSize > 0) {
+          // Existing .part is already >= remote size; restart clean
+          existingSize = 0;
+          try { fs.unlinkSync(partPath); } catch {}
+          continue;
+        }
+        throw new Error(`Download failed (${res.status})`);
+      }
+
+      const isResumed = res.status === 206 && existingSize > 0;
+      const contentLen = Number(res.headers?.get?.('content-length')) || 0;
+      const rangeTotal = parseContentRangeTotal(res.headers?.get?.('content-range'));
+      const total = rangeTotal || (isResumed ? existingSize + contentLen : contentLen);
+      const tracker = makeProgressTracker({
+        total,
+        connections: 1,
+        initialBytes: isResumed ? existingSize : 0,
+        onProgress,
+      });
+
+      const fd = fs.openSync(partPath, isResumed ? 'a' : 'w');
+      try {
+        await readResponseWithStallGuard(res, guard, (buf) => {
+          fs.writeSync(fd, buf);
+          tracker.add(buf.length);
+        });
+      } finally {
+        try { fs.closeSync(fd); } catch {}
+      }
+
+      const finalReceived = tracker.getReceived();
+      if (total > 0 && finalReceived < total) {
+        existingSize = finalReceived;
+        throw new Error(`Download ended early (${finalReceived}/${total})`);
+      }
+      tracker.setTotal(total || finalReceived);
+      tracker.flush();
+      return finalReceived;
+    } catch (err) {
+      lastErr = err;
+      if (/Disallowed update download URL|Too many redirects/i.test(String(err?.message || ''))) throw err;
+      try {
+        if (fs.existsSync(partPath)) existingSize = fs.statSync(partPath).size;
+      } catch {}
+      if (attempt < MAX_CHUNK_RETRIES) {
+        await sleep(Math.min(4000, 400 * (2 ** attempt)));
+      }
+    } finally {
+      guard.clear();
+    }
+  }
+  throw lastErr || new Error('Download failed');
+}
+
 async function downloadUpdate({
   url,
   sha256Url = null,
@@ -170,6 +532,9 @@ async function downloadUpdate({
   fileName = 'Majlis-Setup.exe',
   onProgress = () => {},
   fetchImpl = fetch,
+  stallTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
+  connections = DEFAULT_PARALLEL_CONNECTIONS,
+  minParallelBytes = DEFAULT_MIN_PARALLEL_BYTES,
 } = {}) {
   if (!isAllowedDownloadUrl(url)) {
     throw new Error('Blocked download URL host');
@@ -181,49 +546,60 @@ async function downloadUpdate({
   fs.mkdirSync(destDir, { recursive: true });
   const finalPath = path.join(destDir, safeName);
   const partPath = `${finalPath}.part`;
+  const metaPath = `${partPath}.meta.json`;
 
   let expectedHash = null;
   if (sha256Url) {
-    const { res: sumsRes } = await fetchWithAllowlistedRedirects(sha256Url, fetchImpl);
-    if (!sumsRes.ok) throw new Error(`Failed to fetch SHA256SUMS.txt (${sumsRes.status})`);
-    const sumsText = await sumsRes.text();
-    expectedHash = parseSha256Sums(sumsText, safeName);
-    if (!expectedHash) throw new Error(`Missing checksum entry for ${safeName}`);
+    const sumGuard = createStallGuard(stallTimeoutMs);
+    try {
+      const { res: sumsRes } = await fetchWithAllowlistedRedirects(sha256Url, fetchImpl, {}, 5, {
+        method: 'GET',
+        guard: sumGuard,
+        stallTimeoutMs,
+      });
+      if (!sumsRes.ok) throw new Error(`Failed to fetch SHA256SUMS.txt (${sumsRes.status})`);
+      const sumsText = await sumsRes.text();
+      expectedHash = parseSha256Sums(sumsText, safeName);
+      if (!expectedHash) throw new Error(`Missing checksum entry for ${safeName}`);
+    } finally {
+      sumGuard.clear();
+    }
   }
 
-  const { res } = await fetchWithAllowlistedRedirects(url, fetchImpl);
-  if (!res.ok) throw new Error(`Download failed (${res.status})`);
-
-  const total = Number(res.headers?.get?.('content-length')) || 0;
+  const probe = await probeDownloadTarget(url, fetchImpl, stallTimeoutMs);
   let received = 0;
-  let lastEmit = 0;
-  const hash = crypto.createHash('sha256');
-  const fd = fs.openSync(partPath, 'w');
-  try {
-    if (res.body && typeof res.body.getReader === 'function') {
-      const reader = res.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const buf = Buffer.from(value);
-        fs.writeSync(fd, buf);
-        hash.update(buf);
-        received += buf.length;
-        const now = Date.now();
-        if (now - lastEmit >= 120 || (total > 0 && received >= total)) {
-          lastEmit = now;
-          onProgress({ received, total, pct: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0 });
-        }
-      }
-    } else {
-      const buf = Buffer.from(await res.arrayBuffer());
-      fs.writeSync(fd, buf);
-      hash.update(buf);
-      received = buf.length;
-      onProgress({ received, total: total || received, pct: 100 });
+  let usedParallel = false;
+
+  if (probe.acceptRanges && probe.total >= minParallelBytes && connections > 1) {
+    try {
+      received = await downloadParallel({
+        finalUrl: probe.finalUrl,
+        total: probe.total,
+        partPath,
+        metaPath,
+        expectedHash,
+        connections,
+        stallTimeoutMs,
+        fetchImpl,
+        onProgress,
+      });
+      usedParallel = true;
+    } catch (err) {
+      if (/Disallowed update download URL/i.test(String(err?.message || ''))) throw err;
+      // Clean partial parallel state and fall back to resumable single-stream download
+      try { fs.unlinkSync(metaPath); } catch {}
+      try { fs.unlinkSync(partPath); } catch {}
     }
-  } finally {
-    try { fs.closeSync(fd); } catch {}
+  }
+
+  if (!usedParallel) {
+    received = await downloadSingleStream({
+      url: probe.finalUrl || url,
+      partPath,
+      stallTimeoutMs,
+      fetchImpl,
+      onProgress,
+    });
   }
 
   // Verify Windows PE header ("MZ") before trusting or moving the installer
@@ -233,21 +609,31 @@ async function downloadUpdate({
     const n = fs.readSync(checkFd, magic, 0, 2, 0);
     if (n < 2 || magic[0] !== 0x4d || magic[1] !== 0x5a) {
       try { fs.unlinkSync(partPath); } catch {}
+      try { fs.unlinkSync(metaPath); } catch {}
       throw new Error('Downloaded installer is not a valid Windows PE executable');
     }
   } finally {
     try { fs.closeSync(checkFd); } catch {}
   }
 
-  const actualHash = hash.digest('hex').toLowerCase();
+  const actualHash = hashFileSha256Sync(partPath);
   if (expectedHash && actualHash !== expectedHash) {
     try { fs.unlinkSync(partPath); } catch {}
+    try { fs.unlinkSync(metaPath); } catch {}
     throw new Error(`SHA-256 verification failed (${actualHash} != ${expectedHash})`);
   }
 
+  try { fs.unlinkSync(metaPath); } catch {}
   fs.renameSync(partPath, finalPath);
-  onProgress({ received, total: total || received, pct: 100 });
-  return { ok: true, filePath: finalPath, sha256: actualHash, verified: !!expectedHash, size: received };
+  onProgress({ received, total: probe.total || received, pct: 100, speedBps: 0, etaSec: 0, connections: usedParallel ? Math.max(2, Math.min(6, connections)) : 1 });
+  return {
+    ok: true,
+    filePath: finalPath,
+    sha256: actualHash,
+    verified: !!expectedHash,
+    size: received,
+    parallel: usedParallel,
+  };
 }
 
 function installDownloadedUpdate(filePath, { app = null, spawnImpl = spawn } = {}) {
@@ -281,6 +667,8 @@ function installDownloadedUpdate(filePath, { app = null, spawnImpl = spawn } = {
 module.exports = {
   GITHUB_RELEASES_URL,
   ALLOWED_DOWNLOAD_HOSTS,
+  DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_PARALLEL_CONNECTIONS,
   parseSemver,
   compareSemver,
   isAllowedDownloadUrl,

@@ -103,6 +103,139 @@ test('phase4 updater: downloadUpdate verifies MZ PE header, SHA-256 checksum, an
   );
 });
 
+test('updater: multi-connection Range chunking retries transient chunk drop, streams speed/ETA, and verifies SHA-256', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'majlis-upd-par-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const payload = Buffer.alloc(128 * 1024);
+  payload[0] = 0x4d; // 'M'
+  payload[1] = 0x5a; // 'Z'
+  for (let i = 2; i < payload.length; i++) payload[i] = (i * 31) & 0xff;
+  const expectedSha = crypto.createHash('sha256').update(payload).digest('hex');
+
+  let rangeCalls = 0;
+  let droppedOnce = false;
+  const progressEvents = [];
+
+  const mockFetch = async (u, init = {}) => {
+    const urlStr = String(u);
+    if (urlStr.endsWith('SHA256SUMS.txt')) {
+      return { ok: true, status: 200, headers: new Headers(), text: async () => `${expectedSha}  Majlis-Setup.exe\n` };
+    }
+    if (urlStr.includes('github.com/')) {
+      return {
+        ok: false,
+        status: 302,
+        headers: new Headers({ location: 'https://objects.githubusercontent.com/assets/Majlis-Setup.exe' }),
+      };
+    }
+    if ((init.method || 'GET').toUpperCase() === 'HEAD') {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-length': String(payload.length), 'accept-ranges': 'bytes' }),
+      };
+    }
+    const rangeHdr = init.headers?.Range || init.headers?.range || '';
+    const m = /^bytes=(\d+)-(\d+)$/i.exec(rangeHdr);
+    if (m) {
+      rangeCalls++;
+      const start = Number(m[1]);
+      const end = Number(m[2]);
+      // Simulate one mid-chunk network drop on the 2nd chunk to verify per-chunk retry + resume
+      if (!droppedOnce && rangeCalls === 2) {
+        droppedOnce = true;
+        const partial = payload.subarray(start, Math.min(end + 1, start + 1024));
+        let sent = false;
+        return {
+          ok: true,
+          status: 206,
+          headers: new Headers({ 'content-length': String(end - start + 1), 'content-range': `bytes ${start}-${end}/${payload.length}` }),
+          body: {
+            getReader() {
+              return {
+                async read() {
+                  if (!sent) { sent = true; return { done: false, value: partial }; }
+                  throw new Error('ECONNRESET');
+                },
+                releaseLock() {},
+              };
+            },
+          },
+        };
+      }
+      const slice = payload.subarray(start, end + 1);
+      return {
+        ok: true,
+        status: 206,
+        headers: new Headers({ 'content-length': String(slice.length), 'content-range': `bytes ${start}-${end}/${payload.length}` }),
+        arrayBuffer: async () => slice,
+      };
+    }
+    return { ok: true, status: 200, headers: new Headers({ 'content-length': String(payload.length) }), arrayBuffer: async () => payload };
+  };
+
+  const out = await downloadUpdate({
+    url: 'https://github.com/ds1s1s1/majlis/releases/download/v0.1.2-beta/Majlis-Setup.exe',
+    sha256Url: 'https://github.com/ds1s1s1/majlis/releases/download/v0.1.2-beta/SHA256SUMS.txt',
+    destDir: dir,
+    fetchImpl: mockFetch,
+    connections: 4,
+    minParallelBytes: 16 * 1024,
+    onProgress: (p) => progressEvents.push(p),
+  });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.parallel, true);
+  assert.equal(out.verified, true);
+  assert.equal(out.sha256, expectedSha);
+  assert.equal(out.size, payload.length);
+  assert.ok(rangeCalls >= 5, `expected >= 5 Range calls (4 chunks + 1 retry), got ${rangeCalls}`);
+  assert.equal(fs.readFileSync(out.filePath).equals(payload), true);
+  assert.ok(progressEvents.some((p) => typeof p.speedBps === 'number' && p.connections === 4));
+});
+
+test('updater: per-chunk inactivity timeout resets while data flows (no fixed total timeout)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'majlis-upd-flow-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const chunks = [Buffer.from([0x4d, 0x5a, 1, 2]), Buffer.from([3, 4, 5, 6]), Buffer.from([7, 8, 9, 10]), Buffer.from([11, 12, 13, 14])];
+  const full = Buffer.concat(chunks);
+  // Total duration ~280ms > stallTimeoutMs (120ms), proving timer resets per chunk instead of fixed total duration
+  const slowSteadyFetch = async (_u, init = {}) => {
+    if ((init.method || 'GET').toUpperCase() === 'HEAD') return { ok: false, status: 405, headers: new Headers() };
+    let idx = 0;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-length': String(full.length) }),
+      body: {
+        getReader() {
+          return {
+            async read() {
+              if (idx >= chunks.length) return { done: true };
+              await new Promise((r) => setTimeout(r, 70));
+              if (init.signal?.aborted) throw init.signal.reason || new Error('aborted');
+              return { done: false, value: chunks[idx++] };
+            },
+            releaseLock() {},
+          };
+        },
+      },
+    };
+  };
+
+  const out = await downloadUpdate({
+    url: 'https://objects.githubusercontent.com/assets/Majlis-Setup.exe',
+    destDir: dir,
+    fetchImpl: slowSteadyFetch,
+    stallTimeoutMs: 160,
+    minParallelBytes: 1024 * 1024,
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.size, full.length);
+});
+
 test('phase4 security: scrubDiagnosticsReport redacts home dirs, Windows/POSIX paths, emails, and URL credentials', () => {
   const dirty = {
     pathWin: 'C:\\Users\\AliceUser\\AppData\\Roaming\\Majlis\\config.json',

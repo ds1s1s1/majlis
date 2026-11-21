@@ -28,10 +28,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
     PostQuitMessage, RegisterClassW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
     TranslateMessage, GWL_EXSTYLE, GW_HWNDPREV, HTCAPTION, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    MSG, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WM_ACTIVATE,
-    WM_APP, WM_DESTROY, WM_EXITSIZEMOVE, WM_MOUSEACTIVATE, WM_MOVE, WM_NCLBUTTONDOWN,
-    WM_SHOWWINDOW, WM_SIZE, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE,
-    WS_EX_TOPMOST, WS_POPUP,
+    MSG, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    WM_ACTIVATE, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEACTIVATE, WM_MOVE,
+    WM_NCLBUTTONDOWN, WM_SHOWWINDOW, WM_SIZE, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_CLIPSIBLINGS,
+    WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
 };
 
 #[link(name = "winmm")]
@@ -132,7 +132,7 @@ unsafe fn sync_layout_now(st: SyncState) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS,
         );
         if let Some(h) = hud {
             let _ = SetWindowPos(
@@ -157,7 +157,7 @@ unsafe fn sync_layout_now(st: SyncState) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS,
         );
         if let Some(h) = hud {
             let _ = SetWindowPos(
@@ -193,7 +193,7 @@ unsafe fn sync_layout_now(st: SyncState) {
             }
         }
         if (GetWindowLongW(video, GWL_EXSTYLE) & (WS_EX_TOPMOST.0 as i32)) != 0 {
-            let _ = SetWindowPos(video, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(video, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         }
     }
 
@@ -234,7 +234,7 @@ unsafe fn sync_layout_now(st: SyncState) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS,
         );
         if let Some(hud_win) = hud {
             let _ = SetWindowPos(hud_win, Some(hud_after), pt.x, pt.y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -268,7 +268,7 @@ unsafe fn sync_layout_now(st: SyncState) {
                 vy,
                 vw,
                 vh,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS,
             ) else {
                 return false;
             };
@@ -276,10 +276,10 @@ unsafe fn sync_layout_now(st: SyncState) {
         })();
         if !deferred {
             let _ = SetWindowPos(hud_win, Some(hud_after), pt.x, pt.y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let _ = SetWindowPos(video, Some(hud_win), vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ = SetWindowPos(video, Some(hud_win), vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
         }
     } else {
-        let _ = SetWindowPos(video, Some(hud_after), vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let _ = SetWindowPos(video, Some(hud_after), vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
     }
 }
 
@@ -293,7 +293,7 @@ unsafe extern "system" fn main_subclass_proc(
 ) -> LRESULT {
     let res = DefSubclassProc(hwnd, msg, wparam, lparam);
     match msg {
-        WM_WINDOWPOSCHANGED | WM_SIZE | WM_MOVE | WM_SHOWWINDOW | WM_ACTIVATE | WM_EXITSIZEMOVE => {
+        WM_WINDOWPOSCHANGED | WM_SIZE | WM_MOVE | WM_SHOWWINDOW | WM_ACTIVATE | WM_EXITSIZEMOVE | WM_DPICHANGED => {
             if let Some(st) = get_sync_state(ref_data) {
                 sync_layout_now(st);
             }
@@ -1104,6 +1104,25 @@ impl NativeMpvPlayer {
     }
 
     #[napi]
+    pub fn command_async(&self, args: Vec<String>) -> Result<()> {
+        let _g = self.cmd_lock.lock().unwrap();
+        if self.shared.stopping.load(Ordering::SeqCst) {
+            return Err(Error::from_reason("mpv stopped"));
+        }
+        let cstrs: Vec<CString> = args
+            .iter()
+            .map(|s| CString::new(s.as_str()).map_err(|e| Error::from_reason(e.to_string())))
+            .collect::<Result<Vec<_>>>()?;
+        let mut ptrs: Vec<*const c_char> = cstrs.iter().map(|s| s.as_ptr()).collect();
+        ptrs.push(null());
+        let rc = unsafe { (self.shared.api.command_async)(self.shared.ctx, 0, ptrs.as_mut_ptr()) };
+        if rc < 0 {
+            return Err(Error::from_reason(format!("mpv command_async error ({rc})")));
+        }
+        Ok(())
+    }
+
+    #[napi]
     pub fn set_property(&self, name: String, value_str: String) -> Result<()> {
         let _g = self.cmd_lock.lock().unwrap();
         if self.shared.stopping.load(Ordering::SeqCst) {
@@ -1139,7 +1158,8 @@ impl NativeMpvPlayer {
     #[napi]
     pub fn release_media(&self) {
         self.set_visible(false);
-        let _ = self.command(vec!["stop".to_string()]);
+        // Non-blocking stop prevents slow network/demuxer teardown from stalling Electron's UI thread.
+        let _ = self.command_async(vec!["stop".to_string()]);
     }
 
     #[napi]

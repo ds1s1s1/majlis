@@ -9,6 +9,14 @@ import { Chips } from '../ui/Grid';
 
 const configureUrl = (url: string) => url.replace(/\/manifest\.json$/, '/configure');
 const STREAMING_CATALOGS_URL = 'https://catalog.ers.pw/manifest.json';
+const UI_ADULT_RE = /(?:^|[^a-z0-9])(nsfw|porn|porno|pornhub|xvideos|xnxx|xhamster|redtube|youporn|spankbang|eporner|brazzers|chaturbate|onlyfans|xxx|hentai|hanime|nhentai|erotica|erotic|jav|18\+|21\+)(?:$|[^a-z0-9])/i;
+const isSafeStoreAddon = (a: StoreAddon) => {
+  const raw = a as StoreAddon & { nsfw?: boolean; adult?: boolean };
+  if (raw.nsfw || raw.adult || a.manifest?.behaviorHints?.adult) return false;
+  if ((a.categories || []).some((c) => /nsfw|adult|18\+|xxx|porn|hentai/i.test(c))) return false;
+  const hay = [a.slug, a.manifestUrl, a.manifest?.id, a.manifest?.name, a.manifest?.description].filter(Boolean).join(' ');
+  return !UI_ADULT_RE.test(hay);
+};
 
 export function DeepLinkAddonModal() {
   const t = useT(), { toast } = useHost(), qc = useQueryClient();
@@ -114,10 +122,12 @@ export function Addons() {
     return acc;
   }, { up: 0, slow: 0, down: 0 });
 
+  const safeStoreAddons = useMemo(() => (store.data?.addons || []).filter(isSafeStoreAddon), [store.data?.addons]);
+  const safeCategories = useMemo(() => (cats.data || []).filter((c) => !/nsfw|adult|18\+|xxx|porn|hentai/i.test(`${c.slug} ${c.name}`)), [cats.data]);
+
   const heroAddon = useMemo(() => {
-    const list = store.data?.addons || [];
-    return list.find((a) => !have.has(a.manifestUrl) && a.manifest?.background) || list.find((a) => !have.has(a.manifestUrl)) || list[0] || null;
-  }, [store.data?.addons, have]);
+    return safeStoreAddons.find((a) => !have.has(a.manifestUrl) && a.manifest?.background) || safeStoreAddons.find((a) => !have.has(a.manifestUrl)) || safeStoreAddons[0] || null;
+  }, [safeStoreAddons, have]);
 
   const streamingInstalled = have.has(STREAMING_CATALOGS_URL) || (installed.data || []).some((x) => /streaming-catalogs|catalog\.ers\.pw|cyberflix/i.test(x.url) || /streaming.?catalogs/i.test(x.manifest?.id || ''));
 
@@ -242,10 +252,10 @@ export function Addons() {
           <input value={text} onChange={(e) => setText(e.target.value)} placeholder={t('search')} className="flex-1 text-sm" />
         </label>
       </div>
-      <div className="mb-5"><Chips value={category} onChange={setCategory} options={[{ id: null, label: t('all') }, ...(cats.data || []).map((c) => ({ id: c.slug, label: c.name }))]} /></div>
+      <div className="mb-5"><Chips value={category} onChange={setCategory} options={[{ id: null, label: t('all') }, ...safeCategories.map((c) => ({ id: c.slug, label: c.name }))]} /></div>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-4">
         {store.isLoading ? Array.from({ length: 9 }, (_, i) => <div key={i} className="skel h-44 rounded-2xl" />) : null}
-        {(store.data?.addons || []).map((a) => (
+        {safeStoreAddons.map((a) => (
           <StoreCard
             key={a.slug}
             a={a}
